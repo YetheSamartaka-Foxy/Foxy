@@ -71,17 +71,14 @@ pub fn split_additional_launch_params(params: &str) -> Vec<String> {
     args
 }
 
-/// Whether `params` already carries `token` as a standalone argument. Flags
-/// are case-insensitive for the games Foxy launches.
+/// Treat launch flags case-insensitively when checking for `token`.
 pub fn has_launch_param_token(params: &str, token: &str) -> bool {
     split_additional_launch_params(params)
         .iter()
         .any(|arg| arg.eq_ignore_ascii_case(token))
 }
 
-/// Add or remove a standalone flag in an additional-parameters string,
-/// keeping every other argument. Arguments containing whitespace are quoted
-/// again so the string splits back to the same argument list.
+/// Preserve other arguments and re-quote whitespace-containing arguments after changing a standalone flag.
 pub fn set_launch_param_token(params: &str, token: &str, enabled: bool) -> String {
     let mut args = split_additional_launch_params(params);
     let present = args.iter().any(|arg| arg.eq_ignore_ascii_case(token));
@@ -128,8 +125,7 @@ pub fn apply_repo_client_parameters(repo: &mut Repository, params: &str) {
     repo.additional_params = additional.join(" ");
 }
 
-/// The `gameBuild` of a custom game's `repo.json`. Both names come from the
-/// server, so anything that could leave the repository folder is refused.
+/// Reject custom-game build names that could escape the repository folder.
 pub fn repo_json_game_build(json: &Value) -> Option<RepositoryGameBuild> {
     let value = json.get("gameBuild")?;
     let addon = value.get("modName")?.as_str()?.trim();
@@ -151,9 +147,7 @@ pub fn repo_json_game_build(json: &Value) -> Option<RepositoryGameBuild> {
     })
 }
 
-/// Record the repository's game build and drop it from every addon list, so
-/// it can neither be shown nor disabled. Sync then falls back to the
-/// manifest's own `enabled` flag for it, which the server always sets.
+/// Exclude the published game-build folder from addon lists; syncing uses its manifest `enabled` default.
 pub fn apply_repo_game_build(repo: &mut Repository, game_build: Option<RepositoryGameBuild>) {
     repo.game_build = game_build;
     strip_game_build_addon(repo);
@@ -172,9 +166,7 @@ pub fn strip_game_build_addon(repo: &mut Repository) {
     }
 }
 
-/// Locate the DLC list in a `repo.json`. Foxy publishes `dlcContent`; Swifty
-/// repositories carry the same information as `requiredDLCs` (casing varies
-/// between Swifty versions).
+/// DLC lists use Foxy's `dlcContent` or Swifty's case-variable `requiredDLCs`.
 pub fn repo_json_dlc_content_value(json: &Value) -> Option<&Value> {
     if let Some(value) = json.get("dlcContent") {
         return Some(value);
@@ -296,11 +288,7 @@ pub fn sanitize_additional_folder_alias(alias: &str) -> String {
     alias.trim().to_string()
 }
 
-/// Merge a remote-derived addon list with the existing local list so that
-/// the user's enabled/disabled choice for each addon survives a `repo.json`
-/// refresh. Addons no longer present remotely are dropped, newly added
-/// remote addons inherit the remote default, and names are matched
-/// case-insensitively because addon directory casing is not guaranteed.
+/// Merge remote addon lists while preserving local enabled choices; drop removed addons and apply remote defaults to new ones.
 pub fn merge_remote_addon_list(
     remote: Vec<(String, bool)>,
     local: &[(String, bool)],
@@ -513,12 +501,7 @@ pub fn sanitize_external_addon_favorites(favorites: &mut Vec<String>) {
     });
 }
 
-/// Returns `true` if the given filesystem path passes through a OneDrive sync
-/// folder.
-///
-/// OneDrive's background file syncing can cause transient `PermissionDenied`
-/// errors (Windows OS error 5) when the app tries to read, write, or delete
-/// files that OneDrive is simultaneously uploading.
+/// OneDrive background syncing can cause transient Windows permission errors during file operations.
 pub fn path_is_inside_onedrive(path: &str) -> bool {
     path.replace('\\', "/").split('/').any(|segment| {
         let lower = segment.trim().to_lowercase();
@@ -537,8 +520,7 @@ pub fn sanitize_settings_paths(settings: &mut SettingsViewState) {
     settings.temp_directory = sanitize_user_path_value(&settings.temp_directory);
     settings.backup_directory = sanitize_user_path_value(&settings.backup_directory);
 
-    // Silently clear any paths that pass through a OneDrive sync folder to
-    // prevent transient file-lock errors during downloads and launches.
+    // Clear OneDrive paths to avoid transient file-lock errors during downloads and launches.
     if path_is_inside_onedrive(&settings.arma3_directory) {
         log::warn!(
             "Clearing Arma 3 directory because it is inside a OneDrive folder: {}",
@@ -617,15 +599,6 @@ pub fn normalize_settings_launch_behavior(settings: &mut SettingsViewState) {
     }
 }
 
-/// Push `-profiles`/`-name` launch arguments.
-///
-/// Arma 3 treats `-name=<profile>` as "load the named profile from the
-/// named-profiles root, creating a fresh one (default settings, default
-/// keybinds) when it does not exist there". Passing `-name` for the default
-/// profile in `Documents\Arma 3`, or forwarding that vanilla directory as
-/// `-profiles`, therefore silently clones the player into a brand-new empty
-/// profile. Both are filtered out here; `-name` is only passed when the
-/// selected profile actually exists where Arma 3 will look for it.
 pub fn push_arma3_profile_launch_args(
     settings: &SettingsViewState,
     repo: &Repository,
@@ -656,7 +629,7 @@ pub fn push_arma3_profile_launch_args(
     };
 
     if let Some(custom_dir) = custom_profiles_dir {
-        // With -profiles active, -name resolves against <dir>\Users\<name>.
+        // With `-profiles`, Arma resolves `-name` under `<dir>\\Users\\<name>`.
         let exists_in_custom_dir = detected_profiles.iter().any(|profile| {
             profile.name.eq_ignore_ascii_case(arma3_profile)
                 && crate::core::arma3_profiles::path_is_under(&profile.path, custom_dir)
@@ -680,11 +653,7 @@ pub fn push_arma3_profile_launch_args(
         .any(|profile| profile.is_default && profile.name.eq_ignore_ascii_case(arma3_profile));
 
     if matches_default {
-        // The default profile is what Arma 3 loads without -name. Passing
-        // -name here would make the game create an empty duplicate under
-        // "Arma 3 - Other Profiles". When a duplicate named profile also
-        // exists (a leftover of that exact accident), still prefer the
-        // default profile because it holds the user's real settings.
+        // Passing -name for the default profile makes Arma create an empty duplicate.
         log::info!(
             "Selected Arma 3 profile '{}' is the default profile; omitting -name so the game loads it directly",
             arma3_profile
@@ -701,9 +670,7 @@ pub fn push_arma3_profile_launch_args(
 
 pub fn sanitize_repository_paths(repo: &mut Repository) {
     repo.path = sanitize_user_path_value(&repo.path);
-    // A repository instance is keyed by `(remote_url, local_path)`; stray
-    // whitespace around a configured address makes every DB lookup miss its own
-    // row, so repair it on load instead of carrying it into the key.
+    // Trim configured addresses before using `(remote_url, local_path)` as the repository-instance key.
     repo.address = repo.address.trim().to_string();
     if let Some(entry_address) = repo.repository_space_entry_address.as_mut() {
         *entry_address = entry_address.trim().to_string();

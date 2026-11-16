@@ -9,18 +9,8 @@ use crate::core::models::repository::load_repository_by_remote_url_and_local_pat
 use crate::core::tasks::init_database::read_chunk_ids;
 use crate::core::utils::format::sanitize_log_url;
 
-/// Write the caller's effective addon selection into `addons.enabled` for one
-/// repository instance.
-///
-/// Quick scan readiness, the repository content-hash rollup and the pending
-/// update scope all read `addons.enabled` as the "is this addon in scope"
-/// signal, but until now it was only written during a remote metadata rebuild.
-/// A rebuild is skipped whenever the remote checksum is unchanged, so a
-/// deselected optional addon could keep `enabled = 1` forever and hold the
-/// whole repository out of the quick scan fast path.
-///
-/// `overrides` maps lowercase addon names to their effective enabled state.
-/// Returns the number of addon rows whose stored value changed.
+/// Keep durable addon selection aligned with DB-only readiness, rollups, and pending-update scope.
+/// Remote refresh may be skipped when its checksum is unchanged.
 pub(crate) async fn persist_repository_addon_enabled_states(
     context: Arc<FoxyContext>,
     repository_url: &str,

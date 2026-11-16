@@ -260,8 +260,7 @@ pub fn migrate_ledger(mapping_path: &Path, ledger_dir: &Path) -> Result<Value> {
         let old = entry["legacy_hash"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing legacy_hash"))?;
-        // The PowerShell emits the resolved case rather than a hash, so the JCS
-        // side of the mapping is derived here by the implementation that will use it.
+
         let new = match entry["jcs_hash"].as_str() {
             Some(new) => new.to_owned(),
             None => case::hash(

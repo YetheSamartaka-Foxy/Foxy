@@ -1,6 +1,5 @@
 use serde_json::{Map, Value};
 
-/// Lenient `key=value` extraction for legacy prose log lines.
 pub fn key_values(line: &str) -> Value {
     let mut result = Map::new();
     for token in line.split_whitespace() {
@@ -161,10 +160,6 @@ fn number_or_text(raw: &str) -> Value {
         .map_or_else(|| Value::String(raw.to_owned()), Value::from)
 }
 
-/// Every `SOL op=...` record of the slice, in log order, with the raw line
-/// under `raw`. A GUI-harness slice carries each event twice (the file line
-/// and the driver's un-timestamped echo); only the canonical event lines are
-/// parsed, so two genuine repeated operations still yield two records.
 pub fn parse(text: &str) -> Vec<Value> {
     super::event_lines(text)
         .filter_map(|line| {
@@ -198,9 +193,7 @@ pub fn records(records: &[Value], name: &str) -> Value {
         .into()
 }
 
-/// Totals over every record of `name`: run count, summed `actual_s` (service
-/// time, not makespan), summed `work_bytes`, the derived rate, and the set of
-/// outcomes. Null when the operation never logged.
+/// Totals sum service time, not makespan; an unlogged operation stays null.
 pub fn aggregate(records: &[Value], name: &str) -> Value {
     let rows: Vec<&Value> = records.iter().filter(|row| row["op"] == name).collect();
     if rows.is_empty() {

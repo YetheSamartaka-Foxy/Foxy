@@ -91,18 +91,12 @@ static ET_BUNDLE: Lazy<HashMap<String, String>> =
 
 static CURRENT_LANGUAGE: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new("en".to_string()));
 
-// ---------------------------------------------------------------------------
-// Locale formatting configuration
-// ---------------------------------------------------------------------------
-
-/// Text direction for a locale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextDirection {
     Ltr,
     Rtl,
 }
 
-/// Duration unit abbreviations per locale.
 #[derive(Clone, Debug)]
 pub struct DurationAbbrevs {
     pub days: &'static str,
@@ -112,7 +106,6 @@ pub struct DurationAbbrevs {
     pub milliseconds: &'static str,
 }
 
-/// Per-locale formatting rules.
 #[derive(Clone, Debug)]
 pub struct LocaleFormat {
     pub decimal_separator: char,
@@ -738,11 +731,6 @@ static ET_FORMAT: LocaleFormat = LocaleFormat {
     text_direction: TextDirection::Ltr,
 };
 
-// ---------------------------------------------------------------------------
-// Pluralization
-// ---------------------------------------------------------------------------
-
-/// CLDR plural categories supported by our locales.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PluralCategory {
     One,
@@ -750,7 +738,7 @@ pub enum PluralCategory {
     Other,
 }
 
-/// Returns the CLDR plural category for the given language and count.
+/// Returns the CLDR plural category used to select a localized message variant.
 pub fn plural_category(language: &str, count: u64) -> PluralCategory {
     match language {
         // Slavic: one / few (2-4) / other
@@ -840,10 +828,6 @@ pub fn plural_category(language: &str, count: u64) -> PluralCategory {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Collation
-// ---------------------------------------------------------------------------
 
 use icu_collator::options::CollatorOptions;
 use icu_collator::{CollatorBorrowed, CollatorPreferences};
@@ -951,10 +935,6 @@ fn resolve_collator(language: &str) -> &'static CollatorBorrowed<'static> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// I18n struct
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Debug)]
 pub struct I18n {
     language: String,
@@ -976,8 +956,6 @@ impl I18n {
         }
     }
 
-    // -- translation --------------------------------------------------------
-
     pub fn tr(&self, key: &str) -> String {
         lookup_translation(&self.language, key)
     }
@@ -991,8 +969,6 @@ impl I18n {
         text
     }
 
-    /// Look up the plural-specific variant of `key` for `count`, then replace
-    /// `{count}` in the result.
     pub fn tr_plural(&self, key: &str, count: u64) -> String {
         let category = plural_category(&self.language, count);
         let suffixed_key = plural_suffixed_key(key, category);
@@ -1001,7 +977,6 @@ impl I18n {
         text
     }
 
-    /// Like `tr_plural` but with additional named replacements.
     pub fn tr_plural_fmt(&self, key: &str, count: u64, replacements: &[(&str, String)]) -> String {
         let mut text = self.tr_plural(key, count);
         for (name, value) in replacements {
@@ -1012,27 +987,10 @@ impl I18n {
     }
 }
 
-// ---------------------------------------------------------------------------
-// RTL-aware layout helpers
-// ---------------------------------------------------------------------------
-//
-// RTL: known limitation - egui (as of 0.33.x) does not provide built-in
-// bidirectional text rendering. Mixed RTL/LTR text within a single label will
-// not reorder correctly, and TextEdit does not support RTL cursor movement.
-// Full RTL support would require upstream egui changes or a Bidi shaping
-// layer. The helpers below cover *layout direction* (widget placement and
-// positional anchoring) so that adding an RTL locale in the future only
-// requires setting `TextDirection::Rtl` in `LocaleFormat`.
-
-/// Returns true if the current global locale is RTL.
 pub fn is_rtl() -> bool {
     let lang = current_language();
     resolve_locale_format(&lang).text_direction == TextDirection::Rtl
 }
-
-// ---------------------------------------------------------------------------
-// Locale format resolution
-// ---------------------------------------------------------------------------
 
 fn resolve_locale_format(language: &str) -> &'static LocaleFormat {
     match language {
@@ -1089,16 +1047,11 @@ fn plural_suffixed_key(key: &str, category: PluralCategory) -> String {
     format!("{key}{suffix}")
 }
 
-// ---------------------------------------------------------------------------
-// Formatting implementation
-// ---------------------------------------------------------------------------
-
 fn fmt_number_with_locale(value: f64, decimals: usize, lf: &LocaleFormat) -> String {
     let raw = format!("{:.prec$}", value, prec = decimals);
-    // Replace the decimal point with the locale separator.
+
     let raw = raw.replace('.', &lf.decimal_separator.to_string());
 
-    // Insert thousands separators into the integer part.
     if let Some(dot_pos) = raw.find(lf.decimal_separator) {
         let (int_part, frac_part) = raw.split_at(dot_pos);
         let grouped = insert_thousands(int_part, lf.thousands_separator);
@@ -1190,10 +1143,6 @@ fn fmt_duration_with_locale(duration: Duration, with_ms: bool, lf: &LocaleFormat
     }
 }
 
-// ---------------------------------------------------------------------------
-// Free functions (use CURRENT_LANGUAGE)
-// ---------------------------------------------------------------------------
-
 fn current_locale_format() -> &'static LocaleFormat {
     let lang = current_language();
     resolve_locale_format(&lang)
@@ -1246,11 +1195,7 @@ pub fn locale_compare(a: &str, b: &str) -> Ordering {
     let lang = current_language();
     resolve_collator(&lang).compare(a, b)
 }
-// ---------------------------------------------------------------------------
-// Language resolution
-// ---------------------------------------------------------------------------
 
-/// All language codes that have a bundled locale file.
 const SUPPORTED_LANGUAGES: &[&str] = &[
     "ar", "bg", "bn", "cs", "da", "de", "el", "en", "es", "et", "fa", "fi", "fr", "he", "hi", "hr",
     "hu", "id", "it", "ja", "ko", "lt", "lv", "nb", "nl", "pl", "pt", "pt-BR", "ro", "ru", "sk",

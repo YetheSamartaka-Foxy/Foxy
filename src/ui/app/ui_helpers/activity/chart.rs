@@ -6,7 +6,6 @@ const PING_SECONDS: f64 = 1.6;
 const AREA_TOP_OPACITY: f32 = 0.3;
 const AREA_BOTTOM_OPACITY: f32 = 0.02;
 
-/// Fills under a chart line in the line's color, fading out towards `baseline`.
 pub(crate) fn paint_area_under(painter: &Painter, line: &[Pos2], baseline: f32, color: Color32) {
     if line.len() < 2 {
         return;
@@ -19,7 +18,6 @@ pub(crate) fn paint_area_under(painter: &Painter, line: &[Pos2], baseline: f32, 
     )));
 }
 
-/// Marks the newest sample of a live chart: a dot that sends out a fading ring.
 pub(crate) fn paint_live_marker(ui: &Ui, painter: &Painter, center: Pos2, color: Color32) {
     let motion = Motion::of(ui);
     painter.circle_filled(center, 3.0, color);
@@ -35,7 +33,6 @@ pub(crate) fn paint_live_marker(ui: &Ui, painter: &Painter, center: Pos2, color:
     motion.keep_alive(ui, Rect::from_center_size(center, Vec2::splat(24.0)));
 }
 
-/// A strip of quads from each line point down to `baseline`.
 fn area_mesh(line: &[Pos2], baseline: f32, top: Color32, bottom: Color32) -> Mesh {
     let mut mesh = Mesh::default();
     mesh.reserve_vertices(line.len() * 2);

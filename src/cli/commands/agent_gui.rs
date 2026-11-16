@@ -39,7 +39,6 @@ pub fn run_agent_gui_command(
     cli: &CliArgs,
     command: AgentGuiCommand,
 ) -> Result<CommandSuccess, CommandError> {
-    // Client-only orchestration commands never reach the driver.
     match command {
         AgentGuiCommand::Exec(args) => run_exec(cli, args),
         AgentGuiCommand::Scenario(args) => run_scenario(cli, args),
@@ -104,7 +103,6 @@ fn project_response_data(
     field: Option<&str>,
 ) -> Result<Value, serde_json::Error> {
     if let Some(path) = field {
-        // `--field` projects into the inner payload (and implies flat).
         return Ok(dotted_lookup(&response.data, path).unwrap_or(Value::Null));
     }
     if flat {
@@ -113,7 +111,6 @@ fn project_response_data(
     serde_json::to_value(response)
 }
 
-/// Look up a dotted path (`nodes.0.rect`) inside a JSON value via JSON Pointer.
 fn dotted_lookup(value: &Value, dotted: &str) -> Option<Value> {
     if dotted.is_empty() {
         return Some(value.clone());
@@ -595,7 +592,7 @@ fn to_driver_command(
                 )?,
                 None => Value::Object(serde_json::Map::new()),
             };
-            // Merge the convenience flags into the params object.
+
             if let Value::Object(map) = &mut params_value {
                 if let Some(index) = repo_index {
                     map.insert("repo-index".to_string(), serde_json::json!(index));
@@ -697,7 +694,7 @@ fn to_driver_command(
             cancel,
         },
         AgentGuiCommand::Close => DriverCommand::Close,
-        // Client-only commands are intercepted before this point.
+
         AgentGuiCommand::Exec(_) | AgentGuiCommand::Scenario(_) | AgentGuiCommand::Fixture(_) => {
             return Err(CommandError::validation(
                 "agent-gui",
@@ -770,11 +767,6 @@ fn wait_condition(args: AgentGuiWaitArgs) -> Result<AgentGuiWaitCondition, Comma
     ))
 }
 
-// ── Client-only orchestration commands ─────────────────────────────────────
-
-/// Persistent connection: stream newline-delimited command JSON from stdin over
-/// one socket, printing one response line per command. Amortizes the
-/// per-process connect + token handshake across a whole interactive session.
 fn run_exec(cli: &CliArgs, args: AgentGuiExecArgs) -> Result<CommandSuccess, CommandError> {
     let action = "agent-gui.exec".to_string();
     if !args.stdin {
@@ -851,9 +843,6 @@ fn run_exec(cli: &CliArgs, args: AgentGuiExecArgs) -> Result<CommandSuccess, Com
     })
 }
 
-/// Project one streamed exec response line for `--flat`/`--field`. Falls back to
-/// the raw line if it cannot be parsed (so the caller still sees the driver
-/// output verbatim).
 fn project_exec_line(line: &str, flat: bool, field: Option<&str>, toon_output: bool) -> String {
     if !flat && field.is_none() && !toon_output {
         return line.to_string();
@@ -876,10 +865,6 @@ fn project_exec_line(line: &str, flat: bool, field: Option<&str>, toon_output: b
     serde_json::to_string(&projected).unwrap_or_else(|_| line.to_string())
 }
 
-/// Run a scenario file: an array of driver-command step objects executed in
-/// order, returning a structured pass/fail transcript. A step fails when the
-/// driver reports `ok:false`, or when an `assert` step's payload reports
-/// `ok:false`.
 fn run_scenario(cli: &CliArgs, args: AgentGuiScenarioArgs) -> Result<CommandSuccess, CommandError> {
     let action = "agent-gui.scenario".to_string();
     let content = std::fs::read_to_string(&args.file).map_err(|e| {
@@ -967,11 +952,8 @@ fn run_scenario(cli: &CliArgs, args: AgentGuiScenarioArgs) -> Result<CommandSucc
     }
 }
 
-/// Allowed config basenames a fixture may write. Never the multi-GB database or
-/// anything outside the isolated config dir (harness security rule).
-/// Fixtures intentionally use the legacy flat layout: the app's one-shot
-/// migration splits them into `app_settings.json`, `games.json`, and
-/// `games/<space>/` on its first start against the fixture dir.
+/// Fixtures may write only allowlisted config files, never the database or paths outside the isolated root.
+/// Legacy fixtures intentionally exercise the app's one-shot game-space migration.
 const FIXTURE_ALLOWED_FILES: &[&str] = &[
     "settings.json",
     "repositories.json",

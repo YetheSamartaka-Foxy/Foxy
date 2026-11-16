@@ -24,8 +24,6 @@ use crate::core::utils::http_range::validate_content_range_header;
 
 pub(super) const DOWNLOAD_CANCELLED_MESSAGE: &str = "download cancelled";
 
-/// Transfer-layer stats returned after a file download completes.
-/// Consumed by the batching layer to populate `FileMetric`.
 pub(super) struct TransferStats {
     pub(super) split_count: usize,
     pub(super) disk_write_time: Duration,
@@ -131,9 +129,7 @@ async fn download_file_simple(
     let mut disk_write_time = Duration::ZERO;
     let mut disk_write_count = 0usize;
 
-    // A resume sidecar marks the part file as a ranged pre-allocation: its
-    // length does not reflect sequential progress, so it cannot be appended
-    // to. Discard both and start fresh.
+    // A ranged preallocation cannot resume sequentially because its length is not completed-byte progress.
     let meta_path = range_part_meta_path(path);
     if crate::core::utils::profiling::fs::metadata_async(&meta_path)
         .await
@@ -149,7 +145,6 @@ async fn download_file_simple(
         download_target.download_cycle.store(0, Ordering::SeqCst);
     }
 
-    // Check for existing .part file from a previous session to resume from
     if let Ok(meta) = crate::core::utils::profiling::fs::metadata_async(&part_path).await {
         let part_size = meta.len();
         if part_size > 0 && part_size < total_size as u64 {
@@ -197,8 +192,7 @@ async fn download_file_simple(
             anyhow::bail!("GET request failed: {}", resp.status());
         }
 
-        // If we asked for a Range but got 200 (not 206), the server doesn't
-        // support resume - discard the partial data and start fresh.
+        // A 200 response to a range request cannot resume; discard the partial data.
         if bytes_received > 0 && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
             trace!(
                 "Server returned {} instead of 206 for resume of {} - restarting from scratch",
@@ -217,7 +211,6 @@ async fn download_file_simple(
             )?;
         }
 
-        // On first attempt (or after resume reset) create the part file; on resume, append
         let profiled = crate::core::utils::profiling::FsTimer::start();
         let file = if bytes_received == 0 {
             tokio::fs::File::create(&part_path).await?
@@ -283,11 +276,9 @@ async fn download_file_simple(
         flushed?;
 
         if bytes_received == total_size as u64 {
-            // sync_all() is intentionally omitted: the .part + rename pattern
-            // provides crash safety (incomplete .part files are cleaned on restart),
-            // and skipping fsync per file avoids significant I/O latency.
+            // The part-file rename provides crash recovery; per-file fsync would add substantial I/O latency.
             writer.shutdown().await?;
-            // Atomically promote part file to final path
+
             ensure_not_cancelled(&cancel_rx)?;
             let promote_started = std::time::Instant::now();
             promote_part_file(rollback_session, download_target.file_id, &part_path, path).await?;
@@ -299,7 +290,6 @@ async fn download_file_simple(
             });
         }
 
-        // Stream failed - retry with resume
         if attempt >= ATTEMPT_LIMIT {
             anyhow::bail!(
                 "Exceeded {} retry attempts for simple download: {}",
@@ -344,8 +334,6 @@ pub(super) async fn download_file_ranges(
 
     let total_size = download_target.size;
 
-    // Small files - and any file when the server lacks range support - use the
-    // appendable sequential path, which resumes from the .foxy.part length.
     if !supports_range || total_size <= LARGE_FILE_THRESHOLD {
         return download_file_simple(
             context,
@@ -361,10 +349,6 @@ pub(super) async fn download_file_ranges(
         .await;
     }
 
-    // Large files use the resumable range work queue: parallel range requests
-    // with per-file concurrency that grows as the global queue drains, and
-    // completed chunks tracked in a .foxy.part.meta sidecar so interrupted
-    // downloads resume in the next session.
     let split_count = total_size
         .div_ceil(range_chunk_size_for(
             total_size as u64,
@@ -511,15 +495,11 @@ mod tests {
         assert!(is_download_cancelled_error(&err));
     }
 
-    // ── download_cancelled_error ───────────────────────────────────────
-
     #[test]
     fn download_cancelled_error_message_matches_constant() {
         let err = download_cancelled_error();
         assert_eq!(err.to_string(), DOWNLOAD_CANCELLED_MESSAGE);
     }
-
-    // ── ensure_not_cancelled ───────────────────────────────────────────
 
     #[test]
     fn ensure_not_cancelled_ok_when_not_cancelled() {
@@ -534,8 +514,6 @@ mod tests {
         assert!(result.is_err());
         assert!(is_download_cancelled_error(&result.unwrap_err()));
     }
-
-    // ── cancellation_requested ─────────────────────────────────────────
 
     #[test]
     fn cancellation_requested_false_when_not_set() {

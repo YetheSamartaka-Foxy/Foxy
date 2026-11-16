@@ -1,11 +1,8 @@
-//! Chart series derived from a benchmark record.
-
 use eframe::egui::Color32;
 
 use super::charts::{BarRow, ChartSeries, SeriesStyle, YUnit};
 use crate::core::benchmarks::BenchmarkRecord;
 
-/// One chart of a record: title key, unit and the series it plots.
 pub struct ChartDef {
     pub key: &'static str,
     pub title: &'static str,
@@ -13,8 +10,7 @@ pub struct ChartDef {
     pub series: Vec<ChartSeries>,
 }
 
-/// Raw CPU samples sum over logical CPUs; scale them to a share of the
-/// whole machine when the record knows its thread count.
+/// Scale summed logical-CPU samples to whole-machine share when thread count is known.
 pub fn cpu_scale(record: &BenchmarkRecord) -> f64 {
     if record.machine.cpu_threads > 0 {
         1.0 / record.machine.cpu_threads as f64
@@ -176,8 +172,6 @@ fn build_charts(
     defs
 }
 
-/// Charts for one record in a comparison, using one color and visual style
-/// consistently across metrics.
 pub fn comparison_charts_for(record: &BenchmarkRecord, style: SeriesStyle) -> Vec<ChartDef> {
     let (prefix, color) = match style {
         SeriesStyle::ComparisonA => ("A: ", crate::ui::palette::BENCHMARK_COMPARE_A),
@@ -187,12 +181,10 @@ pub fn comparison_charts_for(record: &BenchmarkRecord, style: SeriesStyle) -> Ve
     build_charts(record, prefix, &[color], style, true)
 }
 
-/// Stages under this many seconds in every record are noise the chart
-/// would only render as empty tracks.
+/// Omit stages below this threshold in every record because they would render as empty tracks.
 const STAGE_FLOOR_SECS: f64 = 0.0005;
 
-/// Stage rows for one or two records; a stage missing from a record is 0
-/// and a stage that is 0 in every record is left out.
+/// Missing stages count as zero; omit stages that are zero in every record.
 pub fn stage_rows(records: &[&BenchmarkRecord]) -> Vec<BarRow> {
     let mut names: Vec<String> = Vec::new();
     for record in records {

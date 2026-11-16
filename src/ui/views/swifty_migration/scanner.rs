@@ -1,27 +1,24 @@
-/// Scanning and parsing logic for Swifty configuration data.
 use log::{debug, info, warn};
 use serde::Deserialize;
 use std::path::PathBuf;
 
 use super::types::{DerivedUrls, SwiftyDetectedRepo, SwiftyGlobalSettings};
 
-/// Raw Swifty settings file shape (only the fields we need).
 #[derive(Debug, Deserialize)]
 struct SwiftySettings {
     #[serde(default)]
     repositories: Vec<SwiftyRepoEntry>,
-    /// Global addons/mod paths configured in Swifty (fallback for per-repo paths).
+
     #[serde(default, alias = "addonsPaths")]
     addons_paths: Vec<String>,
-    /// Arma 3 installation directory.
+
     #[serde(default, alias = "armaPath")]
     arma_path: String,
-    /// Temporary download directory.
+
     #[serde(default, alias = "tempPath")]
     temp_path: String,
 }
 
-/// A single entry inside the Swifty `settings.json` `repositories` array.
 #[derive(Debug, Deserialize)]
 struct SwiftyRepoEntry {
     #[serde(default)]
@@ -30,15 +27,14 @@ struct SwiftyRepoEntry {
     address: String,
     #[serde(default, alias = "modFolder", alias = "mod_folder", alias = "path")]
     mod_folder: String,
-    /// Raw launch-parameter string (e.g. `"-skipIntro -noSplash"`).
+
     #[serde(default)]
     parameters: String,
-    /// Whether Swifty auto-checks this repository on launch.
+
     #[serde(default)]
     autocheck: bool,
 }
 
-/// Return candidate directories where Swifty may store its config.
 pub fn swifty_candidate_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -55,13 +51,12 @@ pub fn swifty_candidate_dirs() -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         if let Some(home) = dirs::home_dir() {
-            // XDG config directory
             dirs.push(home.join(".config/Swifty"));
-            // XDG data directory
+
             dirs.push(home.join(".local/share/Swifty"));
-            // Direct home directory
+
             dirs.push(home.join(".swifty"));
-            // Wine prefix (default)
+
             dirs.push(
                 home.join(".wine/drive_c/users")
                     .join(
@@ -73,7 +68,6 @@ pub fn swifty_candidate_dirs() -> Vec<PathBuf> {
             );
         }
 
-        // XDG_CONFIG_HOME override
         if let Ok(xdg_config) = std::env::var("XDG_CONFIG_HOME") {
             dirs.push(PathBuf::from(xdg_config).join("Swifty"));
         }
@@ -82,7 +76,6 @@ pub fn swifty_candidate_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Scan all known Swifty directories and return detected repositories and global settings.
 pub fn scan_swifty_repositories() -> (
     Vec<SwiftyDetectedRepo>,
     SwiftyGlobalSettings,
@@ -126,7 +119,6 @@ pub fn scan_swifty_repositories() -> (
             }
         };
 
-        // Capture global settings from the first valid Swifty config.
         if global.arma_path.is_empty() && !parsed.arma_path.trim().is_empty() {
             global.arma_path = parsed.arma_path.trim().to_string();
         }
@@ -134,7 +126,6 @@ pub fn scan_swifty_repositories() -> (
             global.temp_path = parsed.temp_path.trim().to_string();
         }
 
-        // Use the first global addons path as fallback for repos without a per-repo path.
         let global_path = parsed
             .addons_paths
             .iter()
@@ -179,33 +170,24 @@ pub fn scan_swifty_repositories() -> (
     (repos, global, None)
 }
 
-/// Check whether any Swifty configuration exists on disk (cheap check).
 pub fn swifty_data_exists() -> bool {
     swifty_candidate_dirs()
         .iter()
         .any(|d| d.join("settings.json").exists())
 }
 
-/// Derive base, updater, and repository-space URLs from a Swifty repository address.
-///
-/// For `http://repo.example.invalid:8080/mody/MainRepo`:
-///   base     = `http://repo.example.invalid:8080/mody/`
-///   updater  = `http://repo.example.invalid:8080/mody/Foxy`
-///   space    = `http://repo.example.invalid:8080/mody/repository_space.json`
 pub fn derive_urls(address: &str) -> Option<DerivedUrls> {
     let trimmed = address.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return None;
     }
 
-    // Find the last `/` that separates the parent path from the repo-name segment.
     let scheme_end = trimmed.find("://").map(|i| i + 3).unwrap_or(0);
     let last_slash = trimmed[scheme_end..].rfind('/').map(|i| i + scheme_end);
 
     let base_url = match last_slash {
         Some(pos) => format!("{}/", &trimmed[..pos]),
         None => {
-            // No path at all (e.g. `http://server:8080`) - use address as-is with trailing slash.
             format!("{}/", trimmed)
         }
     };
@@ -262,15 +244,10 @@ pub fn apply_swifty_parameters(repo: &mut crate::ui::types::Repository, params: 
     }
 }
 
-/// Extract a human-readable name from the last path segment of a URL.
 fn repo_name_from_address(address: &str) -> String {
     let trimmed = address.trim().trim_end_matches('/');
     trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

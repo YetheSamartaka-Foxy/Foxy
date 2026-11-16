@@ -22,8 +22,6 @@ mod manifest;
 use manifest::fetch_validated_manifest;
 pub(crate) const ADDON_PUBLICATION_CHANGED: &str = "Addon publication changed while checking";
 
-/// Typed manifest for both mod.srf (PascalCase) and foxy_addon.json (camelCase).
-/// Uses serde aliases so one struct deserializes either format.
 #[derive(Deserialize, Serialize)]
 struct ModManifest {
     #[serde(alias = "Checksum", default, skip_serializing_if = "Option::is_none")]
@@ -66,7 +64,7 @@ fn join_path(base: &str, child: &str) -> String {
 
 fn part_task_limit() -> usize {
     let cpu = crate::core::utils::cpu_threads::cpu_threads().unwrap_or(4);
-    // This path fans into DB writes in remote_file_parts_batch; keep it conservative.
+
     let lock_retries = sqlite_perf_snapshot().lock_retries;
     let pressure_divisor = if lock_retries >= 128 {
         4
@@ -80,10 +78,6 @@ fn part_task_limit() -> usize {
     suggested.clamp(8, ceiling)
 }
 
-/// Split files into sub-batches targeting `max_parts` parts per batch.
-/// Each batch gets at least `min_files` files (to avoid single-file batches
-/// that would underutilize the DB transaction). Files are assigned greedily:
-/// accumulate into the current batch until the part budget is exceeded.
 fn build_parts_sub_batches(
     files: &[FilePartsPayload],
     max_parts: usize,
@@ -98,7 +92,7 @@ fn build_parts_sub_batches(
 
     for file in files {
         let file_parts = file.parts.len();
-        // Start new batch if we'd exceed the budget AND have enough files
+
         if !current_batch.is_empty()
             && current_parts + file_parts > max_parts
             && current_batch.len() >= min_files
@@ -227,8 +221,6 @@ async fn load_file_remote_graph_states(
     states
 }
 
-/// Load existing file rows for the given remote paths (chunked under the SQLite
-/// bind limit). Returns every matching [`FoxyModFile`]; callers filter by identity.
 async fn load_files_by_remote_paths(db: &FoxyDb, remote_paths: &[String]) -> Vec<FoxyModFile> {
     let mut out = Vec::new();
     let chunk_size = read_chunk_ids();
@@ -376,8 +368,6 @@ async fn reconcile_addon_file_links(
         );
     }
 
-    // Phase 1: Stage addon_file links for a single cross-mod flush after the
-    // metadata fan-out. Inserting per mod was 96 nine-row statements.
     if !desired_file_ids.is_empty() {
         context.buffer_addon_file_links(
             desired_file_ids
@@ -387,8 +377,6 @@ async fn reconcile_addon_file_links(
         );
     }
 
-    // Phase 2: Prune stale addon_file links. A repository that linked no file
-    // before this rebuild has no leftover links, so skip the per-mod SELECT/DELETE.
     if can_prune_stale
         && !context.has_fresh_addon_file_links()
         && let Err(e) = prune_stale_addon_file_links(&context.db(), mod_id, &desired_file_ids).await
@@ -400,10 +388,7 @@ async fn reconcile_addon_file_links(
     }
 }
 
-/// Deletes the addon's links to files outside `desired_file_ids`. The read runs
-/// outside a write transaction and each delete is a single statement: the
-/// addons of a rebuild prune in parallel, and a read-then-write transaction
-/// lost its snapshot to every other addon's commit.
+/// Keep the read outside a write transaction; concurrent addon commits invalidate read-then-write snapshots.
 async fn prune_stale_addon_file_links(
     db: &FoxyDb,
     mod_id: i64,
@@ -477,17 +462,17 @@ pub(crate) struct ModRecheckStats {
     pub bytes: u64,
     pub mod_concurrency_limit: usize,
     pub duration: std::time::Duration,
-    /// Time spent downloading the manifest body over HTTP
+
     pub http_download_duration: std::time::Duration,
-    /// Size of the manifest response body in bytes
+
     pub http_response_bytes: usize,
-    /// Time spent parsing the manifest JSON (BOM strip + serde_json)
+
     pub http_parse_duration: std::time::Duration,
-    /// The server confirmed the cached manifest; nothing was downloaded.
+
     pub manifest_cached: bool,
-    /// Time spent upserting file records for this mod
+
     pub file_upsert_duration: std::time::Duration,
-    /// Time spent in remote_file_parts_batch (parts upsert + reconcile + download targets)
+
     pub parts_persist_duration: std::time::Duration,
 }
 
@@ -586,7 +571,6 @@ pub(crate) async fn fetch_mod_file_manifest(
         match fetch_validated_manifest(context.clone(), &files_metadata_url, fresh).await {
             Ok(r) => r,
             Err(e) if is_foxy_mode => {
-                // FoxyMode failed - try falling back to mod.srf (HybridMode safety net)
                 let fallback_url = format!("{}/mod.srf", mod_parent.remote_path);
                 warn!(
                     "foxy_addon.json fetch failed for {}, trying mod.srf fallback: {}",
@@ -743,8 +727,7 @@ pub(crate) async fn apply_mod_file_rows(
     } = staged;
     let mut all_rows_with_json = Vec::new();
     let mut desired_file_ids: HashSet<i64> = HashSet::new();
-    // An explicit empty file list is accepted metadata, but it cannot authorize
-    // automatic removal of files the user may still need.
+    // An explicit empty list is not authorization to remove files the user may need.
     let mut can_prune_file_links = !file_keys.is_empty();
     let mut total_bytes: u64 = 0;
     let mut total_parts: usize = 0;
@@ -821,7 +804,6 @@ pub(crate) async fn apply_mod_file_rows(
     let part_limit = part_task_limit();
     let semaphore = Arc::new(Semaphore::new(part_limit));
 
-    // Perform recheck in bulk to minimize DB round-trips while still guarding SQLite with a semaphore
     let mut needs_parts: Vec<FilePartsPayload> = Vec::new();
     for (file, previous_file, parts) in all_rows_with_json {
         debug!("Recheck needed: File: {}", file.remote_path);
@@ -842,9 +824,6 @@ pub(crate) async fn apply_mod_file_rows(
         });
     }
 
-    // Split large mods into sub-batches and process concurrently. We split by
-    // part count (not just file count) so a mod like @csa38 (76 files, 460K parts)
-    // fans into multiple concurrent batches instead of just 2.
     const PARTS_PER_BATCH: usize = 30_000;
     const FILES_PER_BATCH_MIN: usize = 4;
 
@@ -908,8 +887,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── join_path ───────────────────────────────────────────────────────
-
     #[test]
     fn join_path_trailing_forward_slash() {
         assert_eq!(
@@ -934,16 +911,12 @@ mod tests {
         );
     }
 
-    // ── normalize_local_path_key ────────────────────────────────────────
-
     #[test]
     fn normalize_local_path_key_delegates_to_content_hash() {
         let result = normalize_local_path_key("C:\\mods\\ace/");
         assert!(!result.ends_with('/'));
         assert!(!result.contains('\\'));
     }
-
-    // ── file_present_with_expected_len ──────────────────────────────────
 
     #[test]
     fn file_identity_key_keeps_same_remote_under_different_local_roots_separate() {
@@ -1025,8 +998,6 @@ mod tests {
         );
     }
 
-    // ── ModManifest deserialization ─────────────────────────────────────
-
     #[test]
     fn deserialize_camel_case_manifest() {
         let data = json!({
@@ -1091,17 +1062,11 @@ mod tests {
         assert_eq!(manifest.files.len(), 3);
     }
 
-    // ── part_task_limit ─────────────────────────────────────────────────
-
     #[test]
     fn part_task_limit_within_bounds() {
         let limit = part_task_limit();
         assert!(limit >= 8, "limit should be at least 8, got {}", limit);
     }
-
-    // ── sub-batch splitting for large mods ─────────────────────────────
-
-    // ── build_parts_sub_batches ─────────────────────────────────────────
 
     use crate::core::tasks::remote_file_parts::FilePartData;
 
@@ -1137,7 +1102,6 @@ mod tests {
 
     #[test]
     fn sub_batch_splits_by_part_count() {
-        // 4 files with 10K parts each = 40K total, budget=30K → 2 batches
         let files: Vec<_> = (0..4).map(|_| make_payload(10_000)).collect();
         let result = build_parts_sub_batches(&files, 30_000, 1);
         assert_eq!(result.len(), 2);
@@ -1145,10 +1109,9 @@ mod tests {
 
     #[test]
     fn sub_batch_csa38_like_splits_into_many() {
-        // Simulate @csa38: 76 files, ~6K parts each = ~460K total
         let files: Vec<_> = (0..76).map(|_| make_payload(6_060)).collect();
         let result = build_parts_sub_batches(&files, 30_000, 4);
-        // ~460K parts / 30K budget ≈ 15-16 batches
+
         assert!(
             result.len() >= 10,
             "expected >=10 batches for 460K parts, got {}",
@@ -1158,14 +1121,10 @@ mod tests {
 
     #[test]
     fn sub_batch_respects_min_files() {
-        // 2 files with 50K parts each, min_files=4
-        // Should NOT split because each batch must have >=4 files
         let files: Vec<_> = (0..2).map(|_| make_payload(50_000)).collect();
         let result = build_parts_sub_batches(&files, 30_000, 4);
         assert_eq!(result.len(), 1);
     }
-
-    // ── reconcile chunking ─────────────────────────────────────────────
 
     #[test]
     fn reconcile_addon_file_insert_uses_tuned_write_chunk() {

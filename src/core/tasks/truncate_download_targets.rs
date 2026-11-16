@@ -13,7 +13,6 @@ pub async fn truncate_all_download_tables(context: Arc<FoxyContext>) -> Result<(
         .db()
         .transaction("truncate download tables", |txn| {
             Box::pin(async move {
-                // Order: children first, then parents (respects FK dependencies)
                 txn.execute("DELETE FROM download_patch_op", params![])
                     .await?;
                 txn.execute("DELETE FROM download_patch_file", params![])
@@ -31,10 +30,7 @@ pub async fn truncate_all_download_tables(context: Arc<FoxyContext>) -> Result<(
     Ok(())
 }
 
-/// Drop queued download targets whose file is already verified on disk (a
-/// non-empty local checksum equal to the remote one). A cancelled download
-/// leaves the prepared queue with the files it finished and hashed, so the
-/// next run would otherwise fetch them again. Returns the pruned file ids.
+/// Preserve verified files in a cancelled run's prepared queue so the next run does not redownload them.
 pub async fn prune_verified_download_targets(
     context: Arc<FoxyContext>,
     file_ids: &HashSet<u64>,
@@ -180,7 +176,7 @@ mod tests {
         .expect("insert patch file");
 
         let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
-        // File 4 is verified in the database but no longer on disk (reverted).
+
         let queued: HashSet<u64> = [1, 2, 3, 4].into_iter().collect();
         let pruned = prune_verified_download_targets(context.clone(), &queued)
             .await

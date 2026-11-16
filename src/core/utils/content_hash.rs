@@ -19,13 +19,10 @@ pub(crate) fn blake3_hex(hasher: blake3::Hasher) -> String {
     hasher.finalize().to_hex()[..32].to_uppercase()
 }
 
-/// Returns `true` if `hex_checksum` is a full-length BLAKE3 hash (64 hex chars).
-/// MD5 produces 32 hex chars, SHA-1 produces 40.
 pub(crate) fn is_blake3_checksum(hex_checksum: &str) -> bool {
     hex_checksum.trim().len() == 64
 }
 
-/// Unified hasher that wraps either MD5 or BLAKE3, eliminating branching at call sites.
 pub(crate) enum FlexHasher {
     Md5(Md5),
     Blake3(Box<blake3::Hasher>),
@@ -40,7 +37,6 @@ impl FlexHasher {
         FlexHasher::Blake3(Box::new(blake3::Hasher::new()))
     }
 
-    /// Pick the algorithm based on the expected checksum's hex length.
     pub fn from_checksum(expected_hex: &str) -> Self {
         if is_blake3_checksum(expected_hex) {
             Self::new_blake3()
@@ -58,8 +54,6 @@ impl FlexHasher {
         }
     }
 
-    /// Consume the hasher and return the full-length uppercase hex digest.
-    /// MD5 → 32 chars, BLAKE3 → 64 chars. (Unlike `blake3_hex()` which truncates to 32.)
     pub fn finalize_hex(self) -> String {
         match self {
             FlexHasher::Md5(h) => hex::encode_upper(h.finalize()),
@@ -86,11 +80,8 @@ pub(crate) fn is_foxy_temp_artifact_path(path: &str) -> bool {
         || path.rsplit(['/', '\\']).next() == Some(ADDON_WRITE_LOCK_FILE)
 }
 
-/// Sampled fingerprint of a local file: length, mtime and eight evenly spaced
-/// 16 KB blocks (a file at most 128 KB is hashed whole). It answers "has this
-/// file changed since it was last hashed", never whether it matches remote.
-/// Creation time is excluded because copies and restores change it while the
-/// content does not.
+/// This sampled fingerprint detects local drift, never remote integrity.
+/// Exclude creation time because copies/restores change it without changing content.
 pub(crate) fn fast_file_content_hash(path: &str) -> std::io::Result<String> {
     let metadata = std::fs::metadata(path)?;
     if metadata.len() == 0 {
@@ -100,9 +91,7 @@ pub(crate) fn fast_file_content_hash(path: &str) -> std::io::Result<String> {
     fast_file_content_hash_from_reader(&mut file, &metadata)
 }
 
-/// [`fast_file_content_hash`] over an already open handle, so a pass that has
-/// just read the whole file can fingerprint it from the page cache instead of
-/// paying eight seeks on a cold disk later. `metadata` must describe `reader`.
+/// Reuse the open reader's warm cache for sampling; metadata must describe that same handle.
 pub(crate) fn fast_file_content_hash_from_reader<R: std::io::Read + std::io::Seek>(
     reader: &mut R,
     metadata: &std::fs::Metadata,
@@ -159,8 +148,6 @@ fn fingerprint_hashes_whole_file(file_len: u64) -> bool {
     file_len <= (FINGERPRINT_SAMPLE_BYTES as u64).saturating_mul(FINGERPRINT_SLOTS)
 }
 
-/// Start offsets of the sampled blocks of a file above the whole-file limit,
-/// each a full [`FINGERPRINT_SAMPLE_BYTES`] inside the file.
 fn fingerprint_sample_offsets(file_len: u64) -> Vec<u64> {
     let max_offset = file_len.saturating_sub(FINGERPRINT_SAMPLE_BYTES as u64);
     let mut offsets: Vec<u64> = (0..FINGERPRINT_SLOTS)
@@ -170,9 +157,7 @@ fn fingerprint_sample_offsets(file_len: u64) -> Vec<u64> {
     offsets
 }
 
-/// Collects the blocks [`fast_file_content_hash`] samples while a caller
-/// streams the file for its own reasons, so the fingerprint costs no second
-/// read and does not depend on the page cache still holding the file.
+/// Collect fingerprint samples during the caller's stream so no second read or cache residency is required.
 pub(crate) struct FingerprintTap {
     hasher: blake3::Hasher,
     whole_file: bool,
@@ -182,7 +167,7 @@ pub(crate) struct FingerprintTap {
 struct TapSlot {
     offset: u64,
     bytes: Vec<u8>,
-    /// Disjoint, sorted byte ranges of `bytes` seen so far.
+
     covered: Vec<(usize, usize)>,
 }
 
@@ -234,7 +219,6 @@ impl FingerprintTap {
         }
     }
 
-    /// Record `data`, which the caller read from `offset` in the file.
     pub(crate) fn observe(&mut self, offset: u64, data: &[u8]) {
         let data_end = offset.saturating_add(data.len() as u64);
         for slot in &mut self.slots {
@@ -275,9 +259,7 @@ impl FingerprintTap {
     }
 }
 
-/// [`fast_file_content_hash_from_reader`] for a handle wrapped in a large
-/// `BufReader`. Sampling goes to the inner handle: a seek discards the buffer,
-/// so every 16 KB sample through the wrapper would refill all of it.
+/// Seek the inner handle: sampling through BufReader would refill its entire buffer for each small block.
 pub(crate) fn fast_file_content_hash_from_buffered<R: std::io::Read + std::io::Seek>(
     reader: &mut std::io::BufReader<R>,
     metadata: &std::fs::Metadata,
@@ -285,10 +267,7 @@ pub(crate) fn fast_file_content_hash_from_buffered<R: std::io::Read + std::io::S
     fast_file_content_hash_from_reader(reader.get_mut(), metadata)
 }
 
-/// Opens a file the caller reads front to back once. On Windows the
-/// sequential-scan hint lets the cache manager read further ahead and release
-/// the pages behind the reader first, so a long pass does not push the rest
-/// of the machine's cache out.
+/// Windows sequential-scan hints release pages behind long scans, protecting the rest of the machine's cache.
 pub(crate) fn open_for_sequential_read(path: impl AsRef<Path>) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -322,10 +301,7 @@ pub(crate) fn blake3_file_hash(path: &Path) -> std::io::Result<String> {
     Ok(blake3_hex(hasher))
 }
 
-/// Choose how to read a file for a whole-file BLAKE3 hash.
-///
-/// Aggressive large files select `MmapRayon`, but client execution still mmaps
-/// single-threaded because hashing already fans out across files.
+/// Execution stays single-threaded per mmap because hashing already fans out across files.
 pub(crate) fn select_blake3_read_strategy(
     preference: HashIoProfilePreference,
     storage: HashStorageClass,
@@ -402,18 +378,10 @@ fn path_string_is_network_share(raw: &str) -> bool {
     normalized.starts_with(r"\\")
 }
 
-/// One recursive walk of an addon folder: every subdirectory and every file
-/// that is not a Foxy temp artifact, both sorted by relative path.
-///
-/// The quick-scan layer derives two different digests from an addon folder -
-/// the persistent cache's root fingerprint and the addon content hash - and
-/// they read exactly the same metadata. Walking once and folding twice keeps a
-/// cache miss at one traversal instead of two
-/// (`conventions/SPEED_OF_LIGHT.md` O4).
+/// The root fingerprint and content hash share metadata; one walk avoids a duplicate traversal on cache misses.
 pub struct AddonFolderScan {
-    /// Relative paths of every subdirectory, sorted.
     pub dir_entries: Vec<String>,
-    /// Relative path, length and mtime of every relevant file, sorted by path.
+
     pub file_entries: Vec<(String, u64, u128)>,
 }
 
@@ -459,12 +427,8 @@ pub fn scan_addon_folder(path: &Path) -> Result<AddonFolderScan, std::io::Error>
 }
 
 impl AddonFolderScan {
-    /// The addon folder content hash for a folder at `path`.
-    ///
-    /// Do not include creation time: it changes on copies/restores while
-    /// content does not. The domain prefix is part of the stored value in
-    /// `addons.local_content_hash`, so changing this changes the content-hash
-    /// format generation.
+    /// Exclude creation time so copies/restores preserve identity.
+    /// The domain prefix versions persisted addon hashes; changing it changes their format.
     pub fn content_hash(&self, path: &Path) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"FOXY_ADDON_FOLDER_HASH_V3");
@@ -539,7 +503,6 @@ mod tests {
 
     #[test]
     fn flex_hasher_md5_produces_32_hex() {
-        // MD5("test") = 098F6BCD4621D373CADE4E832627B4F6
         let mut h = FlexHasher::new_md5();
         h.update(b"test");
         assert_eq!(h.finalize_hex(), "098F6BCD4621D373CADE4E832627B4F6");
@@ -573,14 +536,12 @@ mod tests {
 
     #[test]
     fn flex_hasher_md5_empty_matches_known() {
-        // MD5("") = D41D8CD98F00B204E9800998ECF8427E
         let h = FlexHasher::new_md5();
         assert_eq!(h.finalize_hex(), "D41D8CD98F00B204E9800998ECF8427E");
     }
 
     #[test]
     fn flex_hasher_md5_known_value() {
-        // MD5("hello") = 5D41402ABC4B2A76B9719D911017C592
         let mut h = FlexHasher::new_md5();
         h.update(b"hello");
         assert_eq!(h.finalize_hex(), "5D41402ABC4B2A76B9719D911017C592");
@@ -642,7 +603,7 @@ mod tests {
             let from_path = fast_file_content_hash(&path).unwrap();
             let metadata = std::fs::metadata(&path).unwrap();
             let mut file = std::fs::File::open(&path).unwrap();
-            // Leave the cursor mid-file as a hash pass would.
+
             std::io::Seek::seek(&mut file, std::io::SeekFrom::Start((len / 2) as u64)).unwrap();
             let from_reader = fast_file_content_hash_from_reader(&mut file, &metadata).unwrap();
             assert_eq!(from_path, from_reader, "len={len}");
@@ -673,7 +634,6 @@ mod tests {
         let hash = blake3_file_hash(&file_path).unwrap();
         assert_eq!(hash.len(), 32);
 
-        // Determinism
         let hash2 = blake3_file_hash(&file_path).unwrap();
         assert_eq!(hash, hash2);
     }
@@ -701,7 +661,6 @@ mod tests {
 
         let file_hash = blake3_file_hash(&file_path).unwrap();
 
-        // Manually compute the same hash
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"test data");
         let expected = blake3_hex(hasher);
@@ -775,7 +734,6 @@ mod tests {
 
     #[test]
     fn flex_hasher_incremental_update() {
-        // Verify that incremental updates produce the same hash as a single update
         let mut h1 = FlexHasher::new_md5();
         h1.update(b"hello ");
         h1.update(b"world");

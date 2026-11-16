@@ -1,4 +1,3 @@
-// for concurrency control
 use crate::core::api::ProgressEvent;
 use crate::core::models::context::FoxyContext;
 use crate::core::models::model_tree::Tree;
@@ -25,17 +24,13 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::{Semaphore, watch};
 
 const CONCURRENCY_LIMIT: usize = 64;
-// Oversubscription factors: each file hashing task is a mix of sequential I/O + CPU-bound
-// hashing in a single spawn_blocking thread. Light files (few parts) benefit from moderate
-// oversubscription to hide I/O latency; heavy files need less since they're CPU-dominated.
+// Light files benefit from I/O oversubscription; heavy files are CPU-bound and need less.
 const FILE_IO_OVERSUBSCRIPTION_LIGHT: usize = 4;
 const FILE_IO_OVERSUBSCRIPTION_MEDIUM: usize = 3;
 const FILE_IO_OVERSUBSCRIPTION_HEAVY: usize = 2;
 const FILE_IO_OVERSUBSCRIPTION_VERY_HEAVY: usize = 2;
 const MAX_FILE_JOB_CONCURRENCY: usize = 256;
-/// How many rows to persist per transaction during bulk hash persist.
-/// Larger chunks reduce transaction overhead (fewer commits, less WAL churn).
-/// 25,000 rows at 4 params each ≈ 100KB of bind data - trivial for SQLite.
+
 const PERSIST_LOG_INTERVAL: usize = 25_000;
 
 mod context;

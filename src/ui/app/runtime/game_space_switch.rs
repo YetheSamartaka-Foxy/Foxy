@@ -1,7 +1,4 @@
-//! Runtime game-space switching: swap the process to another game space
-//! without restarting. The flow is start -> drain pending saves -> activate
-//! the target space -> reset space-scoped state -> reload, mirroring what a
-//! fresh startup would have loaded for that space.
+//! Switching drains pending saves, activates the target space, resets space-scoped state, and reloads it as startup would.
 
 use std::time::Duration;
 
@@ -18,18 +15,30 @@ use crate::ui::types::{
 };
 
 impl Foxy {
-    /// Why a switch cannot start right now, or `None` when it can. Both the
-    /// disabled-button hover text and the rejection toast use this so the user
-    /// is always told the actual reason.
+    /// Return the switch rejection reason for both disabled-button help and the rejection toast.
     pub(crate) fn game_space_switch_block_reason(&self) -> Option<&'static str> {
-        // Debug mode swaps in shadow settings/repositories that belong to the
-        // current space; reloading another space underneath them would leave
-        // the shadows pointing at the wrong data.
+        if self.mode_ownership.busy() {
+            return Some("Wait for ownership handoff before switching game spaces.");
+        }
+        self.client_handoff_block_reason()
+    }
+
+    pub(in crate::ui::app) fn client_handoff_block_reason(&self) -> Option<&'static str> {
+        if self.server_view.busy() {
+            return Some("Wait for the server draft operation before switching game spaces.");
+        }
+        if self.server_view.dirty() {
+            return Some("Save or discard draft changes before switching game spaces.");
+        }
+        // Debug shadow state belongs to the current space and cannot be reused after switching.
         if self.settings_view_state.debug_mode {
             return Some("Leave debug mode before switching game spaces.");
         }
         if self.profile_backup_work_in_flight() {
             return Some("Wait for profile backup work to finish.");
+        }
+        if self.startup_recovery_rx.is_some() {
+            return Some("Finish downloads and scans before switching game spaces.");
         }
         if self.hash_evidence_retry_in_flight
             || self.retained_files_cleanup_in_flight
@@ -59,7 +68,7 @@ impl Foxy {
             || !self.pending_addon_deletes.is_empty()
             || !self.pending_addon_force_redownloads.is_empty()
             || self.scheduler_active_run.is_some()
-            // A Workshop task resolves its space folder once and keeps writing there.
+            // Workshop tasks keep writing to the space folder captured at dispatch.
             || self
                 .workshop_task_worker
                 .as_ref()
@@ -67,10 +76,7 @@ impl Foxy {
         busy.then_some("Finish downloads and scans before switching game spaces.")
     }
 
-    /// Begin a runtime switch. The target is only remembered here; the switch
-    /// completes in [`Self::process_pending_game_space_switch`] once the
-    /// persistence queue is drained, so queued settings/repository writes
-    /// always land in the space they belong to.
+    /// Complete the switch only after queued persistence drains, so writes land in their owning space.
     pub(crate) fn start_game_space_switch(&mut self, entry: &GameSpaceEntry) {
         if self.pending_game_space_switch.is_some() {
             return;
@@ -95,6 +101,15 @@ impl Foxy {
 
     pub(in crate::ui::app) fn process_pending_game_space_switch(&mut self, ctx: &egui::Context) {
         if self.pending_game_space_switch.is_none() {
+            return;
+        }
+        if self.effective_app_mode() == crate::core::app_mode::AppMode::Server {
+            self.maybe_dispatch_persistence_requests(true);
+            self.process_server_space_switch(ctx);
+            return;
+        }
+        if self.server_view.busy() || self.server_view.dirty() {
+            ctx.request_repaint_after(Duration::from_millis(25));
             return;
         }
         if self.pending_game_space_switch_discard_save {
@@ -124,6 +139,23 @@ impl Foxy {
         if self.game_space_switch_open_error.is_some() {
             return;
         }
+        if let Some(stop) = &self.fs_watch_stop {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if self
+            .fs_watch_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return;
+        }
+        self.stop_fs_watcher();
+        self.begin_client_worker_handoff();
+        if !self.client_worker_handoff_ready() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+            return;
+        }
         if let Some(receiver) = self.game_space_switch_prepare_rx.as_ref() {
             match receiver.try_recv() {
                 Ok(Ok(reservation)) => {
@@ -143,6 +175,8 @@ impl Foxy {
                         let _ = worker.join();
                     }
                     self.game_space_switch_open_error = Some(error);
+                    self.end_client_worker_handoff();
+                    self.mark_fs_watch_index_dirty();
                     self.needs_repaint = true;
                     return;
                 }
@@ -155,6 +189,8 @@ impl Foxy {
                     self.game_space_switch_prepare_worker = None;
                     self.game_space_switch_open_error =
                         Some("The game-space preparation worker stopped unexpectedly.".to_string());
+                    self.end_client_worker_handoff();
+                    self.mark_fs_watch_index_dirty();
                     self.needs_repaint = true;
                     return;
                 }
@@ -215,6 +251,8 @@ impl Foxy {
         self.game_space_switch_prepare_rx = None;
         self.game_space_switch_prepare_worker = None;
         self.pending_game_space_switch_discard_save = false;
+        self.end_client_worker_handoff();
+        self.mark_fs_watch_index_dirty();
         self.needs_repaint = true;
     }
 
@@ -337,15 +375,20 @@ impl Foxy {
         reservation: crate::core::tasks::db_process_lock::ReservedClaim,
     ) {
         self.hash_evidence_state = None;
-        let outgoing_db =
-            spaces::game_space_dir_for(&spaces::active_game_space().space_id).join("database.db");
-        // Release the outgoing space's database before retargeting. The handle
-        // slot would otherwise only swap on the next database access, leaving
-        // `database.db` open in a space the user can now remove.
-        crate::core::tasks::init_database::close_active_database_sync();
+        if let Err(error) = crate::core::tasks::init_database::close_active_database_sync() {
+            self.end_client_worker_handoff();
+            self.mark_fs_watch_index_dirty();
+            self.game_space_switch_open_error = Some(error);
+            self.needs_repaint = true;
+            return;
+        }
 
         if crate::core::tasks::db_process_lock::LockOutcome::Acquired != reservation.activate() {
-            let _ = crate::core::tasks::db_process_lock::acquire(&outgoing_db);
+            self.db_lock_conflict = self.claim_active_space_database();
+            if self.db_lock_conflict.is_none() {
+                self.end_client_worker_handoff();
+            }
+            self.mark_fs_watch_index_dirty();
             self.game_space_switch_open_error = Some(
                 "The target database claim could not be activated. Retry opening the game space."
                     .to_string(),
@@ -357,7 +400,15 @@ impl Foxy {
         let opened = match spaces::activate_game_space(&entry.id) {
             Ok(opened) => opened,
             Err(err) => {
-                let _ = crate::core::tasks::db_process_lock::acquire(&outgoing_db);
+                let target_db = spaces::game_space_dir_for(&entry.id).join("database.db");
+                if let Err(error) = crate::core::tasks::db_process_lock::release_for(&target_db) {
+                    warn!("Could not release the unused target database claim: {error}");
+                }
+                self.db_lock_conflict = self.claim_active_space_database();
+                if self.db_lock_conflict.is_none() {
+                    self.end_client_worker_handoff();
+                }
+                self.mark_fs_watch_index_dirty();
                 warn!("Failed to switch game space: {}", err);
                 self.game_space_switch_open_error = Some(err);
                 self.needs_repaint = true;
@@ -381,11 +432,9 @@ impl Foxy {
             return;
         }
 
-        self.current_view = FoxyView::RepositoryList;
+        self.current_view = self.mode_home_view();
         self.last_view = FoxyView::None;
-        // The action record: request to the new space's state visible, with
-        // the drain wait (queued saves landing in the old space) separated
-        // from the reset and reload.
+        // Record the request-to-visible transition separately from draining old-space saves and reloading the target.
         let requested = self.game_space_switch_requested_at.take();
         let total = requested.map_or(switch_started.elapsed(), |at| at.elapsed());
         info!(
@@ -431,22 +480,18 @@ impl Foxy {
         self.needs_repaint = true;
     }
 
-    /// Load the newly activated space the same way startup does: settings,
-    /// schema gate, repositories, spaces, folders, profiles, images, and the
-    /// space-scoped startup tasks (pending-update restore, quick scan,
-    /// filesystem watcher, rechecks).
-    fn reload_active_game_space(&mut self, ctx: &egui::Context) {
+    pub(in crate::ui::app) fn reload_active_game_space(&mut self, ctx: &egui::Context) {
         self.db_lock_conflict = self.claim_active_space_database();
         if self.db_lock_conflict.is_some() {
             return;
         }
+        self.end_client_worker_handoff();
         crate::core::tasks::init_database::check_and_wipe_database();
         self.load_settings();
         self.legacy_migration_review_files =
             spaces::pending_legacy_migration_review(&spaces::active_game_space_dir())
                 .unwrap_or_default();
-        // Debug mode stays a launch-flag-only feature across reloads;
-        // switching is blocked while it is active.
+        // Debug mode is launch-flag-only and blocks switching while active.
         self.settings_view_state.debug_mode = self.launch_debug_mode;
         self.sanitize_settings_debug_artifacts();
         self.sync_debug_runtime_state();
@@ -534,22 +579,19 @@ impl Foxy {
         }
     }
 
-    /// Return every field that mirrors the previous space's data to its
-    /// startup default. App-global state (window, theme, locale, activity
-    /// log, app updates, backups, tray) is deliberately left alone.
-    fn reset_space_scoped_state(&mut self) {
+    /// Reset every space-scoped field to its startup default; app-global state survives the handoff.
+    pub(in crate::ui::app) fn reset_space_scoped_state(&mut self) {
         self.interrupted_update_instances.clear();
         self.profile_backup_state.reset_for_space();
         self.startup_recovery_rx = None;
-        // Mount table snapshot behind hash IO tuning: the incoming space may sit
-        // on a drive attached after the last refresh.
+        self.server_view = Default::default();
+        self.mode_navigation = Default::default();
+        // Refresh the mount table before hash I/O tuning because the target may use a newly attached drive.
         crate::core::tasks::calculate_hashes::invalidate_storage_class_cache();
 
-        // Steam Workshop store of the outgoing space.
         self.workshop_view_state = crate::ui::views::workshop::WorkshopViewState::default();
         self.addon_workshop_lookups.clear();
 
-        // Repository list, spaces, and folders.
         self.repository_view_state = RepositoryViewState::default();
         self.repository_list_cache = Default::default();
         self.bump_repository_list_data_version();
@@ -586,7 +628,6 @@ impl Foxy {
         self.selected_repository_for_settings = None;
         self.current_repository_settings_tab = RepositorySettingsTab::Configuration;
 
-        // Modals, confirmations, and pending destructive actions.
         self.show_delete_confirmation = false;
         self.delete_repository_delete_files = false;
         self.show_force_redownload_confirmation = false;
@@ -601,6 +642,7 @@ impl Foxy {
         self.benchmark_capture = None;
         self.benchmark_prompt = None;
         self.benchmarks_view = Default::default();
+        while self.benchmark_channels.save_rx.try_recv().is_ok() {}
         self.show_wipe_repo_db_confirmation = false;
         self.show_add_repository_modal = false;
         self.add_repository_input_address.clear();
@@ -624,7 +666,6 @@ impl Foxy {
         self.show_rename_profile_window = false;
         self.pending_profile_confirm_action = None;
 
-        // Addon inventory, missions, and per-repository caches.
         self.invalidate_addon_inventory_cache();
         self.cached_missions = None;
         self.mission_scan_rx = None;
@@ -637,7 +678,6 @@ impl Foxy {
         self.space_selector_candidate_galleys = Default::default();
         self.space_detail_candidate_galleys = Default::default();
         self.server_row_galleys = Default::default();
-        self.repository_settings_addon_preload_worker = None;
         self.repository_addon_size_load_pending = false;
         self.repository_addon_size_bytes_by_repo_and_addon.clear();
         self.addons_filter.clear();
@@ -659,32 +699,24 @@ impl Foxy {
         self.editor_mission_show_folders = false;
         self.editor_mission_terrain_filter.clear();
 
-        // Server queries and join preflight. Query threads from the old space
-        // are already detached; dropping their handles and draining whatever
-        // they already sent keeps their results out of the new space's status
-        // map (late arrivals key on an address this space does not list).
+        self.server_query_generation.advance();
         self.server_statuses.clear();
         self.server_refresh_indicator_until.clear();
         self.pending_server_queries.clear();
-        self.pending_queries.clear();
+        self.reap_server_query_workers();
         while self.server_updates.try_recv().is_ok() {}
         self.pending_join_preflight = None;
         self.pending_join_preflight_query = None;
         self.pending_join_status_query = None;
 
-        // Scheduling drafts reference this space's repositories (scheduled jobs
-        // are part of the game-space settings half).
         self.scheduling_editor = None;
 
-        // Direct-download inputs point at the previous space's game folders.
         self.direct_download_url_input.clear();
         self.direct_download_destination_input.clear();
         self.pending_direct_download_collisions = None;
         self.direct_download_error = None;
         self.direct_download_update_view = false;
 
-        // Watcher suppression and staleness tracking belong to the watcher that
-        // was just stopped.
         self.fs_watch_suppressed_until_ms
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.fs_watch_signature = None;
@@ -699,7 +731,6 @@ impl Foxy {
         self.fs_watch_backoff_urls.clear();
         self.fs_watch_scan_urls.clear();
 
-        // Images and metadata fetches.
         self.pending_image_jobs.clear();
         self.cached_icons.clear();
         self.cached_repo_images.clear();
@@ -708,15 +739,14 @@ impl Foxy {
         self.pending_repo_metadata_jobs.clear();
         self.pending_repo_metadata_refresh.clear();
 
-        // Quick scan, filesystem watch, and recheck pipelines.
-        self.quick_scan_worker = None;
+        // Keep worker handles until handoff joins them; clearing result keys does not release a worker-held database.
+        while self.quick_scan_rx.try_recv().is_ok() {}
+        while self.quick_scan_progress_rx.try_recv().is_ok() {}
         self.startup_quick_scan_filter_rx = None;
-        self.startup_quick_scan_filter_worker = None;
         self.startup_probe_unknown.clear();
         self.startup_probe_retry_armed_at = None;
         self.startup_probe_retries_completed = 0;
         self.startup_probe_retry_rx = None;
-        self.startup_probe_retry_worker = None;
         self.deferred_fs_scan.clear();
         self.pending_quick_scan_urls.clear();
         self.pending_quick_scan_prevalidated_urls.clear();
@@ -737,10 +767,8 @@ impl Foxy {
         self.repository_space_sync_queue.clear();
         self.repository_visual_folder_sync_queue.clear();
         self.startup_pending_restore_rx = None;
-        self.startup_pending_restore_worker = None;
         self.startup_repository_layout_logged = false;
-        // O8 covers a launch, not a space switch; a live tracker here would
-        // never settle and would pin the `startup-sync` busy reason.
+
         self.startup_sync = None;
         self.startup_quick_scan_requested = 0;
         self.prelaunch_process_checks = Default::default();
@@ -750,9 +778,7 @@ impl Foxy {
         self.settings_save_error = None;
         self.legacy_migration_review_files.clear();
 
-        // Sync/download progress and results.
         self.backend_progress_rx = None;
-        self.backend_worker = None;
         self.sync_started_at = None;
         self.frame_cost_at_sync_start = None;
         self.syncing_repository = None;
@@ -841,12 +867,10 @@ impl Foxy {
         self.update_modal_sort_last_progress_invalidation = None;
         self.last_incomplete_config_sync_toast_at = None;
 
-        // Repository status maps.
         self.repo_states.clear();
         self.repo_states_version = self.repo_states_version.wrapping_add(1);
         self.repo_foxy_modes.clear();
 
-        // Arma-specific integrations.
         self.detected_arma3_profiles.clear();
         self.detected_active_arma3_profile = None;
         self.pending_arma3_profile_action = None;
@@ -859,14 +883,10 @@ impl Foxy {
         self.ts3_plugin_scan_requeued = false;
         self.editor_launch_cooldown_until = None;
 
-        // Backup task transients (the worker is finished before a switch is
-        // allowed; the app-global backup manager records stay).
-        self.addon_backup_worker = None;
         self.addon_backup_status = None;
         self.addon_backup_notice = None;
         self.addon_backup_restore_state = None;
 
-        // Debug-mode shadows and one-off flows.
         self.stored_settings = None;
         self.stored_repositories = None;
         self.swifty_migration_state = Default::default();
@@ -953,24 +973,13 @@ fn read_optional_json<T: DeserializeOwned + Default>(
     }
 }
 
-/// `Foxy` fields that deliberately survive a game-space switch because they are
-/// app-global, not space-scoped: the window and renderer, theme and locale, the
-/// activity log, app updates, the backup manager, the tray, scheduling
-/// machinery that is not per-space, and every worker channel endpoint (dropping
-/// a sender would break the receiver for the rest of the session).
-///
-/// [`reset_space_scoped_state`] cannot be verified at runtime - `Foxy` needs a
-/// live `eframe::CreationContext` and has no `Default` - so the guard test below
-/// checks the source instead: every field must be either reset there or listed
-/// here. A new space-scoped field that nobody resets is exactly the silent
-/// cross-space data leak the `(remote_url, local_path)` identity rules exist to
-/// prevent, so forgetting one has to fail loudly somewhere.
+/// Fields listed here are intentionally app-global or worker endpoints that must outlive a switch. The guard test requires every `Foxy` field to be reset or allowlisted.
 #[cfg(test)]
 const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "pending_installer_path",
     "pending_installer_error",
+    "installer_owner_check",
     "shutdown_after_close",
-    // Window, rendering, and view chrome.
     "app_icon",
     "app_icon_texture_bytes",
     "tfr_logo",
@@ -983,12 +992,10 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "startup_frame_rendered",
     "startup_tasks_started",
     "startup_first_frame_at",
-    // The machine summary describes the host, not a game space, and is built
-    // once per launch.
+    // Machine summary is host-wide and built once per launch.
     "startup_diagnostics_rx",
     "close_requested_at",
     "close_worker_wait_started_at",
-    // Tick history spans spaces; a switch is no sleep gap.
     "scheduler_last_tick_at",
     "current_view",
     "last_view",
@@ -1015,11 +1022,12 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "unreadable_config_replacements",
     "i18n",
     "launch_debug_mode",
+    // A command-line presentation override applies to the whole UI session.
+    "launch_mode_override",
     "show_debug_windows",
     "previous_debug_mode",
     "debug_modal_previews",
     "agent_gui",
-    // Reloaded by the switch itself rather than blanked first.
     "pending_db_schema_wipe",
     "db_lock_conflict",
     "pending_low_space_notice",
@@ -1031,7 +1039,6 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "workshop_task_rx",
     "workshop_task_worker",
     "benchmark_channels",
-    // Activity log and diagnostics.
     "activity_log_cache",
     "activity_log_galleys",
     "activity_log_generation",
@@ -1049,7 +1056,6 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "memory_diagnostics_last_logged_stage_key",
     "memory_diagnostics_process_map",
     "memory_diagnostics_last_process_map_at",
-    // Backup manager (backups are app-global by plan section 19).
     "backup_manager_records",
     "backup_manager_records_version",
     "backup_manager_loaded",
@@ -1065,8 +1071,7 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "backup_inventory_refresh_in_progress",
     "backup_inventory_request_id",
     "backup_inventory_in_flight_request_id",
-    // Direct download: the transfer itself blocks a switch, and the remaining
-    // fields are app-global preferences rather than space state.
+    // A direct transfer blocks switching; the remaining values are app-global preferences.
     "show_direct_download_screen",
     "direct_download_use_global_speed_limit",
     "direct_download_override_speed_unlimited",
@@ -1074,7 +1079,6 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "direct_download_session",
     "direct_download_progress_rx",
     "direct_download_worker",
-    // App self-update.
     "app_update_status",
     "app_update_event_rx",
     "app_update_download_rx",
@@ -1099,14 +1103,15 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "repositories_last_mutated_at",
     "repositories_save_in_flight_revision",
     "repositories_completed_revision",
-    // Long-lived worker channel endpoints. These outlive a switch by design;
-    // the state they feed is reset above.
+    // Keep long-lived worker channels across switches; reset only the view state they feed.
     "repository_settings_addon_preload_rx",
     "repository_settings_addon_preload_tx",
     "repository_addon_size_load_rx",
     "repository_addon_size_load_tx",
     "server_updates",
     "updates_sender",
+    // Join retired query, preflight, mission-scan, and image-fetch workers before releasing their database.
+    "pending_queries",
     "join_preflight_worker",
     "join_preflight_result_rx",
     "join_preflight_result_tx",
@@ -1118,8 +1123,34 @@ const APP_GLOBAL_FOXY_FIELDS: &[&str] = &[
     "retained_file_preview_rx",
     "retained_file_removal_tx",
     "retained_file_removal_rx",
+    "mission_scan_worker",
+    "client_db_admission",
+    "mode_ownership",
+    "client_worker_handoff_active",
     "image_result_rx",
     "image_result_tx",
+    "image_workers",
+    "startup_pending_restore_worker",
+    "startup_quick_scan_filter_worker",
+    "startup_probe_retry_worker",
+    "cached_update_load_workers",
+    "quick_scan_worker",
+    "backend_worker",
+    "repository_settings_addon_preload_worker",
+    "maintenance_workers",
+    "force_redownload_workers",
+    "addon_hash_recalc_worker",
+    "repo_metadata_workers",
+    "repository_space_freshness_worker",
+    "repository_addon_size_load_worker",
+    "database_wipe_worker",
+    "addon_backup_worker",
+    "pending_update_clear_workers",
+    "overview_worker",
+    "ts3_plugin_scan_worker",
+    "repository_space_import_worker",
+    "benchmark_workers",
+    "workshop_task_generation",
     "repo_metadata_result_rx",
     "repo_metadata_result_tx",
     "repository_space_import_result_rx",

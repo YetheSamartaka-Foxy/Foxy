@@ -18,9 +18,9 @@ impl Foxy {
 
     pub fn open_reference_view(&mut self, view: FoxyView) {
         if !Self::is_reference_view(self.current_view) {
-            self.last_view = self.current_view;
+            self.last_view = self.mode_safe_view(self.current_view);
         } else if self.last_view == FoxyView::None {
-            self.last_view = FoxyView::RepositoryList;
+            self.last_view = self.mode_home_view();
         }
 
         if view == FoxyView::About {
@@ -32,18 +32,14 @@ impl Foxy {
 
     pub fn close_reference_view(&mut self) {
         self.current_view = match self.last_view {
-            FoxyView::None => FoxyView::RepositoryList,
-            view if Self::is_reference_view(view) => FoxyView::RepositoryList,
-            view => view,
+            view if Self::is_reference_view(view) => self.mode_home_view(),
+            view => self.mode_safe_view(view),
         };
         self.last_view = FoxyView::None;
     }
 
     pub fn restore_last_view_or_default(&mut self) {
-        self.current_view = match self.last_view {
-            FoxyView::None => FoxyView::RepositoryList,
-            view => view,
-        };
+        self.current_view = self.mode_safe_view(self.last_view);
         self.last_view = FoxyView::None;
     }
 
@@ -54,12 +50,9 @@ impl Foxy {
         }
 
         self.last_view = if Foxy::is_reference_view(self.current_view) {
-            match self.last_view {
-                FoxyView::None => FoxyView::RepositoryList,
-                view => view,
-            }
+            self.mode_safe_view(self.last_view)
         } else {
-            self.current_view
+            self.mode_safe_view(self.current_view)
         };
         self.settings_view_state.current_tab = "Application".to_string();
         self.current_view = FoxyView::Settings;
@@ -71,6 +64,20 @@ impl Foxy {
     ) {
         let escape_pressed = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
         if escape_pressed {
+            if self.server_view.reforger_addon_confirmation {
+                if !self.server_view.busy() {
+                    self.server_view.invalidate_reforger_addon_acquisition();
+                }
+                return;
+            }
+            if self.server_view.dialog.is_some() {
+                if !self.server_view.busy() {
+                    self.server_view
+                        .invalidate_deployment_record_selection_plan();
+                    self.server_view.dialog = None;
+                }
+                return;
+            }
             if self.update_modal_open {
                 self.update_modal_open = false;
                 self.direct_download_update_view = false;

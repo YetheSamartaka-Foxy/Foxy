@@ -14,14 +14,9 @@ use std::collections::HashSet;
 mod forced_manifest_refresh;
 mod shared_cleanup;
 
-/// Build a fresh Turso test database (full bootstrap schema) for fixtures.
 async fn build_db() -> std::sync::Arc<turso::Database> {
     crate::core::tasks::db_turso::build_test_database().await
 }
-
-// ---------------------------------------------------------------------------
-// Raw-SQL fixture seeding (the seam's typed inserts; replaces SeaORM ActiveModels)
-// ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 async fn seed_repository(
@@ -148,7 +143,6 @@ async fn seed_subfile(
     .expect("seed subfile");
 }
 
-/// Read `(local_checksum, remote_checksum, local_content_hash)` for a row by id.
 async fn checksums(fdb: &FoxyDb, table: &str, id: i64) -> (String, String, String) {
     let row = fdb
         .query_one(
@@ -611,8 +605,6 @@ async fn pre_propagation_copies_sibling_content_hash_so_quick_scan_stays_clean()
     assert_eq!(addon_b_content, addon_a_content);
     assert!(!addon_b_content.is_empty());
 
-    // Tree checksums already copied by an earlier pass must still get the
-    // content-hash baseline on the next pass.
     fdb.execute(
         "UPDATE files SET local_content_hash = '' WHERE id = 22",
         params![],
@@ -841,8 +833,6 @@ async fn content_hash_refresh_records_baseline_for_pending_addon_missing_new_fil
     assert!(addon.files.iter().any(|f| f.name == "added.pbo"));
 }
 
-/// Refresh a two-addon repository with only `@pending`'s file in scope and
-/// return the repository baseline and `@kept`'s baseline afterwards.
 async fn file_scoped_rollup(kept_baseline: &str) -> (String, String) {
     let temp = tempfile::tempdir().expect("temp dir");
     let db = build_db().await;
@@ -956,10 +946,6 @@ async fn a_file_scoped_refresh_rolls_the_repository_up_with_untouched_addon_base
     );
 }
 
-// ---------------------------------------------------------------------------
-// Quick scan eligibility tests
-// ---------------------------------------------------------------------------
-
 async fn create_test_db() -> std::sync::Arc<turso::Database> {
     build_db().await
 }
@@ -992,7 +978,7 @@ async fn batch_eligible_repos_rejects_empty_remote_checksum_only() {
         "CONTENT_HASH",
     )
     .await;
-    // empty remote_checksum → rejected
+
     seed_repository(
         &fdb,
         2,
@@ -1004,7 +990,7 @@ async fn batch_eligible_repos_rejects_empty_remote_checksum_only() {
         "CONTENT_HASH",
     )
     .await;
-    // empty content hash → still a candidate (only the remote checksum gate is "fast")
+
     seed_repository(
         &fdb,
         3,
@@ -1069,7 +1055,6 @@ async fn eligible_joined_full_tree_ready() {
 
     let repo_url = "https://example.invalid/full-tree/";
 
-    // Insert a complete tree: repo → addon → file, all with checksums populated
     seed_repository(
         &fdb,
         1,
@@ -1111,7 +1096,6 @@ async fn eligible_joined_full_tree_ready() {
     seed_addon_file(&fdb, 1, 1).await;
     seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
 
-    // Full tree with all checksums → should be eligible
     assert!(launch_quick_scan_repo_eligible_joined(&fdb, 1, repo_url).await);
     let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
     assert_eq!(
@@ -1119,7 +1103,6 @@ async fn eligible_joined_full_tree_ready() {
         StartupQuickScanEligibility::Prevalidated
     );
 
-    // Also verify the individual joined helpers directly
     assert_eq!(
         remote_checksum_state_ready_joined(&fdb, 1, "test").await,
         Some(true)
@@ -1129,7 +1112,6 @@ async fn eligible_joined_full_tree_ready() {
         Some(true)
     );
 
-    // Clear the addon's remote_checksum → should become ineligible
     fdb.execute(
         "UPDATE addons SET remote_checksum = '' WHERE id = 1",
         params![],
@@ -1143,7 +1125,6 @@ async fn eligible_joined_full_tree_ready() {
         Some(false)
     );
 
-    // Startup eligibility now trusts complete repo/addon rollups.
     fdb.execute(
         "UPDATE addons SET remote_checksum = 'MOD_REMOTE' WHERE id = 1",
         params![],
@@ -1167,7 +1148,6 @@ async fn eligible_joined_full_tree_ready() {
         Some(false)
     );
 
-    // Clearing the addon-level rollup breaks the fast path.
     fdb.execute(
         "UPDATE addons SET local_content_hash = '' WHERE id = 1",
         params![],
@@ -1240,11 +1220,6 @@ async fn startup_eligibility_requires_part_metadata() {
     );
 }
 
-/// The preflight decides two things from part rows - "is any remote part
-/// checksum missing" and "is any part still unhashed" - and answers both with
-/// `LIMIT 1` probes rather than an aggregate over every part in the repository.
-/// A part whose file is not already proven clean must still hold the repository
-/// out of the fast path.
 #[tokio::test]
 async fn startup_eligibility_detects_a_part_missing_its_local_checksum() {
     let db = create_test_db().await;
@@ -1263,8 +1238,7 @@ async fn startup_eligibility_detects_a_part_missing_its_local_checksum() {
         "REPO_CONTENT",
     )
     .await;
-    // Blank addon content hash keeps the addon fast path from short-circuiting
-    // before the file and part levels are consulted.
+
     seed_addon(
         &fdb,
         1,
@@ -1300,8 +1274,6 @@ async fn startup_eligibility_detects_a_part_missing_its_local_checksum() {
         StartupQuickScanEligibility::Ineligible
     );
 
-    // A part with no remote checksum is a metadata gap, not a local one, and
-    // must also keep the repository out of the local-only path.
     fdb.execute(
         "UPDATE subfiles SET local_checksum = 'PART_LOCAL', remote_checksum = '' WHERE id = 1",
         params![],
@@ -1313,8 +1285,6 @@ async fn startup_eligibility_detects_a_part_missing_its_local_checksum() {
         StartupQuickScanEligibility::Ineligible
     );
 
-    // Both part checksums present: only the blank addon content hash is left,
-    // which is a baseline refresh rather than a tree repair.
     fdb.execute(
         "UPDATE subfiles SET remote_checksum = 'PART_REMOTE' WHERE id = 1",
         params![],
@@ -1327,9 +1297,6 @@ async fn startup_eligibility_detects_a_part_missing_its_local_checksum() {
     );
 }
 
-/// A part probe that cannot run answers nothing, not "nothing is missing". The
-/// preflight has no evidence either way, so the repository must fall back to the
-/// conservative verdict instead of being reported ready from a failed query.
 #[tokio::test]
 async fn startup_eligibility_is_conservative_when_a_part_probe_fails() {
     let db = create_test_db().await;
@@ -1348,8 +1315,7 @@ async fn startup_eligibility_is_conservative_when_a_part_probe_fails() {
         "REPO_CONTENT",
     )
     .await;
-    // Blank addon content hash keeps the addon fast path from short-circuiting
-    // before the part level is consulted.
+
     seed_addon(
         &fdb,
         1,
@@ -1396,10 +1362,6 @@ async fn startup_eligibility_is_conservative_when_a_part_probe_fails() {
     );
 }
 
-/// A deselected optional addon is never downloaded, so its files can never earn
-/// local tree checksums, part checksums or content hashes. Counting it in the
-/// startup preflight left the repository `unknown` on every launch and forced a
-/// manual recheck that never stuck.
 #[tokio::test]
 async fn startup_eligibility_ignores_disabled_addon_without_local_state() {
     let db = create_test_db().await;
@@ -1447,8 +1409,6 @@ async fn startup_eligibility_ignores_disabled_addon_without_local_state() {
     seed_addon_file(&fdb, 1, 1).await;
     seed_subfile(&fdb, 1, 1, "PART_LOCAL", "PART_REMOTE").await;
 
-    // Never-downloaded optional addon: no local content hash anywhere and no
-    // local part checksum, mirroring a folder that does not exist on disk.
     seed_addon(
         &fdb,
         2,
@@ -1480,7 +1440,6 @@ async fn startup_eligibility_ignores_disabled_addon_without_local_state() {
 
     let context = Arc::new(FoxyContext::new(db.clone(), reqwest::Client::new()));
 
-    // While the addon still looks enabled it blocks the fast path.
     assert_eq!(
         launch_quick_scan_repo_startup_eligibility(context.clone(), repo_url).await,
         StartupQuickScanEligibility::Ineligible
@@ -1541,7 +1500,6 @@ async fn persisting_addon_selection_updates_only_changed_rows() {
     assert!(enabled_after(1).await);
     assert!(!enabled_after(2).await);
 
-    // Re-running is a no-op once the stored state already matches.
     let changed_again =
         persist_repository_addon_enabled_states(context, repo_url, local_path, &overrides).await;
     assert_eq!(changed_again, 0);

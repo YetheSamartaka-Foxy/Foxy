@@ -65,9 +65,7 @@ fn active_app_id(action: &str, settings: &SettingsViewState) -> Result<u32, Comm
     })
 }
 
-/// Launch arguments that belong in the state checksum. Only a user-configured
-/// game has arguments that differ between players; the fixed modules build
-/// their own and would only add noise.
+/// Only custom-game launch arguments vary between players and belong in the shared state checksum.
 fn checksum_launch_args(settings: &SettingsViewState) -> Vec<String> {
     let module = crate::core::game::registry().active();
     if module.id() != generic_game::GENERIC_GAME_ID {
@@ -215,9 +213,8 @@ fn import_items(
         .iter()
         .map(|item| item.item_id.clone())
         .collect::<Vec<_>>();
-    // A shared version pin names files Steam no longer serves, so importing one
-    // records the request without claiming the local copy matches it. The
-    // matching .foxyshare bundle is what carries those files.
+    // Steam cannot supply old shared pins; record their intent without claiming matching local bytes.
+    // Only the corresponding .foxyshare bundle carries that revision.
     let pinned = items
         .iter()
         .filter(|item| item.version.is_some())

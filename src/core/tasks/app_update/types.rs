@@ -2,11 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// Types mirroring the server-side foxy-app-updater.json schema
-// ---------------------------------------------------------------------------
-
-/// Top-level update manifest (`foxy-app-updater.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateManifest {
@@ -15,7 +10,6 @@ pub struct UpdateManifest {
     pub versions: Vec<VersionEntry>,
 }
 
-/// A single version entry in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionEntry {
@@ -24,7 +18,6 @@ pub struct VersionEntry {
     pub platforms: HashMap<String, PlatformEntry>,
 }
 
-/// Platform-specific installer info.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformEntry {
@@ -39,7 +32,6 @@ pub fn default_installer_hash_algorithm() -> String {
     "blake3".to_string()
 }
 
-/// A parsed per-version changelog from the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangelogVersion {
     pub version: String,
@@ -48,81 +40,67 @@ pub struct ChangelogVersion {
     pub sections: Vec<ChangelogSection>,
 }
 
-/// A section within a changelog (e.g. "Added", "Fixed").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangelogSection {
     pub title: String,
     pub items: Vec<String>,
 }
 
-// ---------------------------------------------------------------------------
-// App-update state tracked by the UI
-// ---------------------------------------------------------------------------
-
-/// Combined info about an available update from a specific source.
 #[derive(Debug, Clone)]
 pub struct AppUpdateInfo {
-    /// Base URL of the update source.
     pub source_base_url: String,
-    /// The full manifest from the server.
+
     pub manifest: UpdateManifest,
-    /// The local app version at check time.
+
     pub current_version: String,
-    /// Changelogs fetched so far (lazily populated).
+
     pub fetched_changelogs: Vec<ChangelogVersion>,
 }
 
-/// Progress/status of the update flow.
 #[derive(Debug, Clone)]
 pub enum UpdateCheckStatus {
-    /// No update check running.
     Idle,
-    /// Checking for updates.
+
     Checking,
-    /// An update (or version list) is available.
+
     Available(AppUpdateInfo),
-    /// Downloading an installer.
+
     Downloading {
         progress: f32,
         bytes_done: u64,
         bytes_total: u64,
     },
-    /// Verifying the downloaded installer hash.
+
     Verifying,
-    /// Installer downloaded and verified, ready to run.
-    ReadyToInstall { installer_path: PathBuf },
-    /// Something went wrong.
+
+    ReadyToInstall {
+        installer_path: PathBuf,
+    },
+
     Failed(String),
-    /// Already on the latest version.
+
     UpToDate(AppUpdateInfo),
 }
 
-/// Events sent from the background update worker to the UI via mpsc.
 #[derive(Debug, Clone)]
 pub enum AppUpdateEvent {
-    /// Manifest fetched successfully.
     ManifestFetched(AppUpdateInfo),
-    /// A changelog was fetched for a specific version.
+
     ChangelogFetched(ChangelogVersion),
-    /// A changelog fetch failed for a specific version.
+
     ChangelogFetchFailed(String),
-    /// Download progress update.
+
     DownloadProgress { bytes_done: u64, bytes_total: u64 },
-    /// Verifying installer hash.
+
     Verifying,
-    /// Download + verification complete.
+
     InstallerReady { installer_path: PathBuf },
-    /// An error occurred.
+
     Error(String),
-    /// Current version is already latest.
+
     UpToDate(AppUpdateInfo),
 }
 
-// ---------------------------------------------------------------------------
-// GitHub Releases API types
-// ---------------------------------------------------------------------------
-
-/// A GitHub release as returned by the Releases API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GitHubRelease {
     pub tag_name: String,
@@ -133,7 +111,6 @@ pub struct GitHubRelease {
     pub published_at: Option<String>,
 }
 
-/// A single asset attached to a GitHub release.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GitHubAsset {
     pub name: String,
@@ -212,7 +189,7 @@ mod tests {
         let json = r#"{"version":"1.0.0","sections":[]}"#;
         let changelog: ChangelogVersion = serde_json::from_str(json).unwrap();
         assert_eq!(changelog.version, "1.0.0");
-        assert_eq!(changelog.date, ""); // default
+        assert_eq!(changelog.date, "");
         assert!(changelog.sections.is_empty());
     }
 

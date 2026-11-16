@@ -14,47 +14,33 @@ pub(super) const PATCH_MIN_SAVINGS_PERCENT: u64 = 0;
 pub(super) const PATCH_DOWNLOAD_MAX_RETRIES: u32 = 3;
 pub(super) const PATCH_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub(super) const COPY_BUFFER_SIZE: usize = 512 * 1024;
-/// Chunk size of the sequential copy-run stream. Large enough that a
-/// rotational disk alternating between the source and the output spends its
-/// time transferring rather than seeking.
+/// Size copy chunks to reduce seeks while alternating between source and output on rotational disks.
 pub(super) const RUN_COPY_BUFFER_SIZE: usize = 8 * 1024 * 1024;
-/// Output bytes assembled in memory before one positional write. Small ops
-/// written one by one let the OS lazy writer interleave with the source reads
-/// on the same spindle; a few large writes keep both sequential.
+/// Batch small writes to keep source reads and output writes sequential on rotational disks.
 pub(super) const APPLY_BATCH_BYTES: u64 = 16 * 1024 * 1024;
 /// Upper bound on a copy gap fetched and discarded between two insert ops so
 /// they share one range request; see [`insert_run_gap_budget`].
 pub(super) const INSERT_RUN_MAX_GAP_BYTES: u64 = 256 * 1024;
-/// Time one extra range request is taken to cost once its round trip is
-/// amortized over the parallel connections; a gap that transfers faster than
-/// this at the measured throughput is cheaper to bridge than to split.
+/// Bridge gaps only when the saved request round trip costs more than transferring the gap.
 const INSERT_RUN_GAP_BUDGET_MS: u64 = 8;
-/// Gap bridged before any throughput sample exists (a stage that starts with
-/// patches plans them all at once): one small entry, break-even at ~4 MB/s.
+/// Use a small default gap before throughput has been measured.
 const INSERT_RUN_MIN_GAP_BYTES: u64 = 32 * 1024;
-/// Upper bound on one coalesced insert request for a budget outside the
-/// download orchestrator (tests); the orchestrator passes its chunk size.
+
 #[cfg(test)]
 pub(super) const INSERT_RUN_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Request capacity a patched file's insert-run downloads draw from. The
-/// origin caps every connection at a low rate, so aggregate throughput is
-/// bought with concurrent requests; patched files therefore share the same
-/// global range budget and chunk size as full downloads instead of a fixed
-/// handful of connections per file.
+/// Share the full-download range budget so patched files do not oversubscribe origin capacity.
 #[derive(Clone)]
 pub(crate) struct PatchRequestBudget {
-    /// Global permits shared with full-download range requests.
     pub(crate) range_permits: Arc<tokio::sync::Semaphore>,
-    /// Requests one file may hold at once (the per-file fair-share cap).
+
     pub(crate) per_file_requests: usize,
-    /// Upper bound on one coalesced insert request.
+
     pub(crate) max_run_bytes: u64,
 }
 
 #[cfg(test)]
 impl PatchRequestBudget {
-    /// A budget of `requests` connections for one file with no global cap.
     pub(crate) fn standalone(requests: usize) -> Self {
         Self {
             range_permits: Arc::new(tokio::sync::Semaphore::new(requests.max(1))),
@@ -176,9 +162,7 @@ pub(super) fn is_empty_content_checksum(checksum: &str) -> bool {
         )
 }
 
-/// Segment checksums of every op in plan order, taking the applied checksum of
-/// each op with bytes from `applied` (in order) and the target checksum of each
-/// zero-length op, which nothing reads or writes.
+/// Preserve zero-length ops' target digests in the ordered checksum rollup.
 pub(super) fn segment_checksums_with_empty_ops<'a>(
     ops: &'a [DownloadPatchOp],
     applied: &'a [String],
@@ -265,14 +249,10 @@ pub(super) fn sampled_copy_op_indices(copy_indices: &[usize], max_samples: usize
     sampled
 }
 
-/// One sequential unit of the apply loop: a run of adjacent copy ops that is
-/// contiguous in both the source file and the output, or a single insert op.
-/// Every op keeps its own boundary checksum inside a run, so per-part
-/// verification and fallback are unchanged; only the I/O is merged.
+/// Keep per-op checksum boundaries so batching I/O does not change verification or fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ApplySegment {
     CopyRun {
-        /// Indices into the op list, in `data_order`.
         op_range: std::ops::Range<usize>,
         source_start: u64,
         dest_start: u64,
@@ -283,9 +263,7 @@ pub(super) enum ApplySegment {
     },
 }
 
-/// Merge adjacent copy ops into sequential runs. A gap in the source, a gap in
-/// the output, or an insert op breaks a run. Ops missing the fields their type
-/// requires fail here, before any byte is written.
+/// Reject incomplete ops before writing any bytes.
 pub(super) fn coalesce_apply_segments(
     ops: &[DownloadPatchOp],
 ) -> anyhow::Result<Vec<ApplySegment>> {
@@ -332,9 +310,6 @@ pub(super) fn coalesce_apply_segments(
     Ok(segments)
 }
 
-/// A group of consecutive segments whose output is assembled in one buffer
-/// and written with one call. A segment larger than the batch budget stands
-/// alone and is streamed instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ApplyBatch {
     pub(super) segment_range: std::ops::Range<usize>,
@@ -357,9 +332,6 @@ pub(super) fn segment_dest_span(segment: &ApplySegment, ops: &[DownloadPatchOp])
     }
 }
 
-/// Group segments (already in output order) into batches of at most
-/// `max_bytes` of output. A single segment above the budget becomes its own
-/// batch so the caller can stream it.
 pub(super) fn plan_apply_batches(
     segments: &[ApplySegment],
     ops: &[DownloadPatchOp],
@@ -385,12 +357,8 @@ pub(super) fn plan_apply_batches(
     batches
 }
 
-/// Consecutive insert ops fetched with one range request. The request covers
-/// `request_start..=request_end` of the remote file; bytes between the ops
-/// (small copy ops the plan already has locally) are discarded on arrival.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct InsertRun {
-    /// Indices into the op list, in `data_order`.
     pub(super) op_indices: Vec<usize>,
     pub(super) request_start: u64,
     pub(super) request_end: u64,
@@ -402,8 +370,6 @@ impl InsertRun {
     }
 }
 
-/// Largest copy gap worth fetching and discarding at `peak_network_bps`,
-/// between [`INSERT_RUN_MIN_GAP_BYTES`] and [`INSERT_RUN_MAX_GAP_BYTES`].
 pub(super) fn insert_run_gap_budget(peak_network_bps: u64) -> u64 {
     peak_network_bps
         .saturating_mul(INSERT_RUN_GAP_BUDGET_MS)
@@ -411,9 +377,6 @@ pub(super) fn insert_run_gap_budget(peak_network_bps: u64) -> u64 {
         .clamp(INSERT_RUN_MIN_GAP_BYTES, INSERT_RUN_MAX_GAP_BYTES)
 }
 
-/// Group insert ops into runs: ops adjacent in the output (or separated by at
-/// most `max_gap` bytes of copy ops) share one request, up to `max_bytes` of
-/// remote range per run. Ops without a blob offset are skipped.
 #[cfg(test)]
 pub(super) fn plan_insert_runs(
     ops: &[DownloadPatchOp],
@@ -457,13 +420,10 @@ fn plan_insert_runs_where(
     runs
 }
 
-/// One request-sized slice of an insert op too large to travel as a single
-/// request: fetched on its own connection and written straight into the
-/// blob; the op is verified from the blob once every slice has landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OpChunk {
     pub(super) op_index: usize,
-    /// Inclusive remote range, in output coordinates.
+
     pub(super) dest_start: u64,
     pub(super) dest_end: u64,
     pub(super) blob_at: u64,
@@ -475,10 +435,6 @@ impl OpChunk {
     }
 }
 
-/// The requests for a file's insert ops: coalesced runs for ops that fit a
-/// request, and chunks for ops larger than one, so a file whose plan is a
-/// few huge inserts still spreads over as many connections as the budget
-/// grants.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct InsertRequestPlan {
     pub(super) runs: Vec<InsertRun>,
@@ -618,9 +574,6 @@ mod tests {
 
     #[test]
     fn chunk_sized_budget_splits_a_large_blob_into_many_requests() {
-        // 32 adjacent 2 MiB ops: one 64 MiB run under the legacy cap, 32
-        // requests under the full-download chunk size, so the file can hold
-        // as many connections as the range budget grants it.
         let ops: Vec<DownloadPatchOp> = (0..32)
             .map(|i| op(i, PatchOpType::InsertRemote, i as u64 * (2 << 20), 2 << 20))
             .collect();
@@ -628,8 +581,7 @@ mod tests {
         let runs = plan_insert_runs(&ops, 0, 2 << 20);
         assert_eq!(runs.len(), 32);
         assert!(runs.iter().all(|run| run.request_len() == 2 << 20));
-        // `plan_insert_runs` alone cannot split an op; the request plan
-        // chunks it so it can travel over as many connections as the budget.
+
         let big = vec![op(0, PatchOpType::InsertRemote, 0, 30 << 20)];
         let runs = plan_insert_runs(&big, 0, 2 << 20);
         assert_eq!(runs.len(), 1);
@@ -653,10 +605,7 @@ mod tests {
         ops[2].blob_offset = Some(100);
         ops[4].blob_offset = Some(1_200);
         let plan = plan_insert_requests(&ops, 60, 400);
-        // The 1,000-byte op becomes three chunks of 400/400/200 at blob
-        // offsets 100/500/900; the 450-byte op two chunks; the 100-byte ops
-        // stay runs (op 0 and op 3 are separated by the chunked op, so they
-        // do not coalesce across it).
+
         assert_eq!(plan.chunks.len(), 5);
         assert_eq!(
             plan.chunks[..3]
@@ -670,7 +619,7 @@ mod tests {
         assert_eq!(plan.runs.len(), 2);
         assert_eq!(plan.runs[0].op_indices, vec![0]);
         assert_eq!(plan.runs[1].op_indices, vec![3]);
-        // An op without a blob offset is neither chunked nor run.
+
         ops[2].blob_offset = None;
         let plan = plan_insert_requests(&ops, 60, 400);
         assert_eq!(plan.chunks.len(), 2);
@@ -731,8 +680,6 @@ mod tests {
         assert!(!batches[2].is_oversized(100));
     }
 
-    // ── normalize_checksum ──────────────────────────────────────────────
-
     #[test]
     fn normalize_checksum_trims_and_uppercases() {
         assert_eq!(normalize_checksum("  abc123  "), "ABC123");
@@ -742,8 +689,6 @@ mod tests {
     fn normalize_checksum_empty() {
         assert_eq!(normalize_checksum(""), "");
     }
-
-    // ── checksum_matches ────────────────────────────────────────────────
 
     #[test]
     fn checksum_matches_case_insensitive() {
@@ -760,8 +705,6 @@ mod tests {
     fn checksum_matches_different_values() {
         assert!(!checksum_matches("abc123", "def456"));
     }
-
-    // ── PatchOpType ─────────────────────────────────────────────────────
 
     #[test]
     fn patch_op_type_round_trip() {
@@ -780,8 +723,6 @@ mod tests {
         assert_eq!(PatchOpType::from_str("unknown_op"), None);
     }
 
-    // ── infer_repository_url ────────────────────────────────────────────
-
     #[test]
     fn infer_repository_url_from_file_path() {
         assert_eq!(
@@ -794,8 +735,6 @@ mod tests {
     fn infer_repository_url_no_slash() {
         assert_eq!(infer_repository_url("file.pbo"), "");
     }
-
-    // ── sampled_copy_op_indices ─────────────────────────────────────────
 
     #[test]
     fn sampled_copy_op_indices_empty_input() {
@@ -818,33 +757,26 @@ mod tests {
     fn sampled_copy_op_indices_evenly_distributed() {
         let indices: Vec<usize> = (0..100).collect();
         let sampled = sampled_copy_op_indices(&indices, 5);
-        // Should include first and last
+
         assert_eq!(*sampled.first().unwrap(), 0);
         assert_eq!(*sampled.last().unwrap(), 99);
         assert!(sampled.len() <= 5);
     }
 
-    // ── should_abort_copy_fallback ──────────────────────────────────────
-
     #[test]
     fn should_abort_below_min_attempted() {
-        // Below minimum threshold, should never abort
         assert!(!should_abort_copy_fallback(5, 1000, 5, 1000));
     }
 
     #[test]
     fn should_abort_high_fallback_rate() {
-        // 15 attempted, 12 fallback = 80% > 75% threshold
         assert!(should_abort_copy_fallback(15, 1500, 12, 1200));
     }
 
     #[test]
     fn should_abort_low_fallback_rate() {
-        // 15 attempted, 2 fallback = 13% < 75% threshold
         assert!(!should_abort_copy_fallback(15, 1500, 2, 200));
     }
-
-    // ── expected_remote_end ─────────────────────────────────────────────
 
     #[test]
     fn expected_remote_end_empty() {
@@ -878,8 +810,6 @@ mod tests {
         assert_eq!(expected_remote_end(&parts), Some(300));
     }
 
-    // ── normalize_checksum: additional ─────────────────────────────────
-
     #[test]
     fn normalize_checksum_mixed_case() {
         assert_eq!(normalize_checksum("aAbBcC"), "AABBCC");
@@ -889,8 +819,6 @@ mod tests {
     fn normalize_checksum_already_upper() {
         assert_eq!(normalize_checksum("ABC123"), "ABC123");
     }
-
-    // ── checksum_matches: additional ───────────────────────────────────
 
     #[test]
     fn checksum_matches_empty_strings() {
@@ -902,8 +830,6 @@ mod tests {
         assert!(!checksum_matches("abc", ""));
         assert!(!checksum_matches("", "abc"));
     }
-
-    // ── PatchOpType: additional ────────────────────────────────────────
 
     #[test]
     fn patch_op_type_as_str_values() {
@@ -932,8 +858,6 @@ mod tests {
         assert!(!PatchOpType::InsertRemote.matches(&artifact));
     }
 
-    // ── infer_repository_url: additional ───────────────────────────────
-
     #[test]
     fn infer_repository_url_preserves_protocol() {
         assert_eq!(
@@ -946,8 +870,6 @@ mod tests {
     fn infer_repository_url_single_slash() {
         assert_eq!(infer_repository_url("/file.pbo"), "/");
     }
-
-    // ── sampled_copy_op_indices: additional ────────────────────────────
 
     #[test]
     fn sampled_copy_op_indices_single_sample() {
@@ -970,8 +892,6 @@ mod tests {
         assert_eq!(sampled, indices);
     }
 
-    // ── should_abort_copy_fallback: additional ─────────────────────────
-
     #[test]
     fn should_abort_zero_attempted_returns_false() {
         assert!(!should_abort_copy_fallback(0, 0, 0, 0));
@@ -979,28 +899,23 @@ mod tests {
 
     #[test]
     fn should_abort_high_byte_fallback_rate() {
-        // 15 attempted, 1 fallback op (low) but bytes are high
         assert!(should_abort_copy_fallback(15, 1000, 2, 800));
     }
 
     #[test]
     fn should_abort_exact_threshold() {
-        // 20 attempted, 15 fallback = 75% exactly at threshold
         assert!(should_abort_copy_fallback(20, 2000, 15, 1500));
     }
 
     #[test]
     fn should_abort_just_below_threshold() {
-        // 20 attempted, 14 fallback = 70% below 75%
         assert!(!should_abort_copy_fallback(20, 2000, 14, 1400));
     }
-
-    // ── compute_tree_checksum_from_segment_checksums ───────────────────
 
     #[test]
     fn compute_tree_checksum_empty_iterator() {
         let result = compute_tree_checksum_from_segment_checksums(std::iter::empty());
-        // Should produce an MD5 hash of no input
+
         assert_eq!(result.len(), 32);
     }
 
@@ -1008,7 +923,7 @@ mod tests {
     fn compute_tree_checksum_single_md5_segment() {
         let checksums = ["abc123"];
         let result = compute_tree_checksum_from_segment_checksums(checksums);
-        assert_eq!(result.len(), 32); // MD5 output
+        assert_eq!(result.len(), 32);
     }
 
     #[test]
@@ -1026,16 +941,11 @@ mod tests {
         assert_ne!(r1, r2);
     }
 
-    // ── keep_patch_artifacts_for_diagnostics ───────────────────────────
-
     #[test]
     fn keep_patch_artifacts_for_diagnostics_returns_bool() {
-        // In test mode (debug_assertions), should return true
         let result = keep_patch_artifacts_for_diagnostics();
         assert_eq!(result, cfg!(debug_assertions));
     }
-
-    // ── coalesce_apply_segments ────────────────────────────────────────
 
     fn copy_op(order: i64, dest_start: u64, length: u64, source_start: u64) -> DownloadPatchOp {
         DownloadPatchOp {
@@ -1141,8 +1051,6 @@ mod tests {
         op.blob_offset = None;
         assert!(coalesce_apply_segments(&[op]).is_err());
     }
-
-    // ── PatchArtifact serialization ────────────────────────────────────
 
     #[test]
     fn patch_artifact_serde_round_trip() {

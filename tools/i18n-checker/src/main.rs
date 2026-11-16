@@ -1,24 +1,3 @@
-//! i18n-checker - verifies locale JSON files against en.json (the source of truth).
-//!
-//! Run from the repository root:
-//!   cargo run --manifest-path tools/i18n-checker/Cargo.toml
-//!   cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --strict
-//!   cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --require-translated-key-file changed-keys.txt
-//!   cargo run --manifest-path tools/i18n-checker/Cargo.toml -- --audit-changed-since HEAD
-//!
-//! Or from inside the tool directory:
-//!   cd tools/i18n-checker && cargo run
-//!
-//! Checks performed:
-//!   - Missing keys (present in en.json but absent in locale; warning by default, error in --strict)
-//!   - Extra keys (present in locale but absent in en.json), excluding valid plural suffixes
-//!   - Duplicate keys in locale JSON files
-//!   - Placeholder mismatches against en.json
-//!   - JSON parse errors
-//!   - Optional exact-English fallback checks for explicitly listed keys
-//!   - Optional audit of locale values changed against a git baseline
-//!   - Summary with pass/fail per locale
-
 use i18n_checker::{
     LocaleLoad, english_source_key, find_locales_dir, is_valid_plural_extra, load_locale_file,
     parse_locale_object, placeholder_names, read_key_file, translation_files, truncate,
@@ -92,9 +71,7 @@ fn main() {
             .map(|(k, _)| k.as_str())
             .collect();
 
-        // Placeholder parity is scanned for every shared key, but only blocks
-        // for the keys the caller is actually working on. Locale files carry
-        // pre-existing mismatches that must not fail unrelated runs.
+        // Check shared placeholders globally but block only on requested keys; unrelated pre-existing mismatches must not fail a batch.
         let mut blocking_placeholders: Vec<String> = Vec::new();
         let mut warned_placeholders: Vec<String> = Vec::new();
         for (key, value) in &locale_map {
@@ -257,9 +234,6 @@ fn placeholder_report(key: &str, english: &Value, translated: &Value) -> Option<
     ))
 }
 
-/// Validates only the locale/key pairs whose value differs from a git baseline.
-/// Unlike `--require-translated-key-file` this does not expect every locale for
-/// a key to change, which is the shape of exact-English fallback cleanup.
 fn audit_changed_pairs(
     locales_dir: &Path,
     locale_files: &[PathBuf],
@@ -485,8 +459,6 @@ fn or_die<T>(result: Result<T, String>) -> T {
     })
 }
 
-/// Writes `{ locale: { key: english_value } }` for every string value that is
-/// still exactly English, so the file can be filled in and fed to locale-apply.
 fn report_english_values(
     path: &Path,
     locale_files: &[PathBuf],

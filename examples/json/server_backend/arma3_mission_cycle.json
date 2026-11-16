@@ -1,0 +1,17 @@
+[
+  {
+    "template": "Example.World",
+    "difficulty": "regular",
+    "params": {"Mode": 1},
+    "source": {
+      "kind": "library",
+      "mission_id": "mission_00000000000000000000000000000001",
+      "revision_id": "revision_0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  {
+    "template": "Second.World",
+    "difficulty": "veteran",
+    "enabled": false
+  }
+]

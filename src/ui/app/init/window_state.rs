@@ -54,10 +54,7 @@ impl Foxy {
         }
 
         let outer_rect = outer_rect?;
-        // `outer_rect` is in egui points, which depend on the current zoom
-        // factor (the UI scale). The viewport builder restores geometry in
-        // native logical pixels, which are zoom-independent. Convert here so a
-        // non-default UI scale does not distort the persisted window geometry.
+        // Convert egui points to native logical pixels because persisted window geometry must not scale with UI zoom.
         let zoom = ctx.zoom_factor();
         let size = outer_rect.size() * zoom;
         let position = [outer_rect.min.x * zoom, outer_rect.min.y * zoom];
@@ -78,9 +75,6 @@ impl Foxy {
         })
     }
 
-    /// Collect the current monitor and app resolutions and log them at startup
-    /// and whenever they change (e.g. the window is moved to another display,
-    /// resized, or the OS scaling factor changes).
     pub(crate) fn log_display_metrics_if_changed(&mut self, ctx: &egui::Context) {
         let (monitor, app, scale_percent) = ctx.input(|i| {
             let viewport = i.viewport();

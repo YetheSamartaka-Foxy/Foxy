@@ -23,9 +23,7 @@ const FROZEN_PREFIX: &str = "frozen/";
 /// Restored payloads land in their own folder so they never sit beside (or
 /// inside) the `<hash>_<name>` snapshots `freeze_item` writes.
 const IMPORTED_PAYLOAD_DIR: &str = "imported";
-/// Bundles carry whole frozen mod folders, so the ceiling is generous compared
-/// with a `.foxypack`; it exists to stop a hostile archive, not to size a
-/// realistic mod list.
+/// Bound archive expansion without imposing realistic mod-list sizes; bundles carry whole frozen folders.
 pub const MAX_BUNDLE_UNCOMPRESSED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 static NEXT_IMPORT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -46,7 +44,7 @@ pub struct BundleItem {
     pub size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_updated: Option<u64>,
-    /// Set when the bundle carries this mod's files under `frozen/<item_id>/`.
+
     #[serde(default)]
     pub payload: bool,
 }
@@ -61,8 +59,7 @@ pub struct BundleManifest {
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// Pipe-separated share code for the same selection, so a recipient without
-    /// the bundle file can still be handed a paste-able list.
+
     pub share_code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_checksum: Option<StateChecksum>,
@@ -109,7 +106,7 @@ pub struct BundleImportPreview {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BundleExportOptions {
     pub include_disabled: bool,
-    /// Copy the frozen snapshot of every pinned item into the archive.
+
     pub include_frozen_payloads: bool,
 }
 
@@ -313,9 +310,7 @@ pub fn read_manifest(path: &Path) -> Result<BundleManifest, String> {
     Ok(manifest)
 }
 
-/// Import a share bundle into the active space. Frozen payloads are restored
-/// into the space's own snapshot store; items without a payload are recorded as
-/// managed and reported in `needs_download`.
+/// Restore payloads into this space's snapshot store; metadata-only items must remain needs_download.
 #[cfg(test)]
 pub fn import_bundle(
     space_dir: &Path,

@@ -10,8 +10,7 @@ use crate::core::utils::app_paths;
 use crate::ui::app::Foxy;
 
 impl Foxy {
-    /// A configuration file exists but cannot be used. Keep a copy and tell the
-    /// user, because the next save would replace it with whatever did load.
+    /// Keep an unusable config copy and notify the user before a later save overwrites it.
     pub(crate) fn report_unreadable_config(&mut self, path: &Path) {
         let file = path
             .file_name()
@@ -154,7 +153,6 @@ impl Foxy {
         }
     }
 
-    /// Settings are merged from two files; keep whichever of them exists.
     pub(crate) fn report_unreadable_settings(&mut self) {
         for path in [
             Self::get_app_settings_path(),
@@ -166,12 +164,10 @@ impl Foxy {
         }
     }
 
-    /// App-global data root (logs, window state, app settings).
     pub fn get_config_directory() -> PathBuf {
         app_paths::foxy_data_dir()
     }
 
-    /// Active game space directory (repositories, spaces, game settings, DB).
     pub fn get_game_space_directory() -> PathBuf {
         crate::core::game::spaces::active_game_space_dir()
     }

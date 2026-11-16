@@ -4,7 +4,6 @@ use crate::ui::i18n::{tr, tr_fmt};
 use crate::ui::types::{MemoryPressurePreference, StorageTypePreference, WorkPriorityPreference};
 use eframe::egui::{self, RichText, Ui};
 
-/// One labelled dropdown row; returns whether the choice changed.
 fn render_choice_row<T: Copy + PartialEq>(
     ui: &mut Ui,
     horizontal_padding: f32,
@@ -48,9 +47,6 @@ fn render_choice_row<T: Copy + PartialEq>(
 }
 
 impl Foxy {
-    /// CPU usage limit, CPU threads, work and disk priority, storage type,
-    /// memory pressure, and the progress frame rate. Every change applies to
-    /// the running process.
     pub(super) fn render_application_settings_resources(
         &mut self,
         ui: &mut Ui,

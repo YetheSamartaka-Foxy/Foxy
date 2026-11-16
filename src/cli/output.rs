@@ -100,8 +100,6 @@ fn envelope_to_toon(payload: &CliEnvelope) -> Option<String> {
 mod tests {
     use super::*;
 
-    // ── CliEnvelope serialization ──────────────────────────────────────
-
     #[test]
     fn cli_envelope_success_serialization() {
         let envelope = CliEnvelope {
@@ -145,8 +143,6 @@ mod tests {
         assert!(json.contains("\"errors\": []"));
     }
 
-    // ── CliOutput construction ─────────────────────────────────────────
-
     #[test]
     fn cli_output_json_mode_fields() {
         let output = CliOutput {
@@ -179,8 +175,6 @@ mod tests {
         assert!(!output.json);
         assert!(!output.quiet);
     }
-
-    // ── CliEnvelope round trip ─────────────────────────────────────────
 
     #[test]
     fn cli_envelope_serde_round_trip_via_value() {

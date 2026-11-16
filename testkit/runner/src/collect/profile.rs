@@ -1,14 +1,8 @@
-//! Parser for the app's `FOXY_PROFILE` report and for the pipeline stage table.
-//!
-//! The app emits `PROFILE ...` lines only when profiling is enabled, so an
-//! unprofiled run parses to a null profile rather than to an error. The stage
-//! table is always present and is parsed here too, because it names far more
-//! phases than the profiler's four coarse ones.
+//! Missing FOXY_PROFILE lines mean unprofiled work; the independently emitted stage table remains available.
 
 use regex::Regex;
 use serde_json::{Value, json};
 
-/// Parse every profiler artifact out of one operation's log slice.
 pub fn parse(text: &str) -> Value {
     let totals = totals(text);
     if totals.is_null() {
@@ -115,10 +109,7 @@ fn fs(text: &str) -> Value {
     )
 }
 
-/// Rows of the app's `PIPELINE SUMMARY` table. The logger flattens the table's
-/// newlines into one record, so rows are found by pattern rather than by line,
-/// and a row's details run to the start of the next row. Names repeat across a
-/// run, so rows are summed per name and counted.
+/// Logger records flatten table newlines, so parse rows by pattern and aggregate repeated stage names.
 fn stages(text: &str) -> Value {
     let re = Regex::new(r"(?<name>[a-z][a-z0-9_]{2,})\s{2,}(?<seconds>\d+\.\d+)s")
         .expect("stage pattern");

@@ -2,13 +2,10 @@ use std::path::Path;
 
 use crate::types::{DLC_CODES, DlcContent, ProcessedMod, RepoConfig, RepoGame, ResolvedMod};
 
-/// Shaping options for the generated server launch line.
 #[derive(Debug, Clone, Copy)]
 pub struct ModLineOptions<'a> {
-    /// Path prefix for each mod folder, matching the server-side layout
-    /// (e.g. `mods/` for `-mod=mods/@cba_a3`, or the `-addonsDir` root).
     pub prefix: &'a str,
-    /// Include optional mods alongside the required ones.
+
     pub include_optional: bool,
 }
 
@@ -16,9 +13,7 @@ const ARMA3_MOD_FLAG: &str = "-mod";
 const REFORGER_ADDONS_DIR_FLAG: &str = "-addonsDir";
 const REFORGER_ADDONS_FLAG: &str = "-addons";
 
-/// One parameter of the generated server launch line, kept apart from the
-/// rendered line so `modLineFiles` can look up the same flag in an existing
-/// launch script and replace only its value.
+/// Keep flags separate from values so modLineFiles can replace values without rewriting unrelated script text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchParam {
     pub flag: &'static str,
@@ -53,8 +48,6 @@ impl LaunchParam {
     }
 }
 
-/// The parameters a game's launch line is made of, with empty values, so a
-/// launch script can be checked for them before a repository is generated.
 pub fn launch_flags(game: RepoGame) -> Vec<LaunchParam> {
     match game {
         RepoGame::Arma3 => vec![LaunchParam::attached(ARMA3_MOD_FLAG, String::new())],
@@ -70,11 +63,6 @@ pub fn has_server_line(game: RepoGame) -> bool {
     !launch_flags(game).is_empty()
 }
 
-/// The server launch parameters for a generated repository, shaped for the game
-/// the config names: Arma 3 gets `-mod=`, Arma Reforger `-addonsDir` plus
-/// `-addons`. `sources` are the resolved mods the repository was built from;
-/// Reforger mod ids are read from their `.gproj` files. A custom game has no
-/// server line, so it gets no parameters.
 pub fn build_launch_params(
     config: &RepoConfig,
     mods: &[ProcessedMod],
@@ -105,9 +93,6 @@ pub fn render_launch_params(params: &[LaunchParam]) -> String {
         .join(" ")
 }
 
-/// Config keys that only mean something for Arma 3; a Reforger or custom game
-/// config that sets them is accepted but the operator is told they have no
-/// effect.
 pub fn game_config_warnings(config: &RepoConfig, sources: &[ResolvedMod]) -> Vec<String> {
     let mut warnings = Vec::new();
     let (game, client_side_reason) = match config.game {
@@ -137,10 +122,7 @@ pub fn game_config_warnings(config: &RepoConfig, sources: &[ResolvedMod]) -> Vec
     warnings
 }
 
-/// The `-addons` ids of an Arma Reforger server line: the `.gproj` GUID, then
-/// the `.gproj` project ID, then a Workshop `ServerData.json` id, and finally
-/// the folder name, matching the client. Disabled and client-side mods are
-/// skipped like in the Arma 3 line.
+/// Reforger IDs follow the client's precedence: gproj GUID, project ID, ServerData ID, then folder name.
 fn reforger_addon_ids(
     mods: &[ProcessedMod],
     sources: &[ResolvedMod],
@@ -177,8 +159,6 @@ fn reforger_addons_dir(options: ModLineOptions<'_>) -> String {
     }
 }
 
-/// The `-addons` value for a Reforger addon folder: `.gproj` GUID, `.gproj`
-/// project ID, then `ServerData.json` id. `None` when none of them is present.
 pub fn reforger_mod_id(dir: &Path) -> Option<String> {
     let gproj = read_gproj_ids(dir);
     if let Some(guid) = gproj.as_ref().and_then(|ids| ids.guid.clone()) {
@@ -196,8 +176,6 @@ struct GprojIds {
     project_id: Option<String>,
 }
 
-/// `.gproj` is an Enfusion config block; both ids are quoted values on their
-/// own line, so a line scan avoids a parser for two fields.
 fn read_gproj_ids(dir: &Path) -> Option<GprojIds> {
     let path = find_gproj_file(dir)?;
     let raw = std::fs::read_to_string(path).ok()?;
@@ -247,11 +225,8 @@ fn read_server_data_id(dir: &Path) -> Option<String> {
     (!id.is_empty()).then(|| id.to_ascii_uppercase())
 }
 
-/// The `-mod=` value for a generated repository.
-///
-/// Creator DLC codes come first (Arma resolves them from the game install),
-/// then the repository mod folders. Disabled and client-side mods are never
-/// emitted: client-side mods are not meant to be loaded by a server.
+/// Arma resolves Creator DLCs from its own install, so their codes precede repository folders.
+/// Client-side mods must never be included in the server line.
 fn mod_line_value(
     dlc_content: Option<&DlcContent>,
     mods: &[ProcessedMod],

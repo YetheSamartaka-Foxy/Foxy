@@ -61,6 +61,10 @@ impl Foxy {
                 Some(self.t("Finish reviewing retained files before starting another download."));
             return false;
         }
+        if !self.client_db_admission.allows() {
+            self.direct_download_error = Some(self.t("Another download is already running"));
+            return false;
+        }
         if self.repository_sync_active() {
             self.direct_download_error = Some(self.t("Another download is already running"));
             warn!("Direct download ignored: repository sync is currently active");
@@ -380,7 +384,7 @@ impl Foxy {
             let _ = reply_tx.send(false);
         }
         self.direct_download_progress_rx = None;
-        // Clean up UI state
+
         let cancelled_message = self.t("Cancelled by user");
         if let Some(session) = self.direct_download_session.as_mut() {
             session.finished_at = Some(std::time::Instant::now());
@@ -399,8 +403,7 @@ impl Foxy {
         self.needs_repaint = true;
     }
 
-    /// The Cancel the user presses: also stops the folder, space, or scheduled
-    /// run the sync belongs to, so the next queued repository does not start.
+    /// Cancelling also stops the owning folder, space, or scheduled run so its next repository cannot start.
     pub fn cancel_sync_and_queued_runs(&mut self) {
         let had_pending_retry = self.pending_download_retry.is_some();
         let had_pending_preview = self.pending_link_target_sync.take().is_some();

@@ -305,8 +305,6 @@ pub(super) async fn download_range_to_output(
     Err(last_error.unwrap_or_else(|| anyhow!("fallback range download failed after retries")))
 }
 
-/// Network chunks are buffered up to this size before one positional write,
-/// so a fallback range does not cost a blocking-pool hop per TCP segment.
 const RANGE_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 
 async fn write_buffered_range(
@@ -391,13 +389,7 @@ async fn download_range_to_output_once(
     Ok(())
 }
 
-/// Download delta patch insert-ops concurrently into non-overlapping blob offsets.
-///
-/// Each InsertRemote op targets a unique `(blob_offset, length)` region, so they
-/// can safely be written in parallel using random-access writes. A run holds
-/// one of the file's `per_file_requests` slots and one global range permit
-/// while its request is in flight, so patched files fill the link the way
-/// full downloads do without oversubscribing it.
+/// Non-overlapping blob ranges permit concurrency; share the global range budget with full downloads.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn download_patch_blob_ranges_parallel(
     context: Arc<FoxyContext>,
@@ -436,7 +428,6 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
             .collect::<std::collections::HashSet<_>>()
             .len();
 
-    // Open the blob file for random-access writing (std::fs::File for write_at)
     let blob_file = Arc::new(
         std::fs::OpenOptions::new()
             .read(true)
@@ -590,10 +581,7 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
         return Err(err);
     }
 
-    // A chunked op was written by several connections, none of which saw the
-    // whole op, so its checksum is taken from the blob once every chunk has
-    // landed. The region is what the writes just produced, normally still in
-    // the page cache.
+    // Hash chunked ops from the completed blob because no connection sees the whole op.
     let mut chunked_indices: Vec<usize> = chunk_bytes_done.keys().copied().collect();
     chunked_indices.sort_unstable();
     for index in chunked_indices {
@@ -625,7 +613,7 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
         patch_ops[index].downloaded_bytes = patch_ops[index].length;
         ops_completed += 1;
     }
-    // Batch-persist all completed op progress
+
     for op in patch_ops
         .iter()
         .filter(|op| PatchOpType::from_str(&op.op_type) == Some(PatchOpType::InsertRemote))
@@ -667,8 +655,6 @@ pub(crate) async fn download_patch_blob_ranges_parallel(
     Ok(())
 }
 
-/// The fields of an op the insert-run downloader needs, snapshotted so the
-/// spawned tasks do not borrow `patch_ops`.
 struct InsertOpSnapshot {
     file_id: i64,
     data_order: i64,
@@ -678,18 +664,14 @@ struct InsertOpSnapshot {
     target_checksum: String,
 }
 
-/// Output bytes buffered per op before one positional write into the blob.
 const INSERT_RUN_WRITE_BUFFER: usize = 1024 * 1024;
 
-/// What one insert request task produced.
 enum InsertRequestDone {
     Run(InsertRun, u64),
     Chunk(OpChunk, u64),
 }
 
-/// Fetch one chunk of a large insert op and write it at its blob offset. No
-/// hashing here: the op is verified from the blob after all its chunks
-/// landed. A failed or stalled attempt rewrites the chunk from its start.
+/// Verify after all chunks land; retry only the in-flight chunk from its beginning.
 #[allow(clippy::too_many_arguments)]
 async fn download_op_chunk(
     context: Arc<FoxyContext>,
@@ -800,8 +782,6 @@ async fn download_op_chunk_once(
     Ok(received)
 }
 
-/// Checksum of `length` bytes of the blob at `offset`, with the algorithm the
-/// expected checksum implies.
 async fn hash_blob_region(
     blob_file: Arc<std::fs::File>,
     offset: u64,
@@ -826,10 +806,7 @@ async fn hash_blob_region(
     .await?
 }
 
-/// Fetch one insert run with a single range request, splitting the stream
-/// into its ops as it arrives: each op's bytes are hashed and written at its
-/// blob offset, bytes between ops are dropped. A mismatch or a stalled chunk
-/// restarts from the op that was in flight. Returns the op bytes written.
+/// Retry a stalled or mismatched run from its in-flight op; prior completed ops remain valid.
 #[allow(clippy::too_many_arguments)]
 async fn download_insert_run(
     context: Arc<FoxyContext>,
@@ -888,7 +865,7 @@ async fn download_insert_run(
         let mut resp = response;
         let mut stream_pos = first.dest_start;
         let mut op_cursor = next_op;
-        // Progress within the op at `op_cursor`.
+
         let mut op_done = 0u64;
         let mut hasher = FlexHasher::from_checksum(&first.target_checksum);
         let mut pending: Vec<u8> = Vec::with_capacity(INSERT_RUN_WRITE_BUFFER);
@@ -927,7 +904,6 @@ async fn download_insert_run(
             while !slice.is_empty() && op_cursor < run.op_indices.len() {
                 let op = &ops[run.op_indices[op_cursor]];
                 if stream_pos < op.dest_start {
-                    // Gap before the next op: copy-op bytes the plan already has.
                     let skip = (op.dest_start - stream_pos).min(slice.len() as u64) as usize;
                     slice = &slice[skip..];
                     stream_pos += skip as u64;
@@ -975,8 +951,6 @@ async fn download_insert_run(
         }
 
         if stalled {
-            // Bytes of the op in flight are rewritten on the retry; the
-            // completed ops before it stay.
             written_total += written_this_attempt - op_done;
             next_op = op_cursor;
             continue;

@@ -1,15 +1,3 @@
-//! Debug previews for startup modals.
-//!
-//! Startup prompts (app update available, database schema wipe) only appear
-//! when real conditions are met, which makes them awkward to inspect while
-//! iterating on their layout or copy. `foxy ui --debug-modal <name>` seeds the
-//! state each prompt reads so it renders immediately with placeholder data.
-//!
-//! Add a new preview by adding a variant here plus its arm in
-//! [`DebugModal::seed`]; nothing else in the launch path needs to change. Every
-//! preview is inert: confirm actions that would touch real data are skipped
-//! while the preview is active.
-
 use clap::ValueEnum;
 
 use crate::ui::app::Foxy;
@@ -25,7 +13,6 @@ pub enum DebugModal {
 }
 
 impl DebugModal {
-    /// Stable name used in logs and the agent driver.
     pub fn as_str(self) -> &'static str {
         match self {
             DebugModal::AppUpdate => "app-update",
@@ -34,7 +21,6 @@ impl DebugModal {
         }
     }
 
-    /// Populate the state the prompt renders from, using placeholder values.
     fn seed(self, app: &mut Foxy) {
         match self {
             DebugModal::AppUpdate => {
@@ -75,8 +61,6 @@ impl DebugModal {
     }
 }
 
-/// Placeholder findings covering every row style: a blocking per-repository
-/// limit, a blocking volume finding, and a warning shared by two folders.
 fn preview_storage_notice() -> crate::ui::app::runtime::StorageCompatNotice {
     use crate::core::utils::storage_compat::{
         FAT_MAX_FILE_BYTES, FilesystemFamily, PathLimitReport, VolumeInfo, evaluate_volume,
@@ -130,9 +114,6 @@ fn preview_storage_notice() -> crate::ui::app::runtime::StorageCompatNotice {
     }
 }
 
-/// Manifest entries and changelogs for the app update preview, so the update
-/// and version browser views render changelogs and download buttons exactly as
-/// a real release does. The text is placeholder data, deliberately English only.
 fn preview_app_update_versions(
     current: &str,
     latest: &str,
@@ -206,8 +187,6 @@ fn preview_app_update_versions(
     (versions, changelogs)
 }
 
-/// Bump the last numeric component of a semver-ish string for preview copy.
-/// Falls back to a suffixed label when the version has no trailing number.
 fn preview_next_version(current: &str) -> String {
     let mut parts: Vec<String> = current.split('.').map(str::to_string).collect();
     match parts
@@ -226,7 +205,6 @@ fn preview_next_version(current: &str) -> String {
 }
 
 impl Foxy {
-    /// Seed every modal preview requested on the command line.
     pub(crate) fn apply_debug_modal_previews(&mut self) {
         for modal in self.debug_modal_previews.clone() {
             log::info!("Debug modal preview enabled: {}", modal.as_str());

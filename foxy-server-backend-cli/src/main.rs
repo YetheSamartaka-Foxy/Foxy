@@ -246,7 +246,6 @@ fn main() -> Result<()> {
     result
 }
 
-/// Everything `create` needs beyond the config and output paths.
 struct CreateOptions<'a> {
     app_update_url: Option<&'a str>,
     threads: usize,
@@ -262,7 +261,6 @@ struct CreateOptions<'a> {
     keys: KeyCollectionRequest,
 }
 
-/// How `create` / `create-space` was asked to build the combined keys folder.
 pub(crate) struct KeyCollectionRequest {
     pub enabled: bool,
     pub dest: Option<std::path::PathBuf>,
@@ -407,7 +405,6 @@ fn run_create(
         );
     }
 
-    // Create output directory
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output dir: {}", output_dir.display()))?;
     if prune_unused_optionals {
@@ -462,7 +459,6 @@ fn run_create(
         None
     };
 
-    // Summary
     let total_files: usize = processed_mods.iter().map(|m| m.files.len()).sum();
     let total_bytes: u64 = processed_mods
         .iter()
@@ -584,12 +580,10 @@ fn cmd_setup_app_updater(
         );
     }
 
-    // Parse changelog
     println!("Parsing changelog: {}", changelog_path.display());
     let changelog_versions = changelog_parser::parse_changelog(changelog_path)?;
     println!("  Found {} versions in changelog", changelog_versions.len());
 
-    // Build platform entries for the target version
     let mut platforms = std::collections::HashMap::new();
     if let Some(path) = windows_installer {
         println!("Hashing Windows installer: {}", path.display());
@@ -607,12 +601,10 @@ fn cmd_setup_app_updater(
         );
     }
 
-    // Create output directories
     let changelogs_dir = output_dir.join(CHANGELOGS_DIR);
     std::fs::create_dir_all(&changelogs_dir)
         .with_context(|| format!("Failed to create {}", changelogs_dir.display()))?;
 
-    // Write changelog JSON only for the target version
     let target_changelog = changelog_parser::find_version(&changelog_versions, version)
         .with_context(|| {
             format!(
@@ -630,7 +622,6 @@ fn cmd_setup_app_updater(
         .with_context(|| format!("Failed to write {}", changelog_full_path.display()))?;
     println!("  Wrote changelog: {}", changelog_filename);
 
-    // Build version entry (only the target version which has installers)
     let version_entry = VersionEntry {
         version: version.to_string(),
         changelog: changelog_relative.clone(),
@@ -683,7 +674,6 @@ fn cmd_new_app_update(
         );
     }
 
-    // Read existing manifest
     println!(
         "Reading existing manifest from: {}",
         server_root.join(MANIFEST_FILENAME).display()
@@ -692,7 +682,6 @@ fn cmd_new_app_update(
     println!("  Current latest: {}", manifest.latest);
     println!("  Existing versions: {}", manifest.versions.len());
 
-    // Check if version already exists
     if manifest.versions.iter().any(|v| v.version == version) {
         anyhow::bail!(
             "Version {} already exists in the manifest. Remove it first or use a different version.",
@@ -700,7 +689,6 @@ fn cmd_new_app_update(
         );
     }
 
-    // Parse changelog and extract the target version
     println!("Parsing changelog: {}", changelog_path.display());
     let changelog_versions = changelog_parser::parse_changelog(changelog_path)?;
     let target_changelog = changelog_parser::find_version(&changelog_versions, version)
@@ -712,7 +700,6 @@ fn cmd_new_app_update(
             )
         })?;
 
-    // Write changelog JSON for the new version
     let changelogs_dir = server_root.join(CHANGELOGS_DIR);
     std::fs::create_dir_all(&changelogs_dir)
         .with_context(|| format!("Failed to create {}", changelogs_dir.display()))?;
@@ -726,7 +713,6 @@ fn cmd_new_app_update(
         .with_context(|| format!("Failed to write {}", changelog_full_path.display()))?;
     println!("  Wrote changelog: {}", changelog_filename);
 
-    // Build platform entries
     let mut platforms = std::collections::HashMap::new();
     if let Some(path) = windows_installer {
         println!("Hashing Windows installer: {}", path.display());
@@ -738,18 +724,15 @@ fn cmd_new_app_update(
     insert_linux_platform_entry(&mut platforms, linux_installer, "linux-x86_64")?;
     insert_linux_platform_entry(&mut platforms, linux_aarch64_installer, "linux-aarch64")?;
 
-    // Build new version entry
     let version_entry = VersionEntry {
         version: version.to_string(),
         changelog: changelog_relative,
         platforms,
     };
 
-    // Prepend to versions array and update latest
     manifest.versions.insert(0, version_entry);
     manifest.latest = version.to_string();
 
-    // Write updated manifest
     write_manifest(&manifest, server_root)?;
 
     println!();

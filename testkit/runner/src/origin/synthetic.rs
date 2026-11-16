@@ -267,11 +267,6 @@ impl SyntheticOptions {
     }
 }
 
-/// A PBO the repository generator will split into `entries + 2` manifest parts
-/// (header, one per entry, trailer). Layout mirrors `foxy_formats::pbo`: a zero
-/// byte, the `sreV` tag, sixteen skipped bytes, a zero extension marker, the
-/// entry table terminated by an empty name, then the entry payloads and a
-/// trailer.
 fn synthetic_pbo(random: &mut DotNetRandom, entries: u32, entry_bytes: usize) -> Vec<u8> {
     fn push_entry(bytes: &mut Vec<u8>, name: &str, length: u32) {
         bytes.extend_from_slice(name.as_bytes());

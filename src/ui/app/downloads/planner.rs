@@ -28,7 +28,6 @@ impl Foxy {
             )
         })?;
 
-        // Match core JSON parser behavior: tolerate BOM / leading non-JSON bytes.
         let mut start = 0usize;
         let bytes = body.as_bytes();
         while start < bytes.len() {

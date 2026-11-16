@@ -1,14 +1,14 @@
+use super::server_query::exchange_for_rules;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Error, ErrorKind};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const A2S_INFO_HEADER: u8 = 0x49;
 const A2S_RULES_HEADER: u8 = 0x45;
 const S2C_CHALLENGE_HEADER: u8 = 0x41;
 const SINGLE_PACKET_PREFIX: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
-const SPLIT_PACKET_PREFIX: [u8; 4] = [0xFE, 0xFF, 0xFF, 0xFF];
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,9 +38,7 @@ pub struct ServerBrowserProtocol3 {
     pub ai_level: Option<u16>,
     pub dlc_flags: Option<u16>,
     pub mods: Vec<ServerBrowserProtocol3Mod>,
-    /// Steam app IDs of the Creator DLCs the server runs. `Some` only when the
-    /// payload decoded with the full Arma 3 layout, where Creator DLC entries
-    /// are distinguishable from mods; `None` means the server's DLCs are unknown.
+    /// Creator DLCs are known only after full-layout decoding; None means unknown, not an empty DLC set.
     #[serde(default)]
     pub creator_dlc_app_ids: Option<Vec<u32>>,
 }
@@ -195,9 +193,9 @@ struct A2sRules {
 
 fn query_a2s_rules(endpoint: SocketAddr, timeout: Duration) -> Result<A2sRules, Error> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.set_read_timeout(Some(timeout))?;
+    socket.connect(endpoint)?;
     let mut request = a2s_rules_request(-1);
-    let mut response = send_and_collect_response(&socket, endpoint, &request, timeout)?;
+    let mut response = exchange_for_rules(&socket, &request, timeout)?;
 
     if response.len() >= 9
         && response.starts_with(&SINGLE_PACKET_PREFIX)
@@ -205,7 +203,7 @@ fn query_a2s_rules(endpoint: SocketAddr, timeout: Duration) -> Result<A2sRules, 
     {
         let challenge = i32::from_le_bytes([response[5], response[6], response[7], response[8]]);
         request = a2s_rules_request(challenge);
-        response = send_and_collect_response(&socket, endpoint, &request, timeout)?;
+        response = exchange_for_rules(&socket, &request, timeout)?;
     }
 
     parse_a2s_rules_response_full(&response)
@@ -227,8 +225,8 @@ struct A2sInfo {
 
 fn query_a2s_info(endpoint: SocketAddr, timeout: Duration) -> Result<A2sInfo, Error> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
-    socket.set_read_timeout(Some(timeout))?;
-    let response = send_and_collect_response(&socket, endpoint, &a2s_info_request(), timeout)?;
+    socket.connect(endpoint)?;
+    let response = exchange_for_rules(&socket, &a2s_info_request(), timeout)?;
     parse_a2s_info_response(&response)
 }
 
@@ -238,96 +236,6 @@ fn a2s_info_request() -> Vec<u8> {
     request.push(0x54);
     request.extend_from_slice(b"Source Engine Query\0");
     request
-}
-
-fn send_and_collect_response(
-    socket: &UdpSocket,
-    endpoint: SocketAddr,
-    request: &[u8],
-    timeout: Duration,
-) -> Result<Vec<u8>, Error> {
-    socket.send_to(request, endpoint)?;
-    let deadline = Instant::now() + timeout;
-    let mut buf = [0u8; 4096];
-    let mut split_packets: BTreeMap<u8, Vec<u8>> = BTreeMap::new();
-    let mut expected_split_count: Option<u8>;
-
-    loop {
-        let (len, _) = socket.recv_from(&mut buf)?;
-        let packet = &buf[..len];
-        if packet.starts_with(&SINGLE_PACKET_PREFIX) {
-            return Ok(packet.to_vec());
-        }
-
-        if !packet.starts_with(&SPLIT_PACKET_PREFIX) {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "Unexpected server query packet prefix",
-            ));
-        }
-
-        let split = parse_split_packet(packet)?;
-        if split.compressed {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "Compressed A2S split packets are not supported",
-            ));
-        }
-        expected_split_count = Some(split.total);
-        split_packets.insert(split.number, split.payload.to_vec());
-
-        if split_packets.len() == usize::from(split.total) {
-            let mut joined = Vec::new();
-            for payload in split_packets.values() {
-                joined.extend_from_slice(payload);
-            }
-            return Ok(joined);
-        }
-
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(Error::new(
-                ErrorKind::TimedOut,
-                format!(
-                    "Timed out while reading split A2S response ({}/{})",
-                    split_packets.len(),
-                    expected_split_count.unwrap_or_default()
-                ),
-            ));
-        }
-        socket.set_read_timeout(Some(deadline.saturating_duration_since(now)))?;
-    }
-}
-
-struct SplitPacket<'a> {
-    total: u8,
-    number: u8,
-    compressed: bool,
-    payload: &'a [u8],
-}
-
-fn parse_split_packet(packet: &[u8]) -> Result<SplitPacket<'_>, Error> {
-    if packet.len() < 12 || !packet.starts_with(&SPLIT_PACKET_PREFIX) {
-        return Err(Error::new(ErrorKind::InvalidData, "Split packet too short"));
-    }
-
-    let request_id = i32::from_le_bytes([packet[4], packet[5], packet[6], packet[7]]);
-    let compressed = request_id < 0;
-    let total = packet[8];
-    let number = packet[9];
-    if total == 0 || number >= total {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            "Invalid split packet index",
-        ));
-    }
-
-    Ok(SplitPacket {
-        total,
-        number,
-        compressed,
-        payload: &packet[12..],
-    })
 }
 
 fn parse_a2s_rules_response_full(data: &[u8]) -> Result<A2sRules, Error> {
@@ -603,11 +511,8 @@ fn parse_server_browser_protocol3_layout(
 
 const CREATOR_DLC_ID_FLAG: u8 = 0x10;
 
-/// Decodes the layout Arma 3 servers publish in their chunked A2S_RULES
-/// payload: version and flags bytes, the official DLC bitmask, difficulty, one
-/// hash per DLC bit, then mods (Creator DLCs are flagged in the ID-length byte
-/// and carry no name) and signatures. The whole payload must be consumed, so a
-/// misread layout is rejected rather than yielding garbage entries.
+/// Decode Arma 3's chunked A2S_RULES layout, including DLC flags, mods, and
+/// signatures. Reject payloads with unconsumed bytes to avoid misreading entries.
 fn parse_arma3_server_browser_payload(data: &[u8]) -> Result<ServerBrowserProtocol3, Error> {
     let first = parse_arma3_server_browser_payload_layout(data, true);
     if first.is_ok() || data.get(4) != Some(&0) {
@@ -1317,17 +1222,6 @@ mod tests {
             vec!["@ACE", "@cba_a3"]
         );
         assert_eq!(requirements[0].workshop_ids, vec!["463939057"]);
-    }
-
-    #[test]
-    fn split_packet_payload_is_extracted_after_source_header() {
-        let packet = [0xFE, 0xFF, 0xFF, 0xFF, 1, 0, 0, 0, 2, 1, 140, 0, b'a', b'b'];
-
-        let split = parse_split_packet(&packet).expect("split packet should parse");
-
-        assert_eq!(split.total, 2);
-        assert_eq!(split.number, 1);
-        assert_eq!(split.payload, b"ab");
     }
 
     fn arma3_payload_with_creator_dlc() -> Vec<u8> {

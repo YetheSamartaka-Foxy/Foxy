@@ -24,7 +24,6 @@ impl Foxy {
         let filter_lower = self.backup_manager_filter.trim().to_lowercase();
         let multi_filter = MultiEntryFilter::parse(&self.backup_manager_filter);
 
-        // Rebuild the cached grouped view only when records or filter change.
         let cache_stale = self.backup_manager_view_cache.as_ref().is_none_or(|cache| {
             cache.records_version != self.backup_manager_records_version
                 || cache.filter != filter_lower
@@ -670,11 +669,7 @@ impl Foxy {
         true
     }
 
-    /// Zip every file in the logs directory into a user-chosen location.
-    /// The default filename includes the timestamp extracted from the last
-    /// line of the most-recently-modified log file.
-    /// Returns `Ok(true)` when a ZIP was written, `Ok(false)` when the user
-    /// cancelled the save dialog, and `Err` on I/O or zip errors.
+    /// ZIP the logs directory to a user-chosen path. Returns `Ok(true)` when written, `Ok(false)` on dialog cancel, or `Err` on I/O/ZIP failure.
     pub(crate) fn export_logs_to_zip(&self) -> Result<bool, String> {
         use rfd::FileDialog;
         use std::fs;
@@ -684,7 +679,6 @@ impl Foxy {
 
         let logs_dir = app_paths::foxy_logs_dir();
 
-        // Collect log files (non-recursive - logs sit directly in the folder).
         let mut entries: Vec<_> = fs::read_dir(&logs_dir)
             .map_err(|e| format!("Failed to read log directory: {e}"))?
             .filter_map(|entry| {
@@ -707,18 +701,15 @@ impl Foxy {
             return Err("No log files found to export.".into());
         }
 
-        // Sort by modification time (newest last) so we can grab the latest.
         entries.sort_by(|a, b| {
             let ma = a.metadata().and_then(|m| m.modified()).ok();
             let mb = b.metadata().and_then(|m| m.modified()).ok();
             ma.cmp(&mb)
         });
 
-        // Build a filename timestamp from the last line of the newest log file.
         let zip_file_name = Self::zip_name_from_last_log_line(entries.last().unwrap())
             .unwrap_or_else(|| "foxy_logs.zip".to_string());
 
-        // Ask the user where to save the ZIP.
         let dest = crate::ui::app::agent_support::save_file(|| {
             FileDialog::new()
                 .set_file_name(&zip_file_name)
@@ -728,7 +719,7 @@ impl Foxy {
 
         let dest = match dest {
             Some(p) => p,
-            None => return Ok(false), // user cancelled
+            None => return Ok(false),
         };
 
         let file =
@@ -986,19 +977,12 @@ impl Foxy {
         manifest
     }
 
-    /// Read the tail of a log file and extract a filesystem-safe timestamp
-    /// from its last non-empty line.  Returns `Some("foxy_logs_2026-04-12_094106.zip")`.
-    ///
-    /// flexi_logger `detailed_format` lines look like:
-    ///   `[2026-04-12 09:41:06.227525 +02:00] INFO …`
-    /// We extract the date and time from inside the brackets.
     fn zip_name_from_last_log_line(path: &std::path::Path) -> Option<String> {
         use std::io::{Read, Seek, SeekFrom};
 
         let mut file = std::fs::File::open(path).ok()?;
         let file_len = file.metadata().ok()?.len();
 
-        // Read the last 4 KiB - more than enough to contain the final line.
         let start = file_len.saturating_sub(4096);
         file.seek(SeekFrom::Start(start)).ok()?;
 
@@ -1007,16 +991,12 @@ impl Foxy {
 
         let last_line = tail.lines().rev().find(|l| !l.trim().is_empty())?;
 
-        // Extract content between the first '[' and ']'.
         let after_bracket = last_line.strip_prefix('[')?;
         let bracket_content = after_bracket.split(']').next()?;
 
-        // bracket_content = "2026-04-12 09:41:06.227525 +02:00"
-        // Take date (10 chars) and time (8 chars) separated by space.
         let date = bracket_content.get(..10)?;
         let time = bracket_content.get(11..19)?;
 
-        // "2026-04-12" + "09:41:06" → "foxy_logs_2026-04-12_094106.zip"
         let safe_time: String = time.replace(':', "");
         Some(format!("foxy_logs_{date}_{safe_time}.zip"))
     }

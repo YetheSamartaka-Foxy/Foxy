@@ -203,10 +203,6 @@ pub(super) fn record_content_save_failure(context: &FoxyContext) {
     });
 }
 
-/// Refresh the content-hash baseline for a whole repository from a full tree
-/// (loaded here when the caller has none). Only the one-time baseline init and
-/// the full integrity paths need this; targeted work should use the scoped
-/// variants so an outdated 90 GB repository is not re-sampled on every pass.
 pub(crate) async fn refresh_content_hashes_for_repository(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -256,11 +252,6 @@ pub(crate) async fn refresh_content_hashes_for_scoped_tree(
         .await
 }
 
-/// Refresh content hashes for `file_ids` only, plus the addons that contain
-/// them, inside an already loaded tree, and roll the repository baseline up.
-/// The tree must carry every addon row of the repository (a full tree, or
-/// [`Tree::load_for_files`]), since untouched addons contribute their stored
-/// hashes to the rollup.
 pub(crate) async fn refresh_content_hashes_for_tree_files(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -281,10 +272,6 @@ pub(crate) async fn refresh_content_hashes_for_tree_files(
     .await
 }
 
-/// Refresh content hashes for `file_ids` and their addons after a targeted
-/// hash pass. Loads a file-scoped tree with every addon row, so the repository
-/// rollup can be recomputed from the touched addons plus the stored hashes of
-/// the untouched ones.
 pub(crate) async fn refresh_content_hashes_for_file_ids(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -335,10 +322,6 @@ fn local_file_present(local_path: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Which addons of `tree` a refresh recomputes. Without a file scope every
-/// loaded addon is refreshed. With one, only addons that own a scoped file are;
-/// an addon with no loaded files is left untouched rather than hashed over an
-/// empty file list, which would bless a folder whose files were never checked.
 fn addon_indices_to_refresh(tree: &Tree, file_scope: Option<&HashSet<u64>>) -> HashSet<usize> {
     tree.mod_nodes
         .iter()
@@ -354,11 +337,7 @@ fn addon_indices_to_refresh(tree: &Tree, file_scope: Option<&HashSet<u64>>) -> H
         .collect()
 }
 
-/// The content hash answers "has the on-disk file changed since it was last
-/// hashed", so it is stored for every hashed file, including ones whose tree
-/// hash differs from remote: an outdated-but-untouched file is a confirmed
-/// pending update and must not be re-read on every quick scan. Update
-/// detection never reads the content hash; it compares tree checksums.
+/// Content hashes detect local edits; tree checksums alone determine update status.
 async fn refresh_content_hashes_for_tree_started(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -414,9 +393,7 @@ async fn refresh_content_hashes_for_tree_started(
             continue;
         }
         files_sampled += 1;
-        // The hash pass that ran earlier in this operation fingerprinted the
-        // file while it was in the page cache; sampling it again would pay
-        // eight seeks per file on a cold disk for the same answer.
+        // The earlier hash pass leaves bytes cached; resampling would repeat the same reads.
         if let Some(fresh) = context.take_fresh_file_content_hash(file_id) {
             files_reused += 1;
             file_content_hash_by_id.insert(file_id, fresh);
@@ -601,19 +578,8 @@ async fn refresh_content_hashes_for_tree_started(
             );
         }
 
-        // A folder content hash computed over a folder that is *missing* manifest
-        // files still matches a baseline recorded from the same incomplete state,
-        // permanently masking a missing file whose tree state says it is verified
-        // (the quick scan then reports the addon clean and never schedules it).
-        // Refuse to bless such an addon - leaving its content hash empty forces
-        // the quick scan to deep-scan it and surface the file for re-download. A
-        // missing file whose tree checksum already differs from remote (a file a
-        // pending update adds) is reported by the tree layer either way, and
-        // withholding for it would deep-scan every pending addon on every scan.
-        // A sampled file's content hash is only empty when it could not be read
-        // from disk (a present file, even 0 bytes, hashes to a non-empty value); a
-        // file outside the sample scope is present when its stored hash says so or
-        // a stat does.
+        // Do not cache a baseline that omits a verified manifest file: it would
+        // hide the missing file. Pending files already differ by tree checksum.
         let masks_missing_file = addon_node.files.iter().any(|&file_idx| {
             tree.files.get(file_idx).is_none_or(|f| {
                 let present = match file_content_hash_by_id.get(&f.id) {
@@ -676,13 +642,11 @@ async fn refresh_content_hashes_for_tree_started(
                 let Some(addon) = tree.mods.get(*addon_idx) else {
                     continue;
                 };
-                // A disabled addon is never downloaded, so it can never earn a
-                // content hash; rolling it into the repository baseline would
-                // leave that baseline permanently empty.
+                // Disabled addons are never downloaded, so including them would keep the repository baseline incomplete.
                 if !addon.enabled {
                     continue;
                 }
-                // An addon outside the refresh scope keeps its stored baseline.
+
                 let addon_hash = addon_content_hash_by_idx
                     .get(addon_idx)
                     .cloned()

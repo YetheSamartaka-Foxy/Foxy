@@ -70,9 +70,6 @@ fn has_conclusive_file_presence_or_size_mismatch(
     missing_files > 0 || size_mismatch_files > 0
 }
 
-/// Files the caller tree-hashed earlier in the same run. The quick scan unions
-/// them with its own bootstrap set so a file the sync pipeline just hashed is
-/// not verified a second time before it is reported.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) enum PreHashedFiles<'a> {
     #[default]
@@ -94,8 +91,6 @@ impl PreHashedFiles<'_> {
     }
 }
 
-/// The flagged files that still need a targeted tree-hash verify once the
-/// files hashed by this run (bootstrap or caller) are taken out.
 fn tree_verify_targets(
     flagged: &HashSet<u64>,
     hashed_all_files: bool,
@@ -108,9 +103,7 @@ fn tree_verify_targets(
     }
 }
 
-/// Emit the canonical `SOL op=quick_scan` line (conventions/SPEED_OF_LIGHT.md, O4).
-/// Quick scan work is stat-denominated, so no absolute byte light exists in-app;
-/// the rate is trended against the machine's own best clean-run baseline.
+/// SOL quick-scan rates use the machine's best clean-run baseline; no byte-based light exists.
 #[allow(clippy::too_many_arguments)]
 fn log_quick_scan_sol(
     operation_id: Option<&str>,
@@ -174,8 +167,6 @@ pub(crate) async fn quick_local_change_diff(
     .await
 }
 
-/// Quick scan for a caller that already ran a tree-hash init in this run and
-/// wants the scan to skip re-verifying those files.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn quick_local_change_diff_with_prehashed(
     context: Arc<FoxyContext>,
@@ -205,7 +196,6 @@ pub(crate) async fn quick_local_change_diff_with_prehashed(
     .await
 }
 
-/// Runs quick scan with an already-positive startup preflight.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn quick_local_change_diff_with_preflight(
     context: Arc<FoxyContext>,
@@ -464,11 +454,7 @@ async fn quick_local_change_diff_locked(
                                     readiness.incomplete_files.len(),
                                     preview
                                 );
-                                // Don't return early - hash the ready files and let the
-                                // normal diff flow handle incomplete files.  Returning
-                                // only the incomplete set would undercount the actual
-                                // update when files are from an older version rather
-                                // than a partially-written download.
+                                // Include ready files so incomplete files cannot hide older-version updates.
                             }
                             if !readiness.ready_file_ids.is_empty() {
                                 info!(

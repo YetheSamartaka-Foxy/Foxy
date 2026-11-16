@@ -3,10 +3,6 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Write `data` to `path` atomically via a sibling temp file + fsync + rename.
-///
-/// On success the temp file is gone and `path` contains the new content.
-/// On failure the temp file is cleaned up and the original `path` is untouched.
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let temp_path = sibling_temp_path(path);
 
@@ -35,9 +31,6 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     result
 }
 
-/// Copy a configuration file that could not be read or parsed to
-/// `<name>.unreadable`, so the next save of a default or partial state cannot
-/// destroy the only copy. Returns the copy's path when the copy succeeded.
 pub fn preserve_unreadable_file(path: &Path) -> Option<PathBuf> {
     let mut copy = path.as_os_str().to_owned();
     copy.push(".unreadable");
@@ -57,10 +50,6 @@ pub fn preserve_unreadable_file(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Validate that `child` is a safe path component to join under `base`.
-///
-/// Rejects directory traversal (`..`), absolute paths, NTFS stream separators (`:`),
-/// and null bytes.
 pub fn is_safe_child_path(child: &str) -> bool {
     if child.is_empty() {
         return false;
@@ -69,7 +58,6 @@ pub fn is_safe_child_path(child: &str) -> bool {
         return false;
     }
 
-    // Reject absolute paths (Unix `/` prefix, Windows drive letter or UNC)
     if child.starts_with('/') || child.starts_with('\\') {
         return false;
     }
@@ -77,12 +65,10 @@ pub fn is_safe_child_path(child: &str) -> bool {
         return false;
     }
 
-    // Reject NTFS alternate data streams
     if child.contains(':') {
         return false;
     }
 
-    // Reject any `..` component
     for component in child.split(['/', '\\']) {
         if component == ".." {
             return false;
@@ -116,22 +102,15 @@ pub fn resolve_child_dir_case_insensitive(base: &Path, name: &str) -> Option<Pat
     None
 }
 
-/// Sanitize an installer filename extracted from a URL.
-///
-/// Strips path separators, rejects dangerous characters, and validates
-/// the result is non-empty.
 pub fn sanitize_installer_filename(raw: &str) -> Option<String> {
-    // Split on both forward and back slashes to get the final component
     let name = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
 
     if name.is_empty() {
         return None;
     }
 
-    // Strip query string / fragment
     let name = name.split(['?', '#']).next().unwrap_or(name);
 
-    // Remove dangerous characters (NTFS streams, null, control chars)
     let sanitized: String = name
         .chars()
         .filter(|ch| !matches!(ch, ':' | '<' | '>' | '"' | '|' | '?' | '*') && !ch.is_control())
@@ -145,9 +124,7 @@ pub fn sanitize_installer_filename(raw: &str) -> Option<String> {
     Some(sanitized.to_string())
 }
 
-/// Whether this process can create files in `dir`, tested by actually writing a
-/// probe file. Windows ACLs and read-only mounts are not visible in metadata,
-/// so an attempted write is the only reliable answer.
+/// Probe with an actual write: metadata cannot establish Windows ACL access or read-only mount writability.
 pub fn directory_is_writable(dir: &Path) -> bool {
     let probe = dir.join(".foxy_write_test");
     match fs::OpenOptions::new()
@@ -164,8 +141,6 @@ pub fn directory_is_writable(dir: &Path) -> bool {
     }
 }
 
-/// Whether a directory that does not exist yet could be created here, tested on
-/// the nearest ancestor that does exist.
 pub fn destination_is_writable(dir: &Path) -> bool {
     match nearest_existing_ancestor(dir) {
         Some(existing) => directory_is_writable(&existing),
@@ -261,18 +236,14 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("test_atomic.json");
 
-        // Write initial content
         atomic_write(&path, b"hello").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
 
-        // Overwrite
         atomic_write(&path, b"world").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "world");
 
         let _ = fs::remove_dir_all(&dir);
     }
-
-    // ── is_safe_child_path: additional edge cases ───────────────────────
 
     #[test]
     fn test_is_safe_child_path_rejects_unc_paths() {
@@ -281,7 +252,6 @@ mod tests {
 
     #[test]
     fn test_is_safe_child_path_allows_dot_prefix() {
-        // Single dot in a component is fine (current directory reference)
         assert!(is_safe_child_path("./foo"));
         assert!(is_safe_child_path(".hidden"));
     }
@@ -297,8 +267,6 @@ mod tests {
         assert!(is_safe_child_path("a/b/c/d/e/f/g/h.txt"));
     }
 
-    // ── sanitize_installer_filename: additional edge cases ──────────────
-
     #[test]
     fn test_sanitize_installer_filename_strips_control_chars() {
         assert_eq!(
@@ -309,11 +277,8 @@ mod tests {
 
     #[test]
     fn test_sanitize_installer_filename_dots_only() {
-        // A filename of just dots should return None after trimming
         assert_eq!(sanitize_installer_filename("..."), None);
     }
-
-    // ── sibling_temp_path ───────────────────────────────────────────────
 
     #[test]
     fn test_sibling_temp_path_appends_suffix() {
@@ -323,8 +288,6 @@ mod tests {
         assert!(temp.to_string_lossy().contains("file.json"));
     }
 
-    // ── is_safe_child_path: more edge cases ────────────────────────────
-
     #[test]
     fn test_is_safe_child_path_single_dot_component() {
         assert!(is_safe_child_path("."));
@@ -332,7 +295,6 @@ mod tests {
 
     #[test]
     fn test_is_safe_child_path_dot_dot_in_filename() {
-        // "file..txt" should be fine - ".." is only dangerous as a path component
         assert!(is_safe_child_path("file..txt"));
     }
 
@@ -345,8 +307,6 @@ mod tests {
     fn test_is_safe_child_path_at_prefix() {
         assert!(is_safe_child_path("@CBA_A3"));
     }
-
-    // ── sanitize_installer_filename: more edge cases ───────────────────
 
     #[test]
     fn test_sanitize_installer_filename_preserves_normal_name() {

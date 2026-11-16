@@ -136,12 +136,10 @@ struct ContextRun<'a> {
     gui: &'a RefCell<Option<launch::ManagedChild>>,
     origin: Option<&'a crate::origin::server::Origin>,
     test_file_locks: RefCell<HashMap<PathBuf, File>>,
-    /// The pid the memory sampler follows, kept in step with `gui`.
+
     pid: &'a memory::Target,
 }
 
-/// A frame probe that runs beside an operation: `fps` reads at a fixed
-/// cadence, so a UI stall under work lands on the operation's own row.
 struct UiProbe {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<thread::JoinHandle<Vec<Value>>>,
@@ -192,9 +190,7 @@ impl UiProbe {
     }
 }
 
-/// Fold the probe reads: the worst frame and worst p95 the app reported,
-/// and the round trip of the probe itself (process spawn included, so it is
-/// an upper bound on input latency, not a frame time).
+/// Probe round trips include process spawn and upper-bound input latency; they are not frame times.
 fn ui_probe_summary(samples: &[Value]) -> Value {
     let mut rtts: Vec<f64> = samples
         .iter()
@@ -229,8 +225,6 @@ fn ui_probe_summary(samples: &[Value]) -> Value {
     })
 }
 
-/// Polls the app's hash progress fraction beside an operation, so a run can
-/// say whether the bar a user watches tracks the work or races ahead of it.
 struct ProgressProbe {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<thread::JoinHandle<Vec<(f64, f64)>>>,
@@ -280,9 +274,7 @@ impl ProgressProbe {
     }
 }
 
-/// How far the sampled fraction strays from elapsed time over the operation,
-/// in percentage points. Linear is the target a user reads the bar against;
-/// the fraction at each quarter of elapsed time shows where it runs ahead.
+/// Progress deviation is in percentage points from elapsed-time linearity; quarter samples locate premature progress.
 fn progress_probe_summary(samples: &[(f64, f64)], elapsed_s: f64) -> Value {
     let elapsed_s = elapsed_s.max(f64::EPSILON);
     let gaps: Vec<f64> = samples
@@ -1168,12 +1160,7 @@ impl ContextRun<'_> {
             )?
             .data)
     }
-    /// Run one operation with the memory sampler bracketing it.
-    ///
-    /// Every operation is sampled, not only the ones in a memory case: the
-    /// counters cost a handle open per tick, and a footprint regression that
-    /// only shows up under a download is exactly the one no dedicated case
-    /// would have caught.
+
     fn seed_startup_state(&self, operation: &Value) -> Result<()> {
         if let Some(gui) = self.gui.borrow_mut().as_mut() {
             launch::stop_gui(gui, self.exe, self.config, self.env);
@@ -1218,11 +1205,6 @@ impl ContextRun<'_> {
         }
     }
 
-    /// Restart the app and measure launch to sync verdict (O8).
-    ///
-    /// The app brackets its own timeline with the `startup-sync` busy reason and
-    /// publishes it as one `SOL op=startup` line, so the runner only has to
-    /// restart the process, wait for that flag to clear, and slice the log.
     fn startup_operation(&self, operation: &Value) -> Result<Value> {
         ensure!(
             self.case["harness"].as_str().unwrap_or("gui") == "gui",
@@ -1233,9 +1215,7 @@ impl ContextRun<'_> {
         if let Some(gui) = self.gui.borrow_mut().as_mut() {
             launch::stop_gui(gui, self.exe, self.config, self.env);
         }
-        // Clear the sampler target before the handle goes away: Windows reuses
-        // pids, and a stale one would attribute another process's footprint to
-        // this run.
+        // Clear the sampler target before releasing the handle: Windows may reuse the PID for an unrelated process.
         memory::set(self.pid, None);
         drop(self.gui.borrow_mut().take());
         let offsets = logs::offsets(self.run, self.config)?;
@@ -1295,12 +1275,7 @@ impl ContextRun<'_> {
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":null,"log_text":log,"database_profile":profile}),
         )
     }
-    /// Drive a scripted click-through and measure what the UI holds afterwards.
-    ///
-    /// A UX case answers "did the scenario pass"; this answers "what did walking
-    /// the app cost", which is a perf question and belongs on a perf row. The
-    /// steps are the same driver commands a UX case uses, so a walk can be
-    /// lifted straight out of one.
+
     fn ui_walk_operation(&self, operation: &Value) -> Result<Value> {
         ensure!(
             self.case["harness"].as_str().unwrap_or("gui") == "gui",
@@ -1360,9 +1335,7 @@ impl ContextRun<'_> {
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":null,"log_text":log,"database_profile":null}),
         )
     }
-    /// Switch the active game space at runtime and measure request to the new
-    /// space's repository list settled; the app's `SOL op=space_switch` line
-    /// carries the drain/reset/reload split.
+
     fn switch_space_operation(&self, operation: &Value) -> Result<Value> {
         ensure!(
             self.case["harness"].as_str().unwrap_or("gui") == "gui",
@@ -1434,9 +1407,7 @@ impl ContextRun<'_> {
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":captured,"log_text":log,"database_profile":null}),
         )
     }
-    /// The repository an operation acts on: `operation.repository` names one of
-    /// the fixture's repositories (a sibling in a shared folder, for example),
-    /// otherwise it is the case repository.
+
     fn operation_repository<'o>(&'o self, operation: &'o Value) -> Result<&'o str> {
         if let Some(name) = operation["repository"].as_str() {
             return Ok(name);
@@ -1603,8 +1574,7 @@ impl ContextRun<'_> {
                 "Operation never reported busy reason '{busy_reason}'; timing may not cover the real work"
             );
         }
-        // A cancellation lane: let the transfer run for `cancel_after_s`, then
-        // cancel and measure cancel-to-quiescent (the busy reason clearing).
+
         let mut cancel_quiescent_ms = Value::Null;
         let mut cancel_trigger_hash_progress = Value::Null;
         let mut promoted_file = None;
@@ -1733,8 +1703,7 @@ impl ContextRun<'_> {
             paused = true;
             finished_between_polls = true;
         }
-        // A killed process cannot finish the refresh, so the checksum commit
-        // inside it must not land. The next operation restarts the app.
+
         let mut killed = false;
         if operation["kill_after_promoted_file"].as_bool() == Some(true) && !finished_between_polls
         {
@@ -1856,10 +1825,7 @@ impl ContextRun<'_> {
             json!({"elapsed_s":elapsed,"summary":summary,"progress":progress,"snapshot":snapshot,"logs":captured,"log_text":log}),
         )
     }
-    /// Only a successful download raises `--download-complete`. One that fails
-    /// before it finishes (a disk-space preflight, say) ends its sync without
-    /// it, so wait in slices and stop once the sync has ended, leaving the
-    /// failure to the row's outcome rather than sitting out the whole timeout.
+    /// A failed download may never raise download-complete; stop waiting when sync ends and preserve its failure verdict.
     fn wait_for_download(&self, busy_reason: &str, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -2252,9 +2218,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     } else {
         None
     };
-    // The origin's published checksum is the payload identity the case hash
-    // cannot see: a re-mirrored origin under an unchanged case JSON is a
-    // different workload and must not inherit the old baseline.
+    // The origin checksum identifies payload changes an unchanged case JSON cannot capture; such changes expire baselines.
     let mut origin_checksum = Value::Null;
     if kind == "perf" {
         let address = resolved["repository"]["address"]
@@ -2427,9 +2391,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
         let passes = resolved["repetitions"].as_u64().unwrap_or(3);
         let mut rows = Vec::new();
         let mut mutation_info = Value::Null;
-        // An `evict-cache` step marks the next measured operation as the
-        // evicted lane; the operation after that sees whatever the first one
-        // left in the page cache, which is the warm lane again.
+        // Eviction applies to the next measured operation only; subsequent operations see the cache it leaves behind.
         let mut evicted_pending = false;
         for pass in 0..passes + u64::from(warmup) {
             let record = !(warmup && pass == 0);
@@ -2590,9 +2552,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
                 {
                     flags.push("incomplete-payload");
                 }
-                // The oracle verifies a synced payload, so it runs only after
-                // the operations that produce one; a check between a
-                // mutation and its repair sees the mutated bytes on purpose.
+                // Run the payload oracle only after repair-producing operations; intermediate mutation checks intentionally see changed bytes.
                 let oracle_outcome = if matches!(
                     name,
                     "download" | "download-full-files" | "force-redownload"
@@ -2688,10 +2648,7 @@ pub fn execute(root: &Path, options: &RunOptions) -> Result<Value> {
     result
 }
 
-/// The cache lane a measured operation ran in. Iteration zero without a
-/// warmup pass is cold; a run preceded by an `evict-cache` step is the
-/// evicted lane whatever the iteration number, so repeated evictions never
-/// masquerade as warm runs.
+/// Unprepared iteration zero is cold; explicit evictions always form a separate lane, regardless of iteration number.
 fn cache_state(warmup: bool, iteration: u64, evicted: bool) -> &'static str {
     if evicted {
         "evicted"
@@ -2706,8 +2663,6 @@ fn outcome_matches(expected: Option<&str>, observed: Option<&str>) -> bool {
     expected.is_none() || expected == observed
 }
 
-/// How long one `--download-complete` wait blocks before the runner checks
-/// whether the sync ended without completing the download.
 const DOWNLOAD_WAIT_SLICE: Duration = Duration::from_secs(60);
 
 fn sync_ended_without_download(progress: &Value, busy_reason: &str) -> bool {

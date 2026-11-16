@@ -11,16 +11,14 @@ use crate::core::utils::proxy::SharedBlockingClient;
 use crate::ui::app::{DecodedImagePayload, Foxy, ImageLoadResult, JoinServerStatusResult};
 use crate::ui::types::{RepositoryServer, ServerOnlineStatus};
 
-/// Shared HTTP client for image downloads, enabling TLS session reuse and
-/// connection pooling across all image fetch operations.
+/// Reuse one HTTP client across image downloads for TLS sessions and connection pooling.
 static IMAGE_HTTP_CLIENT: SharedBlockingClient =
     SharedBlockingClient::new(|builder| builder.timeout(Duration::from_secs(10)));
 
 static NEXT_JOIN_STATUS_QUERY_ID: AtomicU64 = AtomicU64::new(1);
 
 impl Foxy {
-    /// Resolve the A2S query port for a listed game port through the active
-    /// game module (Arma 3: game port + 1; Reforger: the default a2s port).
+    /// Resolve A2S ports through the active game module because port rules vary by game.
     pub fn server_query_port(port: &str) -> Result<u16, std::io::Error> {
         let port_number: u16 = port
             .parse()
@@ -169,6 +167,9 @@ impl Foxy {
     }
 
     pub fn spawn_query_thread(&mut self, server: &RepositoryServer) {
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
         let address = server.address.clone();
         let port = server.port.clone();
         let key = (address.clone(), port.clone());
@@ -187,7 +188,15 @@ impl Foxy {
                 Ok(players) => ServerOnlineStatus::Online { players },
                 Err(_) => ServerOnlineStatus::Offline,
             };
-            if tx.send((address, port, new_status)).is_ok() {
+            if tx
+                .send(crate::ui::app::runtime::ServerQueryResult {
+                    scope,
+                    address,
+                    port,
+                    status: new_status,
+                })
+                .is_ok()
+            {
                 Self::request_background_repaint(repaint_ctx.as_ref());
             }
         });
@@ -264,13 +273,17 @@ impl Foxy {
         (matches, format!("md5={}, sha1={}", actual_md5, actual_sha1))
     }
 
-    fn image_cache_path(checksum_hex: &str) -> PathBuf {
+    fn image_cache_directory() -> PathBuf {
         let mut images_dir = Self::get_game_space_directory();
         images_dir.push("images");
-        if !images_dir.exists() && std::fs::create_dir_all(&images_dir).is_err() {
+        images_dir
+    }
+
+    fn prepare_image_cache_file(cache_dir: &std::path::Path, checksum_hex: &str) -> PathBuf {
+        if !cache_dir.exists() && std::fs::create_dir_all(cache_dir).is_err() {
             warn!("Failed to create image cache directory");
         }
-        images_dir.join(format!("{}.png", checksum_hex))
+        crate::ui::app::runtime::client_workers::image_cache_file(cache_dir, checksum_hex)
     }
 
     fn fetch_image_bytes_with_retry(full_url: &str) -> Result<Vec<u8>, String> {
@@ -315,11 +328,12 @@ impl Foxy {
     }
 
     fn load_or_fetch_image_bytes(
+        cache_dir: &std::path::Path,
         base_url: &str,
         relative_path: &str,
         checksum_hex: &str,
     ) -> Result<Vec<u8>, String> {
-        let local_png = Self::image_cache_path(checksum_hex);
+        let local_png = Self::prepare_image_cache_file(cache_dir, checksum_hex);
         if local_png.exists() {
             match std::fs::read(&local_png) {
                 Ok(bytes) => {
@@ -363,11 +377,13 @@ impl Foxy {
     }
 
     fn fetch_decode_image_job(
+        cache_dir: &std::path::Path,
         base_url: &str,
         relative_path: &str,
         checksum_hex: &str,
     ) -> Result<DecodedImagePayload, String> {
-        let img_bytes = Self::load_or_fetch_image_bytes(base_url, relative_path, checksum_hex)?;
+        let img_bytes =
+            Self::load_or_fetch_image_bytes(cache_dir, base_url, relative_path, checksum_hex)?;
         let image = image::load_from_memory(&img_bytes)
             .map_err(|err| format!("Failed to decode image {}: {}", checksum_hex, err))?
             .to_rgba8();
@@ -379,11 +395,21 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn poll_image_results(&mut self, ctx: &egui::Context) {
+        let active_space = crate::core::game::spaces::active_game_space().space_id;
         while let Ok(result) = self.image_result_rx.try_recv() {
+            if !crate::ui::app::runtime::client_workers::current_worker_result(
+                &self.server_query_generation,
+                &active_space,
+                &result.space_id,
+                result.generation,
+            ) {
+                continue;
+            }
             let ImageLoadResult {
                 checksum_hex,
                 is_icon,
                 payload,
+                ..
             } = result;
             self.pending_image_jobs
                 .remove(&(checksum_hex.clone(), is_icon));
@@ -476,22 +502,28 @@ impl Foxy {
             }
         }
 
+        let scope = self.capture_worker_scope()?;
         if !self
             .pending_image_jobs
             .insert((checksum_hex.to_string(), is_icon))
         {
             return None;
         }
-
         let tx = self.image_result_tx.clone();
         let checksum = checksum_hex.to_string();
         let base = base_url.to_string();
         let relative = relative_path.to_string();
         let repaint_ctx = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
-            let payload = Self::fetch_decode_image_job(&base, &relative, &checksum);
+        // Capture the image-cache folder before spawning so a space switch cannot redirect the write.
+        let cache_dir = Self::image_cache_directory();
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
+        let handle = std::thread::spawn(move || {
+            let payload = Self::fetch_decode_image_job(&cache_dir, &base, &relative, &checksum);
             if tx
                 .send(ImageLoadResult {
+                    space_id,
+                    generation,
                     checksum_hex: checksum,
                     is_icon,
                     payload,
@@ -501,6 +533,7 @@ impl Foxy {
                 Self::request_background_repaint(repaint_ctx.as_ref());
             }
         });
+        self.image_workers.push(handle);
 
         None
     }

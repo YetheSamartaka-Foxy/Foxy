@@ -4,9 +4,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const EXPLORER_MODEL: &str = "composer-2.5[fast=false]";
+const JUDGMENT_MODEL: &str = "grok-4.7[reasoning_effort=medium,context=256k,fast=false]";
+
 pub(super) fn validate(repo: &Path, diagnostics: &mut Vec<Diagnostic>) {
     let codex_root = repo.join(".codex/agents");
     let claude_root = repo.join(".claude/agents");
+    let cursor_root = repo.join(".cursor/agents");
     if !codex_root.is_dir() {
         diagnostics.push(Diagnostic::new(
             ".codex/agents",
@@ -16,6 +20,12 @@ pub(super) fn validate(repo: &Path, diagnostics: &mut Vec<Diagnostic>) {
     if !claude_root.is_dir() {
         diagnostics.push(Diagnostic::new(
             ".claude/agents",
+            "role directory is missing",
+        ));
+    }
+    if !cursor_root.is_dir() {
+        diagnostics.push(Diagnostic::new(
+            ".cursor/agents",
             "role directory is missing",
         ));
     }
@@ -123,6 +133,75 @@ pub(super) fn validate(repo: &Path, diagnostics: &mut Vec<Diagnostic>) {
         validate_workflow_ref(repo, &relative, body, diagnostics);
     }
 
+    let mut cursor = BTreeMap::new();
+    for path in files(&cursor_root, "md") {
+        let relative = format!(
+            ".cursor/agents/{}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        let Some(text) = read_text(repo, &relative, diagnostics) else {
+            continue;
+        };
+        let (frontmatter, body) = match parse_frontmatter(&text) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                diagnostics.push(Diagnostic::new(&relative, error));
+                continue;
+            }
+        };
+        let name = yaml_string(&frontmatter, "name").unwrap_or_default().trim();
+        let description = yaml_string(&frontmatter, "description")
+            .unwrap_or_default()
+            .trim();
+        if name.is_empty() || description.is_empty() {
+            diagnostics.push(Diagnostic::new(
+                &relative,
+                "role name and description must be nonempty",
+            ));
+        }
+        if name
+            != path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .as_ref()
+        {
+            diagnostics.push(Diagnostic::new(
+                &relative,
+                "role name must match filename stem",
+            ));
+        }
+        match cursor_model(name) {
+            Some(expected) if yaml_string(&frontmatter, "model") == Some(expected) => {}
+            Some(expected) => diagnostics.push(Diagnostic::new(
+                &relative,
+                format!("model must be `{expected}`"),
+            )),
+            None => diagnostics.push(Diagnostic::new(
+                &relative,
+                format!("role `{name}` has no Cursor Grok pin"),
+            )),
+        }
+        let writes = yaml_string(&frontmatter, "tools").is_some_and(|tools| tools.contains("Edit"));
+        if writes == yaml_flag(&frontmatter, "readonly") {
+            diagnostics.push(Diagnostic::new(
+                &relative,
+                if writes {
+                    "a writing role must not set readonly: true"
+                } else {
+                    "a read-only role must set readonly: true"
+                },
+            ));
+        }
+        if cursor
+            .insert(name.to_owned(), description.to_owned())
+            .is_some()
+        {
+            diagnostics.push(Diagnostic::new(&relative, "duplicate Cursor role name"));
+        }
+        validate_workflow_ref(repo, &relative, body, diagnostics);
+    }
+
     if codex.is_empty() {
         diagnostics.push(Diagnostic::new(
             ".codex/agents",
@@ -132,6 +211,12 @@ pub(super) fn validate(repo: &Path, diagnostics: &mut Vec<Diagnostic>) {
     if claude.is_empty() {
         diagnostics.push(Diagnostic::new(
             ".claude/agents",
+            "role directory must not be empty",
+        ));
+    }
+    if cursor.is_empty() {
+        diagnostics.push(Diagnostic::new(
+            ".cursor/agents",
             "role directory must not be empty",
         ));
     }
@@ -148,6 +233,18 @@ pub(super) fn validate(repo: &Path, diagnostics: &mut Vec<Diagnostic>) {
             format!("missing Codex role `{name}`"),
         ));
     }
+    for name in codex.keys().filter(|name| !cursor.contains_key(*name)) {
+        diagnostics.push(Diagnostic::new(
+            ".cursor/agents",
+            format!("missing Cursor role `{name}`"),
+        ));
+    }
+    for name in cursor.keys().filter(|name| !codex.contains_key(*name)) {
+        diagnostics.push(Diagnostic::new(
+            ".codex/agents",
+            format!("missing Codex role `{name}` for Cursor copy"),
+        ));
+    }
     for (name, description) in &codex {
         if claude.get(name).is_some_and(|value| value != description) {
             diagnostics.push(Diagnostic::new(
@@ -155,6 +252,28 @@ pub(super) fn validate(repo: &Path, diagnostics: &mut Vec<Diagnostic>) {
                 format!("description for role `{name}` differs from Codex metadata"),
             ));
         }
+        if cursor.get(name).is_some_and(|value| value != description) {
+            diagnostics.push(Diagnostic::new(
+                ".cursor/agents",
+                format!("description for role `{name}` differs from Codex metadata"),
+            ));
+        }
+    }
+}
+
+fn cursor_model(name: &str) -> Option<&'static str> {
+    match name {
+        "explorer" => Some(EXPLORER_MODEL),
+        "worker" | "reviewer" | "async-safety-reviewer" => Some(JUDGMENT_MODEL),
+        _ => None,
+    }
+}
+
+fn yaml_flag(value: &YamlValue, key: &str) -> bool {
+    match value.get(key) {
+        Some(YamlValue::Bool(flag)) => *flag,
+        Some(YamlValue::String(text)) => text.eq_ignore_ascii_case("true"),
+        _ => false,
     }
 }
 

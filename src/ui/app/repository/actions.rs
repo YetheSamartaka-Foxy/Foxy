@@ -19,19 +19,12 @@ use crate::ui::types::{
     sanitize_user_path,
 };
 
-/// Shared HTTP client for repository-metadata fetches. A bounded timeout keeps
-/// a slow or unreachable server from blocking the worker thread indefinitely
-/// (the previous default-`reqwest::blocking::get` had no timeout, which is what
-/// let a dead server hang for ~20s before erroring).
 static REPO_METADATA_HTTP_CLIENT: SharedBlockingClient =
     SharedBlockingClient::new(|builder| builder.timeout(Duration::from_secs(15)));
 
 const REPO_METADATA_MAX_ATTEMPTS: u32 = 3;
 const REPO_METADATA_RETRY_BACKOFF: Duration = Duration::from_millis(750);
 
-/// Fetch and parse a JSON document, retrying a few times on transient failure.
-/// Runs on a background thread, so the blocking sleep between attempts never
-/// touches the UI thread.
 fn fetch_json_with_retry(url: &str) -> Result<Value, String> {
     let mut last_error = String::new();
     for attempt in 1..=REPO_METADATA_MAX_ATTEMPTS {
@@ -159,11 +152,7 @@ impl Foxy {
         }
     }
 
-    /// Normalize a local download folder for identity comparison. Two
-    /// repositories share core database / pending-update state only when they
-    /// resolve to the same folder, so comparison must ignore separator style,
-    /// trailing slashes and (on Windows) case. A blank folder means the download
-    /// location has not been chosen yet and can never collide.
+    /// Normalize folder separators, trailing slashes, and Windows case before comparing repository identity; blank paths cannot collide.
     fn normalize_repo_path_identity(path: &str) -> String {
         let mut normalized = path.trim().replace('\\', "/");
         while normalized.ends_with('/') {
@@ -175,16 +164,7 @@ impl Foxy {
         normalized
     }
 
-    /// Collect existing repositories that would share core database and
-    /// pending-update state with a repository about to be added.
-    ///
-    /// Identity is bound to the repository space and the local download folder -
-    /// never to the remote URL alone. The same URL added under a different space
-    /// or to a different folder is an independent install and does not collide.
-    /// The URL only acts as a tiebreaker between repositories that deliberately
-    /// share one space folder (where shared addons are deduplicated and each repo
-    /// keeps its own unique ones), so two *different* repositories in the same
-    /// folder are not reported as duplicates of each other.
+    // Duplicate identity includes the destination folder; equal URLs in separate installs are independent.
     fn collect_duplicate_repository_bindings(
         &self,
         normalized_address: &str,
@@ -256,9 +236,6 @@ impl Foxy {
 
         let normalized_with_trailing = Self::normalize_repo_url(&address);
         if !allow_duplicate {
-            // A repository added from the address input shares a (space, folder)
-            // install only when the user picks a download folder here; otherwise
-            // it has no folder yet and is never flagged as a duplicate.
             let duplicates = self.collect_duplicate_repository_bindings(
                 &normalized_with_trailing,
                 None,
@@ -330,12 +307,6 @@ impl Foxy {
         )
     }
 
-    /// Dispatch a background fetch of a repository-space manifest. The network
-    /// I/O runs on a worker thread (with a bounded-timeout client); the parsed
-    /// result is applied on the UI thread by
-    /// [`Self::poll_repository_space_import_results`], so a slow or unreachable
-    /// server can no longer freeze the app. The previous synchronous version
-    /// used a timeout-less `reqwest::blocking::get` on the UI thread.
     pub(crate) fn dispatch_repository_space_import(
         &mut self,
         input: &str,
@@ -347,14 +318,21 @@ impl Foxy {
         }
 
         let input = input.trim().to_string();
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
         let tx = self.repository_space_import_result_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
         self.repository_space_import_in_flight = true;
         self.needs_repaint = true;
-        std::thread::spawn(move || {
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
+        let handle = std::thread::spawn(move || {
             let outcome = Self::fetch_repository_space_manifest(&input);
             if tx
                 .send(RepositorySpaceImportResult {
+                    space_id,
+                    generation,
                     continuation,
                     outcome,
                 })
@@ -363,11 +341,9 @@ impl Foxy {
                 Self::request_background_repaint(repaint_ctx.as_ref());
             }
         });
+        self.repository_space_import_worker = Some(handle);
     }
 
-    /// Worker-thread fetch + parse of a repository-space manifest. Tries each
-    /// candidate URL in turn and returns the first valid manifest, `Ok(None)`
-    /// if none of the candidates yields one, or `Err` on a parse failure.
     pub(in crate::ui::app) fn fetch_repository_space_manifest(
         input: &str,
     ) -> Result<Option<FetchedRepositorySpace>, String> {
@@ -409,8 +385,7 @@ impl Foxy {
                     let source_base_url = Self::repository_space_base_url(&source_address);
                     let space_id = Self::repository_space_id_from_source(&source_address);
                     let app_update_url = manifest.app_update_url.trim().to_string();
-                    // Recomputed rather than trusted: a hand-edited manifest can
-                    // keep a stale published checksum and would hide its changes.
+                    // Recompute the published checksum because hand-edited manifests may leave it stale.
                     let manifest_checksum = repository_space_manifest_checksum(&manifest);
                     let published_checksum = manifest.space_checksum.trim();
                     if !published_checksum.is_empty()
@@ -476,8 +451,6 @@ impl Foxy {
         }
     }
 
-    /// Merge a fetched repository-space manifest into app state on the UI
-    /// thread, preserving existing local overrides, and return its space id.
     fn apply_fetched_repository_space(
         &mut self,
         fetched: FetchedRepositorySpace,
@@ -508,8 +481,6 @@ impl Foxy {
         space_id
     }
 
-    /// Build the space `space_id` from a fetched manifest, keeping the stored
-    /// space's download folder, local name override and collapsed state.
     pub(in crate::ui::app) fn merged_repository_space(
         existing_space: Option<&RepositorySpace>,
         space_id: &str,
@@ -578,8 +549,6 @@ impl Foxy {
         }
     }
 
-    /// Insert or replace a space, persist it, and load its images. Never adds
-    /// or removes a repository.
     pub(in crate::ui::app) fn store_repository_space(
         &mut self,
         space: RepositorySpace,
@@ -683,9 +652,7 @@ impl Foxy {
             self.save_repositories();
         }
 
-        // Same first-fetch every other add path runs. Without it an auto-added
-        // required repository keeps an empty addon list, servers, images and
-        // launch parameters until the user triggers a refresh by hand.
+        // Refresh newly added required repositories immediately so addons, servers, images, and launch parameters are available.
         for repo_idx in metadata_refresh_indices {
             self.update_repository_from_url(repo_idx, ctx);
         }
@@ -693,14 +660,20 @@ impl Foxy {
         added_count
     }
 
-    /// Drain completed background repository-space manifest fetches and apply
-    /// them on the UI thread, then run each fetch's queued continuation.
     pub(in crate::ui::app) fn poll_repository_space_import_results(&mut self, ctx: &egui::Context) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         while let Ok(result) = self.repository_space_import_result_rx.try_recv() {
+            if !self.scoped_result_applies(&result.space_id, result.generation) {
+                self.repository_space_import_in_flight = false;
+                continue;
+            }
             self.repository_space_import_in_flight = false;
             let RepositorySpaceImportResult {
                 continuation,
                 outcome,
+                ..
             } = result;
             match continuation {
                 RepositorySpaceImportContinuation::AddRepositoryDialog {
@@ -743,9 +716,6 @@ impl Foxy {
         }
     }
 
-    /// Apply the result of an add-repository dialog space import: open the space
-    /// selector when a manifest was found, otherwise fall back to adding the
-    /// input as a plain repository.
     fn complete_add_repository_dialog_import(
         &mut self,
         address_input: String,
@@ -754,9 +724,7 @@ impl Foxy {
         outcome: Result<Option<FetchedRepositorySpace>, String>,
         ctx: &egui::Context,
     ) {
-        // The user closed the dialog (Cancel) while the fetch was in flight;
-        // treat that as aborting the import, matching the original behavior
-        // where Cancel returned before any import work ran.
+        // Treat Cancel during fetch as aborting the import, preserving the prior pre-fetch cancel behavior.
         if !self.show_add_repository_modal {
             debug!("Discarding repository-space import result for a closed add-repository dialog");
             return;
@@ -926,11 +894,6 @@ impl Foxy {
         Ok(())
     }
 
-    /// Dispatch a background refresh of repo.json (and foxy_addons.json for
-    /// FoxyMode repos). Network I/O runs on a worker thread with retry; the
-    /// parsed result is applied later on the UI thread by
-    /// [`Self::poll_repo_metadata_results`], so a slow/unreachable server can
-    /// no longer freeze the app.
     pub fn update_repository_from_url(&mut self, repo_index: usize, _ctx: &egui::Context) {
         if repo_index >= self.repository_view_state.repositories.len() {
             log::error!("Invalid repository index");
@@ -953,6 +916,10 @@ impl Foxy {
             );
             return;
         }
+        let Some(scope) = self.capture_worker_scope() else {
+            self.pending_repo_metadata_jobs.remove(&repo_address);
+            return;
+        };
 
         let base_url = repo_address.trim_end_matches('/').to_string();
         info!(
@@ -962,10 +929,14 @@ impl Foxy {
 
         let tx = self.repo_metadata_result_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
+        let handle = std::thread::spawn(move || {
             let outcome = Self::fetch_repository_metadata(&base_url);
             let delivered = tx
                 .send(RepoMetadataFetchResult {
+                    space_id,
+                    generation,
                     repo_index,
                     repo_address,
                     repo_name,
@@ -978,9 +949,9 @@ impl Foxy {
                 Self::request_background_repaint(repaint_ctx.as_ref());
             }
         });
+        self.repo_metadata_workers.push(handle);
     }
 
-    /// Worker-thread fetch of repo.json plus, for FoxyMode repos, foxy_addons.json.
     fn fetch_repository_metadata(base_url: &str) -> Result<RepoMetadataPayload, String> {
         let repo_url = format!("{base_url}/repo.json");
         let repo_json = fetch_json_with_retry(&repo_url)
@@ -1008,18 +979,15 @@ impl Foxy {
         })
     }
 
-    /// Drain completed background metadata fetches and apply them on the UI thread.
     pub(in crate::ui::app) fn poll_repo_metadata_results(&mut self, ctx: &egui::Context) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         while let Ok(result) = self.repo_metadata_result_rx.try_recv() {
-            // A game-space switch clears the pending set; a fetch dispatched in
-            // the previous space must not rewrite a same-address repository here.
-            if !self.pending_repo_metadata_jobs.remove(&result.repo_address) {
-                debug!(
-                    "Discarding repository metadata fetched before a game space switch: {}",
-                    result.repo_name
-                );
+            if !self.scoped_result_applies(&result.space_id, result.generation) {
                 continue;
             }
+            self.pending_repo_metadata_jobs.remove(&result.repo_address);
             self.apply_repository_metadata(result, ctx);
         }
     }
@@ -1032,6 +1000,7 @@ impl Foxy {
             apply_client_parameters,
             apply_dlc_content,
             outcome,
+            ..
         } = result;
 
         let (json, addon_manifest) = match outcome {
@@ -1046,8 +1015,6 @@ impl Foxy {
             }
         };
 
-        // The repository list may have changed while the fetch was in flight;
-        // re-resolve the index by address, falling back to a scan.
         let repo_index = if repo_index < self.repository_view_state.repositories.len()
             && self.repository_view_state.repositories[repo_index].address == repo_address
         {
@@ -1104,10 +1071,7 @@ impl Foxy {
                 );
                 self.show_success_toast(message);
             }
-            // A repository can mark an addon client-side, but the marking only
-            // means something for a game whose servers tolerate addons they do
-            // not run. Dropping it here keeps every downstream exemption off for
-            // the other games instead of trusting a flag they cannot honor.
+            // Honor client-side markings only for games whose servers tolerate unlisted client addons.
             self.repository_view_state.repositories[repo_index].remote_client_side_addons =
                 if crate::core::game::registry()
                     .active()

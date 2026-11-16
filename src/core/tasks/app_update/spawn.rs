@@ -9,8 +9,6 @@ use anyhow::Result;
 use std::sync::mpsc as std_mpsc;
 use std::time::Instant;
 
-/// Spawn a background task that checks for updates and sends results via mpsc.
-/// Returns the receiver for the UI to poll.
 pub fn spawn_update_check(
     mode: AppUpdateMode,
     source: String,
@@ -54,8 +52,8 @@ pub fn spawn_update_check(
         };
 
         rt.block_on(async {
-            // For GitHub mode, fetch releases and convert to manifest + changelogs.
-            // For Server mode, fetch the manifest directly.
+
+
             let fetch_result: Result<(UpdateManifest, Vec<ChangelogVersion>)> = match mode {
                 AppUpdateMode::Server => match fetch_manifest(&source).await {
                     Ok(manifest) => Ok((manifest, Vec::new())),
@@ -145,8 +143,6 @@ pub fn spawn_update_check(
     rx
 }
 
-/// Spawn a background task that downloads and verifies an installer.
-/// Returns the receiver for the UI to poll.
 pub fn spawn_installer_download(
     base_url: String,
     platform_entry: PlatformEntry,

@@ -62,8 +62,6 @@ impl Foxy {
         self.render_stat_tiles(ui, &tiles);
     }
 
-    /// Same look as `overview_chip`, but allocated at its exact size so it stays a
-    /// pill inside a centered row instead of stretching to the row height.
     fn space_entry_chip(&self, ui: &mut Ui, text: &str, color: egui::Color32) {
         let galley = ui.painter().layout_no_wrap(
             text.to_string(),

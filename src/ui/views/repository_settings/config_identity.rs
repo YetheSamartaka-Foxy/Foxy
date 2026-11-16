@@ -5,8 +5,6 @@ use eframe::egui::{Button, Color32, CursorIcon, TextEdit, Ui};
 use rfd::FileDialog;
 
 impl Foxy {
-    /// Name, address, local path, and space-inherited path display. Address and
-    /// path are read-only while `identity_locked` (work for this instance runs).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_repository_configuration_identity(
         ui: &mut Ui,

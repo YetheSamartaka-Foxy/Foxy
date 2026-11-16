@@ -11,12 +11,7 @@ use crate::types::{
 
 pub const FOXY_MODE_VERSION: &str = "FoxyModeV1";
 
-/// Read back a generated manifest (`repo.json`, `foxy_addons.json`,
-/// `foxy_addon.json`, `mod.srf`).
-///
-/// Published manifests are often hand-edited on the server, so a UTF-8 BOM is
-/// stripped the way the client's fetch path does instead of failing with a bare
-/// `expected value at line 1 column 1`.
+/// Accept a UTF-8 BOM in hand-edited manifests, matching the client's fetch parser.
 pub fn read_manifest(path: &Path) -> Result<Value> {
     let bytes =
         std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
@@ -30,11 +25,6 @@ pub fn read_manifest(path: &Path) -> Result<Value> {
     serde_json::from_slice(json).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
-// ---------------------------------------------------------------------------
-// SwiftyMode: mod.srf
-// ---------------------------------------------------------------------------
-
-/// Write mod.srf for a single mod into its output directory (SwiftyMode/HybridMode).
 pub fn write_mod_srf(processed_mod: &ProcessedMod, output_dir: &Path) -> Result<()> {
     let mod_dir = output_dir.join(&processed_mod.mod_name);
     let srf_path = mod_dir.join("mod.srf");
@@ -80,11 +70,6 @@ pub fn write_mod_srf(processed_mod: &ProcessedMod, output_dir: &Path) -> Result<
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// FoxyMode: foxy_addon.json (per-mod)
-// ---------------------------------------------------------------------------
-
-/// Write foxy_addon.json for a single mod into its output directory (FoxyMode/HybridMode).
 pub fn write_foxy_addon_json(processed_mod: &ProcessedMod, output_dir: &Path) -> Result<()> {
     let mod_dir = output_dir.join(&processed_mod.mod_name);
     let path = mod_dir.join("foxy_addon.json");
@@ -136,10 +121,6 @@ fn is_pbo_manifest_file(path: &Path) -> bool {
     foxy_formats::builtin_registry().format_id_for_path(path) == Some(foxy_formats::PBO_FORMAT_ID)
 }
 
-// ---------------------------------------------------------------------------
-// FoxyMode: foxy_addons.json (repo-level)
-// ---------------------------------------------------------------------------
-
 fn collect_mod_entries(
     mods: &[ProcessedMod],
     checksum_fn: fn(&ProcessedMod) -> &str,
@@ -167,7 +148,6 @@ fn collect_mod_entries(
     (required, optional)
 }
 
-/// Write foxy_addons.json at the output root (FoxyMode/HybridMode).
 pub fn write_foxy_addons_json(
     mods: &[ProcessedMod],
     foxy_repo_checksum: &str,
@@ -191,11 +171,6 @@ pub fn write_foxy_addons_json(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// repo.json
-// ---------------------------------------------------------------------------
-
-/// Write repo.json at the output root.
 pub fn write_repo_json(
     config: &RepoConfig,
     mods: &[ProcessedMod],
@@ -204,8 +179,6 @@ pub fn write_repo_json(
     mode: GenerationMode,
     app_update_url: Option<&str>,
 ) -> Result<()> {
-    // In FoxyMode, repo.json mod lists are empty (data lives in foxy_addons.json).
-    // In SwiftyMode/HybridMode, they contain MD5 checksums as before.
     let (required_mods, optional_mods) = match mode {
         GenerationMode::Foxy => (Vec::new(), Vec::new()),
         GenerationMode::Swifty | GenerationMode::Hybrid => {
@@ -222,7 +195,6 @@ pub fn write_repo_json(
         .filter(|url| !url.is_empty())
         .map(str::to_string);
 
-    // Hash and copy image files if they exist
     let base = Path::new(&config.base_path);
     let (repo_image_checksum, icon_image_checksum) = process_images(config, base, output_dir)?;
 
@@ -264,8 +236,6 @@ fn process_images(config: &RepoConfig, base: &Path, output_dir: &Path) -> Result
     Ok((repo_image_checksum, icon_image_checksum))
 }
 
-/// Copy an image referenced by a config next to the generated manifest and
-/// return its SHA-1, or an empty string when the path is unset or missing.
 pub fn copy_and_hash_image(image_path: &str, base: &Path, output_dir: &Path) -> Result<String> {
     if image_path.is_empty() {
         return Ok(String::new());
@@ -439,7 +409,7 @@ mod tests {
         let json = serde_json::to_string(&repo).expect("repo serialization should work");
 
         assert!(!json.contains('\n'));
-        // foxyMode should NOT be present when None
+
         assert!(!json.contains("foxyMode"));
         assert!(json.contains(
             "\"requiredMods\":[{\"modName\":\"@required\",\"checkSum\":\"REQ\",\"enabled\":true}]"
@@ -481,7 +451,7 @@ mod tests {
         let json = serde_json::to_string(&repo).expect("repo serialization should work");
         assert!(json.contains("\"foxyMode\":\"FoxyModeV1\""));
         assert!(json.contains("\"appUpdateUrl\":\"https://updates.example.com/foxy/\""));
-        // In FoxyMode, mod lists are empty
+
         assert!(json.contains("\"requiredMods\":[]"));
         assert!(json.contains("\"optionalMods\":[]"));
     }
@@ -544,7 +514,7 @@ mod tests {
         assert!(json.contains("\"version\":\"FoxyModeV1\""));
         assert!(json.contains("\"fileType\":\"FoxyPboFile\""));
         assert!(json.contains("\"checksum\":\"B3PARTSUM\""));
-        // Should use forward slashes
+
         assert!(json.contains("\"path\":\"addons/test.pbo\""));
     }
 }

@@ -2,15 +2,12 @@ use egui::{Color32, Rect, Response, Role, Sense, Ui, Widget, WidgetInfo, pos2, v
 
 use super::{ActivityBar, BarMotion};
 
-/// Above this many steps, or below this block width, the steps merge into one
-/// bar: slivers stop reading as separate items.
+/// Merge steps when they become too narrow to read individually.
 const MAX_SEGMENTS: usize = 40;
 const MIN_SEGMENT_WIDTH: f32 = 12.0;
 const SEGMENT_GAP: f32 = 4.0;
 const HEIGHT: f32 = 16.0;
 
-/// One block per item of a bulk run: finished items solid, the running one
-/// filling with triangles, the rest empty.
 #[must_use = "You should put this widget in a ui with `ui.add(widget);`"]
 pub(crate) struct StepTrack {
     done: usize,
@@ -31,8 +28,6 @@ impl StepTrack {
         }
     }
 
-    /// The item after the finished ones is running, `progress` through, or
-    /// with no known end when `None`.
     pub(crate) fn running(mut self, progress: Option<f32>, motion: BarMotion) -> Self {
         self.running = Some((progress, motion));
         self
@@ -103,8 +98,6 @@ impl Widget for StepTrack {
     }
 }
 
-/// Width of each of `count` segments across `width`, or `None` when they
-/// would be too many or too thin to tell apart.
 fn segment_width(width: f32, count: usize) -> Option<f32> {
     if count == 0 || count > MAX_SEGMENTS {
         return None;

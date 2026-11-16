@@ -14,27 +14,23 @@ const SHIELD_SCAN_SECONDS: f64 = 1.6;
 const SIGNAL_SECONDS: f64 = 1.4;
 const GEAR_TURN_SECONDS: f64 = 4.0;
 const DROP_SECONDS: f64 = 1.2;
-/// Blips the radar beam lights as it passes, as (share of radius, bearing).
+
 const RADAR_BLIPS: [(f32, f32); 3] = [(0.62, 0.6), (0.38, 2.6), (0.8, 4.4)];
 const GEAR_TEETH: usize = 8;
 
-/// The kind of work an [`ActivityIcon`] names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ActivityGlyph {
-    /// Local files being read and hashed: a radar sweep.
     Radar,
-    /// Every file re-read and verified: a shield under a scan line.
+
     Shield,
-    /// Remote data being fetched: broadcast waves.
+
     Signal,
-    /// Database work: a turning gear.
+
     Gear,
-    /// Files arriving: an arrow dropping into a tray.
+
     Download,
 }
 
-/// An animated icon that names the work in progress, where a spinner would
-/// only say that something is happening.
 #[must_use = "You should put this widget in a ui with `ui.add(widget);`"]
 pub(crate) struct ActivityIcon {
     glyph: ActivityGlyph,
@@ -110,7 +106,6 @@ struct Glyph {
 }
 
 impl Glyph {
-    /// A point at `(x, y)` shares of the icon square.
     fn at(&self, x: f32, y: f32) -> Pos2 {
         self.square.min + self.square.size() * vec2(x, y)
     }
@@ -285,7 +280,6 @@ impl Glyph {
     }
 }
 
-/// Where a horizontal line at `y` crosses a convex outline.
 fn span_at(outline: &[Pos2], y: f32) -> Option<(f32, f32)> {
     let mut left = f32::INFINITY;
     let mut right = f32::NEG_INFINITY;
@@ -300,7 +294,6 @@ fn span_at(outline: &[Pos2], y: f32) -> Option<(f32, f32)> {
     (left <= right).then_some((left, right))
 }
 
-/// Outline of a gear, star-shaped around `center`, turned by `turn` radians.
 fn gear_outline(center: Pos2, outer: f32, inner: f32, turn: f32) -> Vec<Pos2> {
     let pitch = TAU / GEAR_TEETH as f32;
     let mut points = Vec::with_capacity(GEAR_TEETH * 5);

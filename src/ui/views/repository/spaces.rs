@@ -62,8 +62,6 @@ impl Foxy {
                 .iter()
                 .enumerate()
                 .filter_map(|(entry_idx, entry)| {
-                    // Entries are repositories already attached to this space;
-                    // they install into the space's shared download folder.
                     let installed_tag =
                         self.repo_installed_state_tag(&entry.address, &space.shared_path);
                     detail_filter
@@ -90,7 +88,7 @@ impl Foxy {
                         .repository_view_state
                         .repositories
                         .get(candidate.repo_index)?;
-                    // Candidates are repositories not yet attached to this space.
+
                     let installed_tag = self.repo_installed_state_tag(&repo.address, &repo.path);
                     detail_filter
                         .matches_with_tags(

@@ -26,9 +26,7 @@ fn path_matches_mod(root: &str, candidate: &str) -> bool {
     candidate.starts_with(&prefix)
 }
 
-/// Per-flush tally of what the OS reported, so a log bundle can tell a real
-/// edit from an attribute storm (an indexer, an antivirus pass) without the
-/// watcher having to guess.
+/// Track OS-reported edits so diagnostics can distinguish changes from metadata storms.
 #[derive(Default)]
 struct EventKindTally {
     create: usize,
@@ -92,7 +90,6 @@ struct ModPathEntry {
 }
 
 async fn build_mod_repo_index(db: FoxyDb) -> Vec<ModPathEntry> {
-    // Fetch only needed columns, run all three queries concurrently
     let (repos_result, repo_mods_result, mods_result) = tokio::join!(
         db.query_all(
             "SELECT id, remote_url, local_path FROM repositories",
@@ -208,11 +205,7 @@ fn repo_urls_for_changed_paths(
     repo_urls
 }
 
-/// Spawn the watcher worker. `idle_exit` is set when the worker returns without
-/// ever establishing a watch (no addon rows to index, no registrable path, or
-/// a watcher init failure), so the owner can back off instead of respawning it
-/// on the next frame; it stays false while the watcher is active and after a
-/// requested stop.
+/// Back off after watcher setup fails instead of retrying every frame.
 pub fn spawn_repo_fs_watcher(
     watch_paths: Vec<String>,
     suppress_until_ms: Arc<AtomicU64>,
@@ -228,8 +221,6 @@ pub fn spawn_repo_fs_watcher(
         );
         ensure_logger();
 
-        // The index probe only needs the shared database handle, not a
-        // runtime, HTTP client or context of its own.
         let Some(rt) = background_runtime() else {
             error!("Filesystem watcher disabled: shared background runtime unavailable");
             idle_exit.store(true, Ordering::Relaxed);
@@ -393,7 +384,6 @@ mod tests {
 
     #[test]
     fn path_matches_mod_prefix_but_not_dir() {
-        // "mods/@ace_extra" starts with "mods/@ace" but is NOT a child directory
         assert!(!path_matches_mod("mods/@ace", "mods/@ace_extra/file.pbo"));
     }
 

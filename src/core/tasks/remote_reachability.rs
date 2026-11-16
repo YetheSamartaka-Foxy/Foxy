@@ -11,11 +11,7 @@ const REACHABILITY_ATTEMPTS: u32 = 2;
 const REACHABILITY_RETRY_DELAY: Duration = Duration::from_millis(750);
 const REACHABILITY_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Confirm the repository's `repo.json` is served right now before a destructive
-/// operation (force redownload of a repository or an addon) removes local data.
-/// The probe is bounded so an unreachable server fails within seconds instead of
-/// sitting in the long retry loop of the regular manifest fetch, and it demands
-/// a parseable JSON object so a captive portal or a mis-pointed URL cannot pass.
+/// Before destructive removal, require a bounded probe returning parseable repository JSON.
 pub(crate) async fn ensure_remote_repository_reachable(
     client: &Client,
     repository_url: &str,
@@ -63,8 +59,6 @@ async fn probe_manifest(client: &Client, manifest_url: &str) -> Result<(), Strin
     manifest_body_is_repository(&body)
 }
 
-/// `reqwest::Error`'s `Display` stops at "error sending request"; the cause the
-/// user needs (connection refused, DNS failure, timeout) sits in the source chain.
 fn describe_request_error(err: reqwest::Error) -> String {
     let err = err.without_url();
     let mut text = err.to_string();
@@ -77,9 +71,6 @@ fn describe_request_error(err: reqwest::Error) -> String {
     text
 }
 
-/// A reachable repository answers with a JSON object; anything else (an HTML
-/// login page, an empty file, a directory listing) means the URL is not
-/// serving a repository even though the host answered.
 fn manifest_body_is_repository(body: &[u8]) -> Result<(), String> {
     let text = std::str::from_utf8(body).map_err(|_| "manifest is not valid UTF-8".to_string())?;
     let trimmed = text.trim_start_matches('\u{feff}').trim();

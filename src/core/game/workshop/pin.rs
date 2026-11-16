@@ -8,12 +8,10 @@ use super::{FreezeSummary, SteamWorkshopItem};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PinState {
-    /// Launches from Steam's live folder and follows every Workshop update.
     NotFrozen,
-    /// Pinned, and Steam's copy still matches the pin.
+
     InSync,
-    /// Pinned, but Steam has since updated the item. Foxy still launches the
-    /// pinned copy; this is what a player needs to see before sharing a code.
+    /// Drift does not retarget a pin: launch its frozen copy even after Steam updates the live item.
     Drifted,
     /// Pinned, and Steam no longer has the item installed, so drift cannot be
     /// judged. The pinned copy still launches.
@@ -57,7 +55,6 @@ pub struct PinStatus {
     pub frozen_path: Option<String>,
 }
 
-/// Pin state of every managed item of one app, in launch order.
 pub fn pin_status(
     space_dir: &Path,
     app_id: u32,
@@ -78,9 +75,7 @@ pub fn pin_status(
 
 fn pin_status_for_entry(entry: &SteamWorkshopItem, steam_directory: &str) -> PinStatus {
     let live_path = super::resolve_installed_path(entry, steam_directory);
-    // A metadata hash of the live folder, compared against the hash recorded
-    // when the item was frozen. Same folder plus no Steam update means the same
-    // hash, so drift is detected without re-reading every mod file.
+    // Compare live metadata with the frozen record to detect Steam drift without rereading every payload file.
     let live_version = live_path
         .as_deref()
         .and_then(|path| calculate_addon_folder_content_hash(path).ok())
@@ -121,7 +116,7 @@ fn pin_status_for_entry(entry: &SteamWorkshopItem, steam_directory: &str) -> Pin
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreezeAllSummary {
     pub frozen: Vec<FreezeSummary>,
-    /// Already pinned and left alone because `refresh` was not requested.
+
     pub skipped: Vec<String>,
     pub failed: Vec<FreezeFailure>,
 }
@@ -132,8 +127,6 @@ pub struct FreezeFailure {
     pub error: String,
 }
 
-/// Pin every managed item of one app in one pass. `refresh` re-pins items that
-/// are already frozen, which is how a player moves a pin onto a newer build.
 pub fn freeze_all(
     space_dir: &Path,
     app_id: u32,

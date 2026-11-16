@@ -14,6 +14,8 @@ pub enum AddonBackupTaskAction {
 
 #[derive(Clone, Debug)]
 pub struct AddonBackupTaskResult {
+    pub space_id: String,
+    pub generation: u64,
     pub repo_index: usize,
     pub action: AddonBackupTaskAction,
     pub addon_name: String,

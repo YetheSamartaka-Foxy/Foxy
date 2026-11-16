@@ -1,27 +1,12 @@
-//! Persisted data model for the Settings -> Scheduling feature.
-//!
-//! A [`ScheduledJob`] is an opt-in pipeline that runs while Foxy is open: an
-//! optional recheck, an optional auto-approved download, and an optional
-//! post-action (close the app or shut down the PC). Every powerful behavior is
-//! off by default and the scheduler only fires while the app is running, so the
-//! time math here also has to recognize a job that was missed because the app
-//! was closed when it was due (see [`ScheduledJob::due_state`]).
-//!
-//! Only the definition and lightweight bookkeeping (`enabled`, `last_run_*`,
-//! `last_result`) are persisted. Live execution state lives on `Foxy` behind
-//! `#[serde(skip)]` runtime fields, never here.
+//! Persist job definitions and lightweight run history only; live execution state stays in skipped runtime fields.
 
-use chrono::{
-    DateTime, Datelike, Local, LocalResult, NaiveDateTime, NaiveTime, TimeZone, Timelike,
-};
+use chrono::{DateTime, Datelike, Local, NaiveTime, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 
-/// A job that fires more than this many seconds after its scheduled time (for
-/// example because Foxy was closed when it was due) is treated as missed rather
-/// than run late. This keeps a stale "download then shut down" job from firing
-/// hours after the fact on the next launch. Time a due job spends waiting for
-/// other work while Foxy runs does not count (see
-/// [`ScheduledJob::due_state_with_hold`]).
+pub use crate::core::schedule::{JobSchedule, local_to_unix_ms, unix_ms_to_local};
+use crate::core::schedule::first_valid_local_instant;
+
+/// Jobs more than the grace window late are marked missed, preventing stale download-and-shutdown actions after Foxy reopens.
 pub const SCHEDULER_MISSED_GRACE_SECS: i64 = 10 * 60;
 
 /// Seconds the cancellable countdown overlay is shown before a post-action
@@ -31,17 +16,14 @@ pub const POST_ACTION_COUNTDOWN_SECS: u64 = 60;
 /// All seven weekdays selected (Monday..Sunday), i.e. a daily recurring job.
 pub const WEEKDAYS_ALL: u8 = 0b0111_1111;
 
-/// Identifies a repository instance by `(remote_url, local_path)`. The same URL
-/// installed to a different folder is a distinct instance, so scheduled targets
-/// must never be keyed by URL alone. See the project invariant in AGENTS.md.
+/// Repository targets use `(remote_url, local_path)` because the same URL in another folder is a separate instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoInstanceKey {
     pub remote_url: String,
     pub local_path: String,
 }
 
-/// What a job operates on. Resolved to live repository indices at fire time, so
-/// targets that no longer exist are skipped (not fatal).
+/// Resolve targets to current repository indices when a job fires; missing targets are skipped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobTarget {
     /// A single repository instance.
@@ -52,26 +34,13 @@ pub enum JobTarget {
     Custom { repos: Vec<RepoInstanceKey> },
 }
 
-/// The terminal action a job can take after its operations finish. Windows-only
-/// actions are surfaced as unavailable on other platforms by the UI.
+/// Platforms without shutdown support show the post-action as unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PostAction {
     #[default]
     None,
     CloseApp,
     ShutdownPc,
-}
-
-/// When a job fires. `OnceAt` is an absolute wall-clock instant (the user picks
-/// the exact date and time); `Recurring` fires at a time of day on selected
-/// weekdays.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JobSchedule {
-    /// Fire once at an absolute time, stored as Unix epoch milliseconds.
-    OnceAt { unix_ms: u64 },
-    /// Fire at `minutes_of_day` (0..1440) on each selected weekday. `weekdays`
-    /// is a bitset where bit `i` is the weekday `i` days after Monday.
-    Recurring { minutes_of_day: u16, weekdays: u8 },
 }
 
 /// Outcome recorded after a job run, surfaced on the job card.
@@ -139,122 +108,8 @@ fn default_true() -> bool {
     true
 }
 
-/// Convert Unix epoch milliseconds to a local datetime, if representable.
-pub fn unix_ms_to_local(ms: u64) -> Option<DateTime<Local>> {
-    Local.timestamp_millis_opt(ms as i64).single()
-}
-
-/// Convert a local datetime to Unix epoch milliseconds (clamped to >= 0).
-pub fn local_to_unix_ms(dt: DateTime<Local>) -> u64 {
-    dt.timestamp_millis().max(0) as u64
-}
-
-/// Walk up to a week of days from `anchor` looking for a recurring fire time.
-/// `forward` searches forward for the next fire at or after `anchor`; otherwise
-/// it searches backward for the most recent fire at or before `anchor`.
-fn recurring_fire(
-    minutes_of_day: u16,
-    weekdays: u8,
-    anchor: DateTime<Local>,
-    forward: bool,
-) -> Option<DateTime<Local>> {
-    if weekdays == 0 {
-        return None;
-    }
-    let minutes_of_day = minutes_of_day.min(24 * 60 - 1);
-    let time = NaiveTime::from_hms_opt(
-        u32::from(minutes_of_day / 60),
-        u32::from(minutes_of_day % 60),
-        0,
-    )?;
-
-    for offset in 0..8i64 {
-        let date = if forward {
-            anchor.date_naive() + chrono::Duration::days(offset)
-        } else {
-            anchor.date_naive() - chrono::Duration::days(offset)
-        };
-        if weekdays & (1u8 << date.weekday().num_days_from_monday()) == 0 {
-            continue;
-        }
-        let Some(candidate) = first_valid_local_instant(date.and_time(time), |local| {
-            Local.from_local_datetime(local)
-        }) else {
-            continue;
-        };
-        if forward {
-            if candidate >= anchor {
-                return Some(candidate);
-            }
-        } else if candidate <= anchor {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn first_valid_local_instant<Tz, F>(
-    requested: NaiveDateTime,
-    mut resolve: F,
-) -> Option<DateTime<Tz>>
-where
-    Tz: TimeZone,
-    F: FnMut(&NaiveDateTime) -> LocalResult<DateTime<Tz>>,
-{
-    for minute in 0..=24 * 60 {
-        let local = requested + chrono::Duration::minutes(minute);
-        match resolve(&local) {
-            LocalResult::Single(value) => return Some(value),
-            LocalResult::Ambiguous(first, second) => {
-                return Some(if first.timestamp() <= second.timestamp() {
-                    first
-                } else {
-                    second
-                });
-            }
-            LocalResult::None => {}
-        }
-    }
-    None
-}
-
-impl JobSchedule {
-    /// The next time at or after `from` this schedule fires, or `None` for a
-    /// one-time schedule whose instant has passed. Used for the "next run" label.
-    pub fn next_fire_at(&self, from: DateTime<Local>) -> Option<DateTime<Local>> {
-        match self {
-            JobSchedule::OnceAt { unix_ms } => {
-                let fire = unix_ms_to_local(*unix_ms)?;
-                (fire >= from).then_some(fire)
-            }
-            JobSchedule::Recurring {
-                minutes_of_day,
-                weekdays,
-            } => recurring_fire(*minutes_of_day, *weekdays, from, true),
-        }
-    }
-
-    /// The most recent fire time at or before `now`, or `None` if the schedule
-    /// has not fired yet. Drives the "is it due now?" decision.
-    pub fn most_recent_fire_at_or_before(&self, now: DateTime<Local>) -> Option<DateTime<Local>> {
-        match self {
-            JobSchedule::OnceAt { unix_ms } => {
-                let fire = unix_ms_to_local(*unix_ms)?;
-                (fire <= now).then_some(fire)
-            }
-            JobSchedule::Recurring {
-                minutes_of_day,
-                weekdays,
-            } => recurring_fire(*minutes_of_day, *weekdays, now, false),
-        }
-    }
-}
-
 impl ScheduledJob {
-    /// Whether this job should run, be recorded as missed, or be left alone at
-    /// `now`. A disabled job is never due. A job whose most recent scheduled
-    /// instant is newer than its last run runs if it is within the grace window,
-    /// otherwise it is reported missed.
+    /// Only successful explicit user actions should change the recorded outcome.
     pub fn due_state(&self, now: DateTime<Local>) -> DueState {
         if !self.enabled {
             return DueState::NotDue;
@@ -273,8 +128,7 @@ impl ScheduledJob {
         }
     }
 
-    /// Like [`Self::due_state`], but an occurrence Foxy already saw due and held
-    /// back for other work stays due past the grace window.
+    /// An occurrence already observed and held for other work remains due beyond the grace window.
     pub fn due_state_with_hold(&self, now: DateTime<Local>, held_fire_ms: Option<u64>) -> DueState {
         match self.due_state(now) {
             DueState::Missed { fire_ms } if held_fire_ms == Some(fire_ms) => {
@@ -285,8 +139,7 @@ impl ScheduledJob {
     }
 }
 
-/// The scheduler did not tick for longer than the grace window: the computer
-/// slept or Foxy was suspended, so held-back jobs lose their claim to run late.
+/// If Foxy or the computer sleeps beyond the grace window, held jobs expire instead of running late.
 pub fn scheduler_paused_between(previous_tick: DateTime<Local>, now: DateTime<Local>) -> bool {
     (now - previous_tick).num_seconds() > SCHEDULER_MISSED_GRACE_SECS
 }
@@ -305,14 +158,12 @@ pub fn missed_run_reason(
     }
 }
 
-/// Whether the editor is configuring a one-time or recurring schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScheduleKind {
     Once,
     Recurring,
 }
 
-/// Which target picker the editor is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetKind {
     Repository,
@@ -320,12 +171,8 @@ pub enum TargetKind {
     Custom,
 }
 
-/// UI-only editor state for creating or editing a [`ScheduledJob`]. Held on
-/// `Foxy` while the Scheduling editor is open; never serialized. Keeping the
-/// validation in [`ScheduleJobDraft::build`] makes it unit-testable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleJobDraft {
-    /// `Some` when editing an existing job, `None` when creating a new one.
     pub editing_id: Option<String>,
     pub name: String,
     pub kind: ScheduleKind,
@@ -343,13 +190,11 @@ pub struct ScheduleJobDraft {
     pub download: bool,
     pub post_action: PostAction,
     pub post_action_only_on_success: bool,
-    /// Last validation error, shown beneath the Save button.
+
     pub error: Option<String>,
 }
 
 impl ScheduleJobDraft {
-    /// A fresh draft for the Add flow, defaulting the start time to one hour from
-    /// `now` and the safe defaults (recheck on, no download, no post-action).
     pub fn new_add(now: DateTime<Local>) -> Self {
         let start = now + chrono::Duration::hours(1);
         Self {
@@ -374,7 +219,6 @@ impl ScheduleJobDraft {
         }
     }
 
-    /// A draft pre-populated from an existing job for the Edit flow.
     pub fn from_job(job: &ScheduledJob) -> Self {
         let mut draft = Self::new_add(Local::now());
         draft.editing_id = Some(job.id.clone());
@@ -421,14 +265,7 @@ impl ScheduleJobDraft {
         draft
     }
 
-    /// Validate the draft and build a persisted job with the given `id`,
-    /// anchored to `now`. Returns a stable English error key (translated by the
-    /// caller) on invalid input.
-    ///
-    /// `last_run_unix_ms` is seeded to `now` so the job only ever considers
-    /// future occurrences: a newly created recurring job never retroactively
-    /// fires (or marks missed) an occurrence that already passed today, and a
-    /// one-time job is required to be in the future.
+    /// New jobs start at `now`, so recurring jobs only consider future occurrences and one-time jobs must be future-dated.
     pub fn build(&self, id: String, now: DateTime<Local>) -> Result<ScheduledJob, String> {
         if !self.recheck && !self.download && self.post_action == PostAction::None {
             return Err("Enable at least one action (recheck, download, or a post-action).".into());
@@ -513,6 +350,7 @@ impl ScheduleJobDraft {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::LocalResult;
     use chrono::{Duration, TimeZone};
 
     fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {

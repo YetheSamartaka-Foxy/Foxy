@@ -63,20 +63,18 @@ pub struct AgentGuiRuntime {
     pending_focus: Option<PendingFocus>,
     native_modifiers: Modifiers,
     restore_native_modifiers: bool,
-    /// In-flight `drag` gestures, advanced one event per rendered frame.
+
     pending_drags: Vec<PendingDrag>,
-    /// In-flight server-side `batch` pipelines, resumed across frames.
+
     pending_batches: Vec<PendingBatch>,
-    /// Recent observations kept for `diff` (ring; newest last). Pushed by every
-    /// `snapshot`/`diff` so an agent can diff against `last` or `frame:<n>`.
+
     diff_baselines: VecDeque<AgentGuiSnapshot>,
-    /// Named UI-state checkpoints for `checkpoint`/`restore` (UI state only).
+
     checkpoints: HashMap<String, Value>,
-    /// Append-only semantic UI-event ring for `events`, with a monotonic
-    /// generation for incremental tailing (mirrors the `logs` idiom).
+
     events: VecDeque<AgentUiEvent>,
     event_generation: u64,
-    /// Previous-frame state used to derive transition events in `poll`.
+
     prev_view: Option<String>,
     prev_modals: Vec<String>,
     prev_focused: Option<String>,
@@ -95,20 +93,16 @@ pub struct AgentGuiRuntime {
     /// The next frame interval spans the idle gap before the probe began and
     /// is not a frame time.
     pub fps_probe_warming: bool,
-    /// The scene caption a `caption` step shows until its time is up.
+
     caption: Option<AgentCaption>,
 }
 
-/// How long one `fps` read keeps the UI repainting every frame.
 pub(crate) const FPS_PROBE_WINDOW: Duration = Duration::from_secs(3);
 
-/// Maximum stored observations for `diff` and maximum buffered `events`.
 const DIFF_BASELINE_CAP: usize = 32;
 const EVENT_RING_CAP: usize = 500;
 
-/// A `drag` gesture parked across frames: emits a pointer-down, `steps`
-/// interpolated moves, then a pointer-up - one event per rendered frame so egui
-/// classifies it as a real drag (a single in-frame down→move→up does not).
+/// A drag gesture emitted across frames so egui classifies it as a drag.
 #[derive(Debug)]
 struct PendingDrag {
     command: AgentGuiCommand,
@@ -116,18 +110,15 @@ struct PendingDrag {
     to: Pos2,
     button: PointerButton,
     steps: u32,
-    /// 0 = emit down; 1..=steps = emit interpolated move; steps+1 = emit up.
+
     phase: u32,
-    /// Frame number at which the next event should fire.
+
     next_frame: u64,
     response_tx: Sender<AgentGuiResponse>,
     deadline: Instant,
     requested_at: Instant,
 }
 
-/// A server-side `batch` pipeline parked between steps. Each step runs through
-/// the normal request handler with an internal response channel; a step that
-/// parks stores its `step_rx` here and the batch resumes when it fires.
 #[derive(Debug)]
 struct PendingBatch {
     steps: Vec<AgentGuiCommand>,
@@ -138,12 +129,11 @@ struct PendingBatch {
     response_tx: Sender<AgentGuiResponse>,
     requested_at: Instant,
     deadline: Instant,
-    /// Set while the current step is parked, awaiting its response.
+
     step_rx: Option<Receiver<AgentGuiResponse>>,
     resume_after_frame: u64,
 }
 
-/// One semantic UI event for the `events` ring buffer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct AgentUiEvent {
     generation: u64,
@@ -157,8 +147,7 @@ struct PendingScreenshot {
     response_tx: Sender<AgentGuiResponse>,
     requested_at: Instant,
     image_rx: Receiver<std::sync::Arc<egui::ColorImage>>,
-    /// Node rects captured at request time when `--annotate` was set, so the
-    /// completion path can draw the overlay and emit the sidecar JSON.
+
     annotation: Option<Vec<AgentGuiNode>>,
 }
 
@@ -172,8 +161,6 @@ struct PendingWait {
     requested_at: Instant,
 }
 
-/// A `settle`/`nav` response parked until the frame clock advances to
-/// `target_frame`, at which point the post-input snapshot is returned.
 #[derive(Debug)]
 struct PendingSettle {
     command: AgentGuiCommand,
@@ -181,8 +168,7 @@ struct PendingSettle {
     response_tx: Sender<AgentGuiResponse>,
     deadline: Instant,
     requested_at: Instant,
-    /// When set, include the resolved focused-widget name in the response (used
-    /// by `nav` so the caller learns where focus landed).
+
     report_focus: bool,
 }
 
@@ -212,9 +198,7 @@ pub struct AgentGuiWireRequest {
     pub command: AgentGuiCommand,
 }
 
-/// Keyboard/pointer modifier state shared by `key`, `click`, `scroll`, and the
-/// mouse-button commands. All fields default to `false` so older clients (and
-/// hand-written JSON) can omit the block entirely.
+/// Modifier state for input commands; all fields default to `false` for older clients.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct AgentGuiModifiers {
     #[serde(default)]
@@ -255,9 +239,7 @@ pub enum AgentGuiCommand {
         /// `view`, `fps`, `busy`). Empty/None returns the full snapshot.
         #[serde(default)]
         fields: Option<Vec<String>>,
-        /// Return `{changed:false, frame}` when no new frame has rendered since
-        /// this cumulative frame number, so polling loops stop re-paying for an
-        /// unchanged snapshot. The cursor is egui's real `cumulative_frame_nr`.
+        /// Return `{changed:false, frame}` when egui's cumulative frame has not advanced.
         #[serde(default)]
         since_frame: Option<u64>,
     },
@@ -325,9 +307,7 @@ pub enum AgentGuiCommand {
     },
     Screenshot {
         output: PathBuf,
-        /// Overlay each known node's rect + id and the pointer position, and
-        /// write a sidecar `<output>.nodes.json` mapping rect → id, so a
-        /// misfiring coordinate click can be debugged from one artifact.
+        /// Annotate a screenshot with node rects and write their ids to `<output>.nodes.json`.
         #[serde(default)]
         annotate: bool,
     },
@@ -372,13 +352,11 @@ pub enum AgentGuiCommand {
     Settings,
     /// Live download/sync/recheck progress and the reasons the app is busy.
     Progress,
-    /// Set the global UI scale (percent of native scale), as the settings
-    /// slider does. Useful for reproducing high-DPI relayout/multi-pass paths.
+    /// Set global UI scale in percent of native scale.
     Scale {
         percent: u16,
     },
-    /// Resize the OS window to the given logical inner size (points). Useful for
-    /// reproducing large-window relayout/multi-pass paths.
+    /// Resize the OS window to the given logical inner size in points.
     Resize {
         width: f32,
         height: f32,
@@ -419,16 +397,12 @@ pub enum AgentGuiCommand {
     /// The current user-feedback toast (message, kind, age, remaining), or
     /// `present: false` when none is showing.
     Toasts,
-    /// Mutate a single live setting on the running app and observe the UI react.
-    /// The read/write complement to the read-only `settings` fetch; clamps and
-    /// validates like the offline `settings set` CLI.
+    /// Set one live setting using the same validation and clamping as `settings set`.
     SetSetting {
         key: String,
         value: String,
     },
-    /// Build version + git hash, build kind, active renderer backend, and
-    /// whether this is an agent-gui build. The natural first call of a session
-    /// and a single CI gate for client/server version mismatch.
+    /// Return build identity, renderer backend, and whether this is an agent-gui build.
     Health,
     /// Set keyboard focus on a named text field (or clear focus). Surfaces the
     /// resolved egui id; the focused widget also appears in `snapshot.focused`.
@@ -482,15 +456,11 @@ pub enum AgentGuiCommand {
         #[serde(default = "default_settle_frames")]
         frames: u64,
     },
-    /// Hold the response for `ms` of real time while the app keeps running,
-    /// then return the snapshot: lets a person watch a showcase scenario, or
-    /// lets background work move on between two observations.
+    /// Wait `ms` while the app continues running, then return a snapshot.
     Pause {
         ms: u64,
     },
-    /// Show a scene caption over the app for `ms`, holding like `pause`, so a
-    /// person watching a showcase knows what the next scene shows. Scenario
-    /// text is English only.
+    /// Show an English scene caption for `ms`, waiting like `pause`.
     Caption {
         title: String,
         #[serde(default)]
@@ -554,9 +524,7 @@ pub enum AgentGuiCommand {
     /// The self-update flow status (`app_update_status`) plus the mode/url
     /// settings, so check → available → download can be driven and observed.
     AppUpdate,
-    /// The latest memory-diagnostics sample (working-set / private / tracked
-    /// bytes, per-bucket breakdown) and texture-tracking maps; optionally the
-    /// full series. Turns texture-leak/memory-growth work into an assertion.
+    /// Return the latest memory sample and texture totals, optionally with history.
     Memory {
         #[serde(default)]
         history: bool,
@@ -574,9 +542,7 @@ pub enum AgentGuiCommand {
         #[serde(default)]
         limit: Option<usize>,
     },
-    /// Semantic app-action: drive Foxy by named intent rather than by pixels.
-    /// `list_actions` enumerates the registry; otherwise `action` is run with
-    /// `params`, gated by `allow_destructive` for core/disk mutations.
+    /// Run a registered semantic action; destructive actions require `allow_destructive`.
     Invoke {
         #[serde(default)]
         action: Option<String>,
@@ -587,22 +553,18 @@ pub enum AgentGuiCommand {
         #[serde(default)]
         list_actions: bool,
     },
-    /// Server-side pipeline: run an array of commands in order on the UI thread,
-    /// resuming across frames for any step that parks (settle/wait/screenshot/
-    /// drag), and return an array of per-step responses in one round-trip.
+    /// Run commands in order, resuming parked steps across frames; return each response.
     Batch {
         steps: Vec<AgentGuiCommand>,
         #[serde(default = "default_stop_on_error")]
         stop_on_error: bool,
     },
-    /// Field-level delta between the current observation and a stored baseline
-    /// (`last`, or `frame:<n>` captured by an earlier snapshot/diff).
+    /// Return the field-level delta from `last` or a stored `frame:<n>` baseline.
     Diff {
         #[serde(default = "default_diff_baseline")]
         baseline: String,
     },
-    /// First-class drag gesture: schedules a down → interpolated moves → up
-    /// sequence across real frames (egui only classifies multi-frame drags).
+    /// Schedule a down, interpolated moves, and up across rendered frames.
     Drag {
         #[serde(default)]
         from_id: Option<String>,
@@ -621,13 +583,11 @@ pub enum AgentGuiCommand {
         #[serde(default)]
         button: Option<String>,
     },
-    /// One JMESPath query over the union of the structured state fetches
-    /// (snapshot + settings + progress + repositories + spaces + …). Read-only.
+    /// Run a read-only JMESPath query over structured UI state.
     Query {
         expr: String,
     },
-    /// Save the serializable UI-state subset under a name for later `restore`
-    /// (or `list` the saved names). UI state only - never core/disk state.
+    /// Save serializable UI state for `restore`; core and disk state are excluded.
     Checkpoint {
         #[serde(default)]
         name: Option<String>,
@@ -638,8 +598,7 @@ pub enum AgentGuiCommand {
     Restore {
         name: String,
     },
-    /// Deep single-node introspection: relationships + interaction flags for one
-    /// node by id, or the hit-test winner at a coordinate.
+    /// Inspect a node by id or return the hit-test winner at a coordinate.
     Element {
         #[serde(default)]
         id: Option<String>,
@@ -648,8 +607,7 @@ pub enum AgentGuiCommand {
         #[serde(default)]
         y: Option<f32>,
     },
-    /// Recent semantic UI events (the causal counterpart to `logs`): clicks,
-    /// keys, view/modal/focus transitions, toasts, download-state changes.
+    /// Return recent semantic UI events such as clicks, focus changes, and toasts.
     Events {
         #[serde(default)]
         kinds: Option<Vec<String>>,
@@ -658,15 +616,13 @@ pub enum AgentGuiCommand {
         #[serde(default)]
         limit: Option<usize>,
     },
-    /// Virtual time control for determinism: advance/freeze/resume the logical
-    /// clock the UI timers read (toast expiry, etc.).
+    /// Advance, freeze, resume, or inspect the logical UI clock.
     Clock {
         action: String,
         #[serde(default)]
         ms: Option<u64>,
     },
-    /// Native file/folder picker automation: pre-register the response for the
-    /// next picker (`expect`), report picker state (`pending`), or clear it.
+    /// Queue a response for the next native picker, inspect it, or clear it.
     Dialog {
         action: String,
         #[serde(default)]
@@ -720,9 +676,7 @@ pub enum AgentGuiWaitCondition {
     Toast {
         text: String,
     },
-    /// Satisfied once the named background-work flag (see `busy_reasons`) is no
-    /// longer set - e.g. wait out a single `core-sync` without going fully
-    /// idle.
+    /// Satisfied when the named `busy_reasons` flag clears, even if other work remains.
     BusyReasonCleared {
         reason: String,
     },
@@ -795,20 +749,14 @@ pub struct AgentGuiSnapshot {
     /// Latest known pointer position in egui logical points, if the cursor is
     /// over the window. Useful for confirming `hover`/`scroll` targeting.
     pub pointer: Option<AgentGuiPoint>,
-    /// The currently keyboard-focused widget: a friendly name for a registered
-    /// agent target (e.g. `add-repository-input`), else the raw egui id, else
-    /// `null` when nothing has focus. Drive it with `focus`/`nav`; `type`/`key`
-    /// land on whatever this reports.
+    /// Report the focused widget as a registered name, raw egui ID, or null; use `focus`/`nav` before `type`/`key`.
     pub focused: Option<String>,
     pub repositories_count: usize,
     pub selected_repository: Option<usize>,
     pub settings_tab: Option<String>,
     pub repository_settings_tab: Option<String>,
     pub frame: u64,
-    /// egui's cumulative pass count. Larger than `frame` whenever egui ran
-    /// extra layout passes (multi-pass via `request_discard`). Diff this and
-    /// `frame` across two reads while scrolling to detect the per-frame
-    /// multi-pass that produces "changed id between passes" warnings.
+    /// egui pass count may exceed frame count when extra layout passes run; compare both while scrolling to detect them.
     pub cumulative_pass_nr: u64,
     pub pixels_per_point: f32,
     /// egui zoom factor (`pixels_per_point` = native scale × this). Mirrors the
@@ -866,7 +814,6 @@ impl AgentGuiRuntime {
         }
     }
 
-    /// Append a semantic UI event to the ring, returning its generation.
     fn record_event(&mut self, kind: &str, detail: Value) {
         self.event_generation += 1;
         self.events.push_back(AgentUiEvent {
@@ -879,7 +826,6 @@ impl AgentGuiRuntime {
         }
     }
 
-    /// Store an observation for later `diff` lookups (capped ring).
     fn push_diff_baseline(&mut self, snapshot: AgentGuiSnapshot) {
         self.diff_baselines.push_back(snapshot);
         while self.diff_baselines.len() > DIFF_BASELINE_CAP {
@@ -1138,10 +1084,7 @@ fn handle_connection(
     token: &str,
     ctx: &egui::Context,
 ) {
-    // A connection may carry one request (the classic one-shot client) or a
-    // newline-delimited stream of them (the persistent `exec --stdin` client).
-    // Loop until EOF so the socket + token handshake are amortized across a
-    // whole interactive session.
+    // Support one-shot and newline-delimited persistent clients; read until EOF to amortize the socket and token handshake.
     let _ = stream.set_write_timeout(Some(DEFAULT_COMMAND_TIMEOUT));
     let read_stream = match stream.try_clone() {
         Ok(clone) => clone,
@@ -1186,8 +1129,6 @@ fn handle_connection(
     }
 }
 
-/// Parse, authenticate, and run one wire request line, returning the response
-/// (used by both the one-shot and persistent connection paths).
 fn dispatch_wire_line(
     line: &str,
     tx: &Sender<AgentGuiUiRequest>,
@@ -1348,8 +1289,7 @@ impl Foxy {
         self.agent_gui_complete_waits(ctx, &mut runtime);
         self.agent_gui_complete_settles(ctx, &mut runtime);
         self.agent_gui_complete_navigation(ctx, &mut runtime);
-        // Derive view/modal/focus/toast/download transition events from the
-        // frame we just observed (the causal feed behind `events`).
+
         self.agent_gui_record_state_events(ctx, &mut runtime);
         if runtime
             .caption
@@ -1441,6 +1381,7 @@ impl Foxy {
                     let snapshot = self.agent_gui_snapshot(ctx);
                     runtime.push_diff_baseline(snapshot.clone());
                     let mut value = serde_json::to_value(&snapshot).unwrap_or_else(|_| json!({}));
+                    value["server_drafts"] = self.agent_gui_server_drafts_value();
                     if let Some(fields) = fields {
                         value = project_object_fields(value, fields);
                     }
@@ -1646,10 +1587,7 @@ impl Foxy {
                         // after the smoothed fps has recovered.
                         "frame_ms": crate::ui::app::runtime::update_loop::frame_interval_stats(&self.frame_intervals_ms)
                             .map(|(p50, p95, max)| json!({"p50": p50, "p95": p95, "max": max, "samples": self.frame_intervals_ms.len()})),
-                        // Diff these across two reads to detect multi-pass: if
-                        // (pass_delta - frame_delta) > 0 between two scroll samples,
-                        // egui is running extra layout passes (the cost behind the
-                        // "changed id between passes" warning / scroll FPS drop).
+                        // Compare pass and frame deltas across scroll samples to detect extra layout work.
                         "cumulative_frame_nr": ctx.cumulative_frame_nr(),
                         "cumulative_pass_nr": ctx.cumulative_pass_nr(),
                     }),
@@ -1954,9 +1892,7 @@ impl Foxy {
                 ),
             ),
             AgentGuiCommand::ContextMenu { id, x, y } => {
-                // egui context-menu popups are not introspectable, so this is a
-                // secondary-click helper that opens the menu; read the resulting
-                // text with a follow-up snapshot/text call.
+                // Popups are not introspectable; open context menus by secondary click, then read their text from a follow-up snapshot.
                 match self.agent_gui_mouse_button(
                     ctx,
                     input,
@@ -2057,9 +1993,7 @@ impl Foxy {
                 self.agent_gui_app_update_value(),
             ),
             AgentGuiCommand::Memory { history, textures } => {
-                // Diagnostics sample only during a sync or with the diagnostics
-                // window open, so a driver read would otherwise report an empty
-                // history to the one caller that explicitly asked for a number.
+                // Diagnostics history is sampled only during sync or with its window open; opt-in reads force a sample when otherwise empty.
                 self.capture_memory_diagnostics_snapshot("agent-gui memory", false);
                 AgentGuiResponse::ok(
                     &command,
@@ -2315,11 +2249,16 @@ impl Foxy {
 
         let focus_id = if response.ok {
             match &command {
-                AgentGuiCommand::Focus { .. } => response.data["focused"]
-                    .as_str()
-                    .and_then(agent_gui_focus_target_id),
+                AgentGuiCommand::Focus { .. } => {
+                    response.data["focused"].as_str().and_then(|target| {
+                        self.server_draft_focus_id(target)
+                            .or_else(|| agent_gui_focus_target_id(target))
+                    })
+                }
                 AgentGuiCommand::Fill { target, .. } => {
-                    agent_gui_focus_target_id(&normalize_selector(target))
+                    let target = normalize_selector(target);
+                    self.server_draft_focus_id(&target)
+                        .or_else(|| agent_gui_focus_target_id(&target))
                 }
                 _ => None,
             }
@@ -2497,9 +2436,6 @@ impl Foxy {
         }
     }
 
-    /// Resolve parked `settle`/`nav` responses once the frame clock reaches
-    /// their target frame, returning the post-input snapshot (plus the resolved
-    /// focus for `nav`).
     fn agent_gui_complete_settles(&mut self, ctx: &egui::Context, runtime: &mut AgentGuiRuntime) {
         let now = Instant::now();
         let current_frame = ctx.cumulative_frame_nr();
@@ -2511,7 +2447,10 @@ impl Foxy {
                 if pending.report_focus
                     && let Value::Object(map) = &mut data
                 {
-                    map.insert("focused".to_string(), json!(agent_gui_focused_name(ctx)));
+                    map.insert(
+                        "focused".to_string(),
+                        json!(agent_gui_focused_name(self, ctx)),
+                    );
                 }
                 let response = AgentGuiResponse::ok(
                     &pending.command,
@@ -2641,7 +2580,10 @@ impl Foxy {
                         })?;
                 }
             }
-            FoxyView::RepositoryList | FoxyView::SwiftyMigration | FoxyView::None => {
+            FoxyView::RepositoryList
+            | FoxyView::ServerInstances
+            | FoxyView::SwiftyMigration
+            | FoxyView::None => {
                 self.current_view = parsed;
                 self.last_view = FoxyView::None;
             }
@@ -2732,7 +2674,6 @@ impl Foxy {
         Ok(json!({ "queued": true, "x": pos.x, "y": pos.y, "pressed": pressed }))
     }
 
-    /// Center of a known semantic node by id, if it has a rect.
     fn agent_gui_node_center(&self, ctx: &egui::Context, id: &str) -> Option<Pos2> {
         let normalized = normalize_selector(id);
         self.agent_gui_nodes(ctx)
@@ -2838,7 +2779,91 @@ impl Foxy {
     }
 
     fn agent_gui_snapshot_value(&self, ctx: &egui::Context) -> Value {
-        serde_json::to_value(self.agent_gui_snapshot(ctx)).unwrap_or_else(|_| json!({}))
+        let mut value =
+            serde_json::to_value(self.agent_gui_snapshot(ctx)).unwrap_or_else(|_| json!({}));
+        value["server_drafts"] = self.agent_gui_server_drafts_value();
+        value
+    }
+
+    fn agent_gui_server_drafts_value(&self) -> Value {
+        let mut value = json!({
+            "ownership": {
+                "mode": self.effective_app_mode(),
+                "busy": self.mode_ownership.busy(),
+                "ready": self.mode_ownership.ready(),
+                "client_database_admission": self.client_db_admission.allows(),
+                "local_database_claimed": crate::core::tasks::db_process_lock::held_database_path().is_some(),
+                "owner": self.mode_ownership.snapshot,
+                "error": self.mode_ownership.error,
+            },
+            "supported": self.server_drafts_supported(),
+            "game_space_id": crate::core::game::spaces::active_game_space().space_id,
+            "loaded": self.server_view.loaded,
+            "busy": self.server_view.busy(),
+            "dirty": self.server_view.dirty(),
+            "catalog": self.server_view.catalog,
+            "migration_pending": self.server_view.migration_pending,
+            "installation_inspection": self.server_view.inspection,
+            "installation_build_observation": self.server_view.inspection_build,
+            "deployment_preflight": self.server_view.preflight,
+            "content_sources": self.server_view.content_sources,
+            "content_bindings": self.server_view.content_bindings,
+            "content_plan": self.server_view.content_plan,
+            "saved_content_bindings": self.server_view.saved_content_bindings,
+            "content_bindings_plan": self.server_view.content_bindings_plan,
+            "content_stage_plan": self.server_view.content_stage_plan,
+            "content_stage_report": self.server_view.content_stage_report,
+            "content_stage_list": self.server_view.content_stage_list,
+            "content_stage_selection": self.server_view.content_stage_selection,
+            "deployment_composition": self.server_view.deployment_composition,
+            "deployment_record_plan": self.server_view.deployment_record_plan,
+            "deployment_record_selection_plan": self.server_view.deployment_record_selection_plan,
+            "deployment_record_state": self.server_view.deployment_record_state,
+            "deployment_record_inspection_selection": self.server_view.deployment_record_inspection_selection,
+            "deployment_record_verification": self.server_view.deployment_record_verification,
+            "deployment_record_commit": self.server_view.deployment_record_commit,
+            "preparation_plan": self.server_view.preparation_plan,
+            "preparation_list": self.server_view.preparation_list,
+            "preparation_selection": self.server_view.preparation_selection,
+            "preparation_report": self.server_view.preparation_report,
+            "content_stage_progress": self.server_view.task.as_ref().and_then(|task| task.stage_control.as_ref()).map(|control| control.snapshot()),
+            "configuration_preview": self.server_view.configuration_preview,
+            "configuration_revisions": self.server_view.configuration_revisions,
+            "configuration_choice": self.server_view.configuration_choice,
+            "configuration_verification": self.server_view.configuration_verification,
+            "configuration_plan": self.server_view.configuration_plan.as_ref().map(|plan| json!({"preview":plan.preview,"revision_id":plan.revision_id,"expected_generation":plan.expected_generation})),
+            "editor": self.server_view.editor.as_ref().map(|editor| &editor.draft),
+            "error": self.server_view.error.as_ref().map(ToString::to_string),
+        });
+        value["activation_plan"] = json!(self.server_view.activation_plan);
+        value["activation_status"] = json!(self.server_view.activation_status);
+        value["activation_resolution"] = json!(self.server_view.activation_resolution);
+        value["activation_outcome"] = json!(self.server_view.activation_outcome);
+        value["lifecycle_plan"] = json!(self.server_view.lifecycle_plan);
+        value["consumer_recovery_plan"] = json!(self.server_view.consumer_recovery_plan);
+        value["consumer_recovery_outcome"] = json!(self.server_view.consumer_recovery_outcome);
+        value["consumer_recovery_confirmation"] =
+            json!(self.server_view.consumer_recovery_confirmation);
+        value["lifecycle_status"] = json!(self.server_view.lifecycle_status);
+        value["lifecycle_monitoring"] = json!(self.server_view.lifecycle_monitoring);
+        value["monitoring_view"] = json!({
+            "paused": self.server_view.monitoring_paused,
+            "auto_scroll": self.server_view.monitoring_auto_scroll,
+            "query_state": self.server_view.lifecycle_monitoring.as_ref().and_then(|monitoring| monitoring.observation.as_ref()).map(|observation| observation.query.state),
+            "health": self.server_view.lifecycle_monitoring.as_ref().map(|monitoring| monitoring.health),
+            "log_count": self.server_view.lifecycle_monitoring.as_ref().and_then(|monitoring| monitoring.observation.as_ref()).map(|observation| observation.logs.entries.len()).unwrap_or_default(),
+            "current_owner": self.server_view.lifecycle_monitoring.as_ref().map(|monitoring| &monitoring.status.owner_id),
+            "run_generation": self.server_view.lifecycle_monitoring.as_ref().map(|monitoring| monitoring.status.run_generation),
+        });
+        value["lifecycle_outcome"] = json!(self.server_view.lifecycle_outcome);
+        value["native_install_plan"] = json!(self.server_view.native_install_plan);
+        value["native_install_outcome"] = json!(self.server_view.native_install_outcome);
+        value["native_install_check"] = json!(self.server_view.native_install_check);
+        value["native_install_validation"] = json!(self.server_view.native_install_validation);
+        value["reforger_addon_acquisition_plan"] = json!(self.server_view.reforger_addon_plan);
+        value["reforger_addon_lock"] = json!(self.server_view.reforger_addon_lock);
+        value["reforger_addon_confirmation"] = json!(self.server_view.reforger_addon_confirmation);
+        value
     }
 
     fn agent_gui_snapshot(&self, ctx: &egui::Context) -> AgentGuiSnapshot {
@@ -2873,7 +2898,7 @@ impl Foxy {
         let pointer = ctx
             .pointer_latest_pos()
             .map(|pos| AgentGuiPoint { x: pos.x, y: pos.y });
-        let focused = agent_gui_focused_name(ctx);
+        let focused = agent_gui_focused_name(self, ctx);
         AgentGuiSnapshot {
             view: self.agent_gui_view_name().to_string(),
             update_modal_open: self.update_modal_open,
@@ -3047,10 +3072,7 @@ impl Foxy {
         !self.agent_gui_busy_reasons().is_empty()
     }
 
-    /// Stable kebab-case names of every background-work flag that currently
-    /// makes the app "busy". Single source of truth for the `busy` boolean and
-    /// the `busy_reasons` lists in `snapshot`/`progress`, so an agent can see
-    /// *why* the UI is not idle rather than only that it isn't.
+    /// These stable names drive both `busy` and `busy_reasons` so clients can identify active work.
     fn agent_gui_busy_reasons(&self) -> Vec<&'static str> {
         let mut reasons = Vec::new();
         let mut push = |active: bool, name: &'static str| {
@@ -3059,6 +3081,7 @@ impl Foxy {
             }
         };
         push(self.backend_worker.is_some(), "core-sync");
+        push(self.server_view.busy(), "server-draft");
         // A space's bulk run hands one repository to the next with a gap in
         // `core-sync`, so it gets its own reason for the whole run.
         push(
@@ -3247,9 +3270,7 @@ impl Foxy {
         }))
     }
 
-    /// Structured launch profiles for a repository. Profiles drive launch
-    /// behavior and are not exposed as semantic nodes, so this is the only way
-    /// to read their flags/overrides programmatically.
+    /// Profiles are not semantic nodes; this endpoint exposes launch flags and overrides.
     fn agent_gui_profiles_value(
         &self,
         repository_index: Option<usize>,
@@ -3315,9 +3336,7 @@ impl Foxy {
         }))
     }
 
-    /// The cached editor missions for the currently viewed repository. Exposes
-    /// name/folder/terrain without absolute paths (per the harness security
-    /// rules); `null` until a repository view has populated `cached_missions`.
+    /// Return cached mission name, folder, and terrain without absolute paths; `null` until the repository view loads them.
     fn agent_gui_missions_value(&self, contains: Option<&str>, limit: Option<usize>) -> Value {
         let Some(cached) = self.cached_missions.as_ref() else {
             return json!({
@@ -3483,18 +3502,14 @@ impl Foxy {
         }
     }
 
-    /// The toast Foxy would still be rendering this frame: the stored toast if it
-    /// has not yet outlived its display duration. Single source of truth for the
-    /// `toasts` fetch and the `wait --toast` predicate.
+    /// Expose the toast still visible this frame; this drives both `toasts` and `wait --toast`.
     fn agent_gui_current_toast(&self) -> Option<&crate::ui::app::UiToastState> {
         self.ui_toast
             .as_ref()
             .filter(|toast| toast.shown_at.elapsed() < toast.duration)
     }
 
-    /// Mutate a single live setting on the running app, clamping/validating the
-    /// way the offline `settings set` CLI does. Returns the applied value so an
-    /// agent can confirm clamping. Loopback + token-gated like every command.
+    /// Change one live setting using offline CLI validation; loopback and token gates apply to every command.
     fn agent_gui_set_setting(
         &mut self,
         ctx: &egui::Context,
@@ -3503,6 +3518,21 @@ impl Foxy {
     ) -> Result<Value, String> {
         let trimmed = value.trim();
         let applied = match normalize_selector(key).as_str() {
+            "app-mode" | "app_mode" => {
+                if self.launch_mode_override.is_some() || self.mode_ownership.busy() {
+                    return Err(
+                        "Application mode is fixed for this session or ownership is still changing"
+                            .into(),
+                    );
+                }
+                self.settings_view_state.app_mode = match trimmed {
+                    "client" => crate::core::app_mode::AppMode::Client,
+                    "server" => crate::core::app_mode::AppMode::Server,
+                    _ => return Err("Application mode must be client or server".into()),
+                };
+                self.mark_settings_dirty();
+                json!(self.settings_view_state.app_mode)
+            }
             "debug-mode" | "debug_mode" => {
                 let parsed = parse_agent_gui_bool(trimmed)
                     .ok_or_else(|| format!("Expected a boolean for debug-mode, got '{value}'"))?;
@@ -3658,8 +3688,7 @@ impl Foxy {
         Ok(json!({ "key": normalize_selector(key), "value": applied }))
     }
 
-    /// Serialize the live, effective settings the running app currently holds.
-    /// Mirrors `settings show` but reads in-memory state rather than the file.
+    /// Return effective in-memory settings, matching `settings show` without rereading the file.
     fn agent_gui_settings_value(&self) -> Value {
         let mut settings =
             serde_json::to_value(&self.settings_view_state).unwrap_or_else(|_| json!({}));
@@ -3734,9 +3763,7 @@ impl Foxy {
         })
     }
 
-    /// Apply a global UI scale the way the settings slider's Apply button does:
-    /// set `ui_scale_percent` (clamped to the slider range) and mark settings
-    /// dirty; `apply_runtime_ui_scale` picks it up on the next frame.
+    /// Apply scale like the settings slider, clamp it, mark settings dirty, and update runtime zoom next frame.
     fn agent_gui_set_scale(&mut self, ctx: &egui::Context, percent: u16) -> u16 {
         let clamped = percent.clamp(MIN_UI_SCALE_PERCENT, MAX_UI_SCALE_PERCENT);
         self.settings_view_state.ui_scale_percent = clamped;
@@ -3783,6 +3810,14 @@ impl Foxy {
         push(
             self.show_unreadable_config_replacement,
             "unreadable-config-replacement",
+        );
+        push(
+            self.server_view.dialog.is_some(),
+            "server-draft-confirmation",
+        );
+        push(
+            self.server_view.reforger_addon_confirmation,
+            "server-reforger-addon-confirmation",
         );
         push(self.show_add_repository_modal, "add-repository");
         push(
@@ -3867,9 +3902,7 @@ impl Foxy {
         })
     }
 
-    /// Set keyboard focus on a named text field (or clear it). The reachable
-    /// targets are the widgets instrumented with a stable agent egui id;
-    /// text-backed fields without one are driven via `fill`/`set-filter`.
+    /// Focus registered text targets by name; use `fill` or `set-filter` for fields without stable egui IDs.
     fn agent_gui_focus(
         &mut self,
         ctx: &egui::Context,
@@ -3883,7 +3916,8 @@ impl Foxy {
         }
         let target = target.ok_or_else(|| "Provide --target <name> or --clear".to_string())?;
         let normalized = normalize_selector(target);
-        agent_gui_focus_target_id(&normalized).ok_or_else(|| {
+        self.agent_gui_validate_server_field(&normalized)?;
+        self.server_draft_focus_id(&normalized).or_else(|| agent_gui_focus_target_id(&normalized)).ok_or_else(|| {
             format!(
                 "No focusable widget registered for target '{target}'. Registered: {}. Use fill/set-filter for other text fields.",
                 agent_gui_focus_target_names().join(", ")
@@ -3904,32 +3938,68 @@ impl Foxy {
             self.last_view = FoxyView::None;
             self.show_add_repository_modal = true;
         }
+        if normalized_target.starts_with("server-") {
+            self.current_view = FoxyView::ServerInstances;
+        }
     }
 
-    /// Focus + clear + set a named text field by writing its backing app state
-    /// directly. More reliable than focus-then-type (no per-key event timing),
-    /// and the box renders the new value on the next frame regardless of focus.
+    fn agent_gui_validate_server_field(&self, target: &str) -> Result<(), String> {
+        if !target.starts_with("server-") {
+            return Ok(());
+        }
+        if self.effective_app_mode() != crate::core::app_mode::AppMode::Server
+            || !self.server_drafts_supported()
+            || self.server_view.busy()
+        {
+            return Err("Open an idle supported Server mode game space first".into());
+        }
+        if matches!(
+            target,
+            "server-new-name" | "server-installation-directory" | "server-native-install-directory"
+        ) && self.server_view.dirty()
+        {
+            return Err("Save or discard the current draft first".into());
+        }
+        if target == "server-dialog-name"
+            && !matches!(
+                self.server_view.dialog,
+                Some(
+                    crate::ui::app::server::ServerDialog::Rename
+                        | crate::ui::app::server::ServerDialog::Clone
+                )
+            )
+        {
+            return Err("Open a server rename or clone dialog first".into());
+        }
+        if self.server_draft_focus_id(target).is_none() {
+            return Err("Select a matching server draft first".into());
+        }
+        Ok(())
+    }
+
+    /// Set a text field's backing state directly for reliable input; the box updates next frame without key-event timing.
     fn agent_gui_fill(
         &mut self,
         ctx: &egui::Context,
         target: &str,
         value: &str,
     ) -> Result<Value, String> {
+        self.agent_gui_validate_server_field(&normalize_selector(target))?;
         let canonical = self.agent_gui_set_text_field(target, value)?;
-        // If the field has a registered egui id, request focus too so a human
-        // re-running the same step sees a caret in the box. Make the container
-        // visible first to avoid the AccessKit focus panic (see `agent_gui_focus`).
+        // Focus registered fields after making their container visible to avoid the AccessKit focus panic.
         let normalized = normalize_selector(target);
-        if agent_gui_focus_target_id(&normalized).is_some() {
+        if self
+            .server_draft_focus_id(&normalized)
+            .or_else(|| agent_gui_focus_target_id(&normalized))
+            .is_some()
+        {
             self.agent_gui_ensure_focus_target_visible(&normalized);
         }
         ctx.request_repaint();
         Ok(json!({ "target": canonical, "value": value }))
     }
 
-    /// Write one named text field's backing `String`, returning its canonical
-    /// kebab-case name. Shared by `fill`. Filter-only writes go through
-    /// `agent_gui_set_filter`.
+    /// Write a named text field and return its canonical name; filter fields use `agent_gui_set_filter`.
     fn agent_gui_set_text_field(
         &mut self,
         name: &str,
@@ -3937,6 +4007,81 @@ impl Foxy {
     ) -> Result<&'static str, String> {
         let value = value.to_string();
         let canonical = match normalize_selector(name).as_str() {
+            "server-new-name" => {
+                if self.server_view.busy()
+                    || self.server_view.dirty()
+                    || !self.server_drafts_supported()
+                {
+                    return Err("Server draft name is not editable".into());
+                }
+                self.server_view.new_name = value;
+                "server-new-name"
+            }
+            "server-hostname" => {
+                if self.server_view.busy() {
+                    return Err("Server draft operation is running".into());
+                }
+                let editor = self
+                    .server_view
+                    .editor
+                    .as_mut()
+                    .ok_or("Select a server draft first")?;
+                match &mut editor.draft.definition {
+                    crate::core::server::ServerDefinition::Arma3(settings) => {
+                        settings.hostname = value
+                    }
+                    crate::core::server::ServerDefinition::Reforger(settings) => {
+                        settings.name = value
+                    }
+                }
+                "server-hostname"
+            }
+            "server-installation-directory" => {
+                self.server_view.installation_directory = value;
+                self.server_view.inspection = None;
+                self.server_view.inspection_build = None;
+                "server-installation-directory"
+            }
+            "server-native-install-directory" => {
+                self.server_view.native_install_directory = value;
+                self.server_view.native_install_plan = None;
+                "server-native-install-directory"
+            }
+            "server-mission-import-path" => {
+                self.server_view.mission_import_path = value;
+                self.server_view.mission_import_plan = None;
+                "server-mission-import-path"
+            }
+            "server-scenario" => {
+                if self.server_view.busy() {
+                    return Err("Server draft operation is running".into());
+                }
+                let editor = self
+                    .server_view
+                    .editor
+                    .as_mut()
+                    .ok_or("Select a server draft first")?;
+                let crate::core::server::ServerDefinition::Reforger(settings) =
+                    &mut editor.draft.definition
+                else {
+                    return Err("Scenario field requires Reforger".into());
+                };
+                settings.scenario_id = (!value.is_empty()).then_some(value);
+                "server-scenario"
+            }
+            "server-dialog-name" => {
+                if !matches!(
+                    self.server_view.dialog,
+                    Some(
+                        crate::ui::app::server::ServerDialog::Rename
+                            | crate::ui::app::server::ServerDialog::Clone
+                    )
+                ) {
+                    return Err("Open a server rename or clone dialog first".into());
+                }
+                self.server_view.dialog_name = value;
+                "server-dialog-name"
+            }
             "add-repository-input" | "add-repository" => {
                 self.add_repository_input_address = value;
                 "add-repository-input"
@@ -4094,9 +4239,7 @@ impl Foxy {
         Ok(json!({ "filter": normalized, "value": applied }))
     }
 
-    /// Non-destructive UI selection: highlight/view a repository, server,
-    /// mission, or space the way clicking the row does, without coordinates.
-    /// Never reaches a core action.
+    /// Select repository, server, mission, or space without coordinates or core mutations.
     fn agent_gui_select(
         &mut self,
         ctx: &egui::Context,
@@ -4198,9 +4341,7 @@ impl Foxy {
         }))
     }
 
-    /// Apply (or clear) stable-render mode: zero egui's animation time and
-    /// disable caret blink so screenshots are byte-stable. Re-applied per frame
-    /// while on (egui resets style each pass). Lighter than a full clock freeze.
+    /// Stable-render freezes egui animation and caret blink and reapplies the style each frame.
     fn apply_agent_gui_stable_render(&self, ctx: &egui::Context, on: bool) {
         let animation_time = if on {
             0.0
@@ -4213,9 +4354,7 @@ impl Foxy {
         });
     }
 
-    /// Evaluate one declarative assertion over an observed field. Sources:
-    /// `snapshot` (default), `settings.*`, `progress.*`. Returns ok/fail with
-    /// the observed-vs-expected values so scripts fail fast with a clear diff.
+    /// Assert against `snapshot`, `settings.*`, or `progress.*`; return observed and expected values on failure.
     fn agent_gui_assert_value(
         &self,
         ctx: &egui::Context,
@@ -4273,9 +4412,7 @@ impl Foxy {
         })
     }
 
-    /// Global cross-folder addon inventory: which addons are shared across
-    /// repositories/folders. On-disk absolute paths are redacted to basenames
-    /// (harness security rule); sizes are summed across the returned rows.
+    /// Expose shared addon inventory with path basenames only; sum sizes across returned rows.
     fn agent_gui_inventory_value(
         &self,
         contains: Option<&str>,
@@ -4335,9 +4472,7 @@ impl Foxy {
         })
     }
 
-    /// The planned update set *before* a sync (`pending_update_cache`), so an
-    /// agent can assert the plan, kick a download, then diff plan vs result
-    /// against `download-summary`.
+    /// Expose the pending update plan before sync so clients can compare intended and completed work.
     fn agent_gui_pending_updates_value(
         &self,
         repository_index: Option<usize>,
@@ -4459,9 +4594,7 @@ impl Foxy {
         })
     }
 
-    /// The latest memory-diagnostics sample (working-set / private / tracked
-    /// bytes + per-bucket breakdown) and the texture-tracking totals. Turns
-    /// texture-leak/memory-growth work into a structured assertion.
+    /// Return the latest memory sample and texture totals for structured diagnostics.
     fn agent_gui_memory_value(&self, history: bool, textures: bool) -> Value {
         let sample_to_value = |sample: &MemoryDiagnosticsSample| {
             json!({
@@ -4498,10 +4631,7 @@ impl Foxy {
             "repo_image_texture_count": self.tracked_repo_image_texture_bytes.len(),
             "app_icon_texture_bytes": self.app_icon_texture_bytes,
             "default_repo_image_texture_bytes": self.default_repo_image_texture_bytes,
-            // egui rasterizes lazily, so the atlas grows as views introduce new
-            // sizes and glyphs. Without it the memory lane sees the growth but
-            // cannot name it, and the app's own buckets never will: the atlas
-            // belongs to epaint, not to Foxy state.
+            // Track epaint atlas growth because lazy glyph rasterization is outside Foxy's memory buckets.
             "font_atlas": self.repaint_ctx.as_ref().map(|ctx| {
                 let [width, height] = ctx.fonts(|fonts| fonts.font_image_size());
                 json!({
@@ -4548,9 +4678,7 @@ impl Foxy {
         value
     }
 
-    /// OS-level Arma 3 *player* profiles (`detected_arma3_profiles`) that drive
-    /// the `-profiles` launch argument. Distinct from Foxy launch profiles;
-    /// directory paths are redacted to basenames.
+    /// Expose Arma 3 player profiles separately from Foxy launch profiles; redact paths to basenames.
     fn agent_gui_arma_profiles_value(&self) -> Value {
         let profiles: Vec<Value> = self
             .detected_arma3_profiles
@@ -4575,9 +4703,7 @@ impl Foxy {
         })
     }
 
-    /// Addon-backup records (`backup_manager_records`): addon, timestamp, size,
-    /// and per-addon counts so an agent can assert an update produced a backup
-    /// and that retention behaves. Backup file paths are redacted to basenames.
+    /// Expose addon-backup metadata for update and retention checks; redact paths to basenames.
     fn agent_gui_backups_value(&self, contains: Option<&str>, limit: Option<usize>) -> Value {
         let needle = contains.map(|value| value.to_ascii_lowercase());
         let mut per_addon: std::collections::BTreeMap<String, usize> =
@@ -4623,11 +4749,6 @@ impl Foxy {
 }
 
 impl Foxy {
-    // ── drag (#4): advance one event per rendered frame ─────────────────────
-
-    /// Drive parked `drag` gestures: emit the down event, then `steps`
-    /// interpolated moves, then the up event - one per frame so egui classifies
-    /// the sequence as a real drag.
     fn agent_gui_complete_drags(
         &mut self,
         ctx: &egui::Context,
@@ -4711,10 +4832,6 @@ impl Foxy {
         }
     }
 
-    // ── batch (#2): server-side pipeline ────────────────────────────────────
-
-    /// Begin a `batch`: drive it immediately, parking it for later resumption
-    /// only if a step has not yet completed.
     #[allow(clippy::too_many_arguments)]
     fn agent_gui_start_batch(
         &mut self,
@@ -4760,7 +4877,6 @@ impl Foxy {
         }
     }
 
-    /// Resume parked batch pipelines whose current step may have completed.
     fn agent_gui_advance_batches(
         &mut self,
         ctx: &egui::Context,
@@ -4789,8 +4905,6 @@ impl Foxy {
         }
     }
 
-    /// Run a batch forward until a step parks or all steps are consumed.
-    /// Returns the final response when the batch is complete, else `None`.
     fn drive_batch(
         &mut self,
         ctx: &egui::Context,
@@ -4805,7 +4919,6 @@ impl Foxy {
             return None;
         }
 
-        // Resolve a parked step first.
         if batch.step_rx.is_some() {
             let recv = batch.step_rx.as_ref().unwrap().try_recv();
             match recv {
@@ -4873,14 +4986,12 @@ impl Foxy {
                         return Some(self.finish_batch(batch));
                     }
                     if queued_input {
-                        // Backward focus is applied at the start of egui's following pass.
                         batch.resume_after_frame = ctx.cumulative_frame_nr().saturating_add(2);
                         ctx.request_repaint();
                         return None;
                     }
                 }
                 Err(TryRecvError::Empty) => {
-                    // Step parked (settle/wait/screenshot/drag): resume later.
                     batch.step_rx = Some(rx);
                     ctx.request_repaint_after(Duration::from_millis(16));
                     return None;
@@ -4900,8 +5011,6 @@ impl Foxy {
         Some(self.finish_batch(batch))
     }
 
-    /// Fold one sub-step response into the batch accumulator. A step is "ok"
-    /// when the transport succeeded *and* (for `assert`) its payload `ok` holds.
     fn absorb_batch_step(&self, batch: &mut PendingBatch, response: AgentGuiResponse) {
         let step_ok = response.ok
             && response
@@ -4933,10 +5042,6 @@ impl Foxy {
         )
     }
 
-    // ── diff (#3): structural delta ─────────────────────────────────────────
-
-    /// Compute the delta from a stored baseline to the current observation, and
-    /// return the current snapshot so the caller can store it as a new baseline.
     fn agent_gui_diff_value(
         &self,
         ctx: &egui::Context,
@@ -4955,8 +5060,6 @@ impl Foxy {
         (data, current)
     }
 
-    // ── query (#5): JMESPath over the union state document ───────────────────
-
     fn agent_gui_query_value(&self, ctx: &egui::Context, expr: &str) -> Result<Value, String> {
         let document = self.agent_gui_state_document(ctx, expr);
         let compiled =
@@ -4970,9 +5073,6 @@ impl Foxy {
         Ok(json!({ "expr": expr, "result": value }))
     }
 
-    /// Build the virtual app-state document the `query` evaluates against,
-    /// composing the existing structured-state builders. Only the sub-documents
-    /// the expression mentions are built (the snapshot is the default context).
     fn agent_gui_state_document(&self, ctx: &egui::Context, expr: &str) -> Value {
         let wants = |key: &str| expr.contains(key);
         let inner =
@@ -5089,10 +5189,6 @@ impl Foxy {
         Value::Object(doc)
     }
 
-    // ── checkpoint / restore (#6): UI-state save & rollback ──────────────────
-
-    /// Snapshot the serializable UI-state subset for `checkpoint`. UI state
-    /// only - never core/DB/disk state.
     fn agent_gui_capture_checkpoint(&self, _ctx: &egui::Context) -> Value {
         json!({
             "current_view": self.agent_gui_view_name(),
@@ -5106,7 +5202,6 @@ impl Foxy {
         })
     }
 
-    /// Write a captured checkpoint back onto the live UI state.
     fn agent_gui_restore_checkpoint(&mut self, ctx: &egui::Context, state: &Value) {
         if let Some(view) = state.get("current_view").and_then(Value::as_str)
             && let Some(parsed) = parse_agent_gui_view(view)
@@ -5146,7 +5241,6 @@ impl Foxy {
         ctx.request_repaint();
     }
 
-    /// Write the list-filter subset of a checkpoint back onto live state.
     fn agent_gui_restore_filters(&mut self, filters: &Value) {
         let string =
             |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(String::from);
@@ -5192,8 +5286,6 @@ impl Foxy {
         }
     }
 
-    // ── element (#7): deep single-node introspection ─────────────────────────
-
     fn agent_gui_element_value(
         &self,
         ctx: &egui::Context,
@@ -5203,7 +5295,7 @@ impl Foxy {
     ) -> Result<Value, String> {
         let nodes = self.agent_gui_nodes(ctx);
         let pointer = ctx.pointer_latest_pos();
-        let focused = agent_gui_focused_name(ctx);
+        let focused = agent_gui_focused_name(self, ctx);
 
         let (node, sibling_index) = if let Some(id) = id {
             let normalized = normalize_selector(id);
@@ -5273,10 +5365,6 @@ impl Foxy {
         }))
     }
 
-    // ── events (#8): derive transition events each frame ─────────────────────
-
-    /// Record view/modal/focus/toast/download transitions by diffing the frame
-    /// just observed against the previously recorded state.
     fn agent_gui_record_state_events(
         &mut self,
         ctx: &egui::Context,
@@ -5311,7 +5399,7 @@ impl Foxy {
         }
         runtime.prev_modals = modals;
 
-        let focused = agent_gui_focused_name(ctx);
+        let focused = agent_gui_focused_name(self, ctx);
         if runtime.prev_focused != focused {
             runtime.record_event(
                 "focus-change",
@@ -5343,10 +5431,6 @@ impl Foxy {
         }
     }
 
-    // ── invoke (#1): semantic app-action registry ────────────────────────────
-
-    /// Resolve the `repo-index` param (or the selected repository) and validate
-    /// it against the configured list.
     fn agent_gui_resolve_repo_index(&self, params: &Value) -> Result<usize, (String, String)> {
         let index = params
             .get("repo-index")
@@ -5369,7 +5453,6 @@ impl Foxy {
         Ok(index)
     }
 
-    /// The benchmark at `index` in the list as currently filtered and sorted.
     fn agent_gui_resolve_benchmark_id(
         &mut self,
         params: &Value,
@@ -5821,8 +5904,7 @@ impl Foxy {
         Ok(())
     }
 
-    /// Clear the simple boolean modal/window flags (non-destructive). Used by
-    /// the `close-modals` action so exploration can back out of an open dialog.
+    /// Clear non-destructive modal flags so exploration can close open dialogs.
     fn agent_gui_close_modals(&mut self) {
         self.update_modal_open = false;
         self.show_add_repository_modal = false;
@@ -5897,9 +5979,7 @@ struct AgentAction {
     summary: &'static str,
 }
 
-/// The semantic-action registry. Non-destructive intents are always runnable;
-/// destructive ones require `allow_destructive` (and keep Foxy's normal
-/// confirmation semantics - e.g. `launch-game` still routes through preflight).
+/// Destructive actions require `allow_destructive` and retain normal Foxy confirmation/preflight behavior.
 const AGENT_ACTIONS: &[AgentAction] = &[
     AgentAction {
         name: "open-settings",
@@ -6178,9 +6258,7 @@ fn agent_gui_node_action(id: &str) -> Value {
     action.map(|name| json!(name)).unwrap_or(Value::Null)
 }
 
-/// Resolve a `diff` baseline selector (`last` or `frame:<n>`) to a stored
-/// observation. `frame:<n>` prefers an exact frame match, else the most recent
-/// observation at or before that frame.
+/// Resolve `last` or `frame:<n>` to an observation, preferring an exact frame then the latest earlier one.
 fn agent_gui_resolve_baseline(
     runtime: &AgentGuiRuntime,
     baseline: &str,
@@ -6210,9 +6288,7 @@ fn agent_gui_resolve_baseline(
     None
 }
 
-/// Field-level delta between two observations: node id set differences, text
-/// set differences, and changed scalar/array fields (high-noise fields like
-/// `fps`/`frame`/`pointer` are excluded).
+/// Report node/text changes and changed fields, excluding noisy `fps`, `frame`, and `pointer` values.
 fn agent_gui_snapshot_diff(base: &AgentGuiSnapshot, current: &AgentGuiSnapshot) -> Value {
     let base_ids: BTreeSet<&str> = base.nodes.iter().map(|node| node.id.as_str()).collect();
     let current_ids: BTreeSet<&str> = current.nodes.iter().map(|node| node.id.as_str()).collect();
@@ -6326,8 +6402,7 @@ fn agent_gui_clock(ctx: &egui::Context, action: &str, ms: Option<u64>) -> Result
     Ok(json!({ "action": normalized, "offset_ms": offset_ms, "frozen": frozen }))
 }
 
-/// The `dialog` command: queue a response for the next native picker, report
-/// picker state, or clear the queued response. Paths are redacted to basenames.
+/// Queue or inspect native picker responses; expose only path basenames.
 fn agent_gui_dialog(action: &str, path: Option<&Path>, cancel: bool) -> Result<Value, String> {
     use crate::ui::app::agent_support::{self, QueuedDialog};
     match normalize_selector(action).as_str() {
@@ -6389,14 +6464,24 @@ fn normalize_selector(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
-/// Stable agent egui ids for widgets the `focus` command can reach. Each maps a
-/// friendly target name to the absolute `egui::Id` the widget is created with
-/// (via `.id(...)` at the widget site), so `request_focus` lands deterministically
-/// and `snapshot.focused` can report the friendly name back.
-const AGENT_FOCUS_TARGETS: &[(&str, &str)] =
-    &[("add-repository-input", "agent.add-repository-input")];
+/// Map stable friendly focus names to egui IDs so focus requests and snapshot reporting agree.
+const AGENT_FOCUS_TARGETS: &[(&str, &str)] = &[
+    ("add-repository-input", "agent.add-repository-input"),
+    ("server-new-name", "server.new-name"),
+    ("server-hostname", "server.hostname"),
+    ("server-mission-import-path", "server.mission-import-path"),
+    (
+        "server-installation-directory",
+        "server.installation-directory",
+    ),
+    (
+        "server-native-install-directory",
+        "server.native-install-directory",
+    ),
+    ("server-scenario", "server.scenario"),
+    ("server-dialog-name", "server.dialog-name"),
+];
 
-/// Resolve a friendly focus target name to its absolute egui id.
 fn agent_gui_focus_target_id(name: &str) -> Option<egui::Id> {
     AGENT_FOCUS_TARGETS
         .iter()
@@ -6404,26 +6489,24 @@ fn agent_gui_focus_target_id(name: &str) -> Option<egui::Id> {
         .map(|(_, id)| egui::Id::unique(id))
 }
 
-/// The registered focus target names, for error messages.
 fn agent_gui_focus_target_names() -> Vec<&'static str> {
     AGENT_FOCUS_TARGETS.iter().map(|(name, _)| *name).collect()
 }
 
-/// The currently keyboard-focused widget as a friendly name when it is a
-/// registered agent target, else the raw egui id, else `None`.
-fn agent_gui_focused_name(ctx: &egui::Context) -> Option<String> {
+fn agent_gui_focused_name(app: &Foxy, ctx: &egui::Context) -> Option<String> {
     let focused = ctx.memory(|memory| memory.focused())?;
     for (name, id) in AGENT_FOCUS_TARGETS {
-        if egui::Id::unique(id) == focused {
+        if app
+            .server_draft_focus_id(name)
+            .unwrap_or_else(|| egui::Id::unique(id))
+            == focused
+        {
             return Some((*name).to_string());
         }
     }
     Some(format!("{focused:?}"))
 }
 
-/// Keep only the requested top-level keys of a JSON object (server-side
-/// `--fields` projection). Non-objects and unknown keys are passed through /
-/// dropped without error so a stale field name never wedges a poll loop.
 fn project_object_fields(value: Value, fields: &[String]) -> Value {
     let Value::Object(map) = value else {
         return value;
@@ -6437,7 +6520,6 @@ fn project_object_fields(value: Value, fields: &[String]) -> Value {
     Value::Object(projected)
 }
 
-/// Look up a dotted path (`a.b.0.c`) inside a JSON value via JSON Pointer.
 fn json_pointer_lookup(value: &Value, dotted: &str) -> Option<Value> {
     if dotted.is_empty() {
         return Some(value.clone());
@@ -6446,7 +6528,6 @@ fn json_pointer_lookup(value: &Value, dotted: &str) -> Option<Value> {
     value.pointer(&pointer).cloned()
 }
 
-/// Stringify a JSON scalar for assertion comparison (strings without quotes).
 fn json_value_to_plain_string(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -6455,8 +6536,6 @@ fn json_value_to_plain_string(value: &Value) -> String {
     }
 }
 
-/// The final path component of an on-disk path, used to redact absolute user
-/// paths to a basename in harness responses.
 fn path_basename(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -6503,9 +6582,7 @@ fn write_annotation_sidecar(
     fs::write(&path, serialized).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
-/// Draw each node's rect outline (and the pointer crosshair) onto a screenshot
-/// so a misfiring coordinate click can be debugged from one artifact. Node
-/// rects are logical points; scale to physical pixels with `scale_factor`.
+/// Draw node rectangles and pointer on screenshots; rects use logical points and scale to pixels with `scale_factor`.
 fn annotate_color_image(
     image: &mut egui::ColorImage,
     nodes: &[AgentGuiNode],
@@ -6576,13 +6653,7 @@ fn parse_pointer_button(name: Option<&str>) -> Result<PointerButton, String> {
     }
 }
 
-/// Read the in-memory activity-log buffer (the same data behind the footer
-/// activity log) so agents can assert on app output and egui warnings without
-/// tailing the redirected stdout file.
-///
-/// `since_generation` enables cheap incremental tailing: the log generation is a
-/// monotonic counter incremented once per appended entry, so the most recent
-/// `generation - since` entries are the ones added since the last read.
+/// Read the in-memory activity log for assertions without tailing redirected stdout; `since_generation` returns entries added since the prior read.
 fn agent_gui_logs(
     level: Option<&str>,
     contains: Option<&str>,
@@ -6622,6 +6693,7 @@ fn agent_gui_logs(
 pub fn parse_agent_gui_view(view: &str) -> Option<FoxyView> {
     match normalize_selector(view).as_str() {
         "repository-list" | "repositories" | "repo-list" => Some(FoxyView::RepositoryList),
+        "server-instances" | "servers" => Some(FoxyView::ServerInstances),
         "settings" => Some(FoxyView::Settings),
         "repository-settings" | "repo-settings" => Some(FoxyView::RepositorySettings),
         "repository-space-settings" | "space-settings" => Some(FoxyView::RepositorySpaceSettings),
@@ -6690,6 +6762,7 @@ fn repo_state_name(state: RepoState) -> &'static str {
 fn view_to_agent_name(view: FoxyView) -> &'static str {
     match view {
         FoxyView::RepositoryList => "repository-list",
+        FoxyView::ServerInstances => "server-instances",
         FoxyView::Settings => "settings",
         FoxyView::RepositorySettings => "repository-settings",
         FoxyView::RepositorySpaceSettings => "repository-space-settings",
@@ -6721,9 +6794,7 @@ pub fn parse_agent_gui_key(key: &str) -> Option<Key> {
         "space" => Some(Key::Space),
         "backspace" => Some(Key::Backspace),
         "delete" | "del" => Some(Key::Delete),
-        // Fall back to egui's own parser for the long tail: letters (a-z),
-        // digits, function keys (F1-F35), and punctuation. It is case-sensitive
-        // for named keys, so hand it the original trimmed string.
+        // Use egui's parser for letters, digits, function keys, and punctuation; named keys remain case-sensitive.
         _ => Key::from_name(key.trim()),
     }
 }
@@ -6899,8 +6970,7 @@ mod tests {
 
     #[test]
     fn new_wait_conditions_round_trip_through_json() {
-        // The wire format tags the condition by `kind`; lock the kebab-case
-        // names so the CLI client and driver stay in sync.
+        // Keep kebab-case wire tags stable so CLI clients and the driver agree.
         for (condition, expected_kind) in [
             (
                 AgentGuiWaitCondition::Toast {

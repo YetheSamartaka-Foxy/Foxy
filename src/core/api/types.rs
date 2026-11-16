@@ -38,16 +38,10 @@ pub struct ModDiffSummary {
 #[derive(Clone, Debug)]
 pub struct QuickScanResult {
     pub repo_url: String,
-    /// Download folder of the scanned repository instance, normalized for
-    /// identity comparison. The same `repo_url` can be installed in several
-    /// folders; results are routed back to the matching instance by
-    /// `(repo_url, local_path)`. Empty when the repository has no folder yet.
+
     pub local_path: String,
     pub mods: Vec<ModDiffSummary>,
-    /// When `true` the scan was skipped because it cannot safely produce a
-    /// clean/update decision yet (e.g. metadata not ready or local paths do not
-    /// match the expected remote tree).
-    /// Consumers should treat this as "status unknown" rather than "clean".
+
     pub skipped: bool,
 }
 
@@ -92,8 +86,7 @@ pub enum ProgressEvent {
         total_files: usize,
         checked_parts: usize,
         total_parts: usize,
-        /// Estimated bytes covered so far; 0 of 0 when the sender does not
-        /// track bytes, and consumers then fall back to parts.
+
         checked_bytes: u64,
         total_bytes: u64,
     },
@@ -127,9 +120,7 @@ pub enum ProgressEvent {
         cumulative_hash_ms: u64,
         after_download_hash_ms: u64,
     },
-    /// Emitted once the auto hash benchmark has measured the disk: how many
-    /// bytes the run still has to read and the sampled rate, so the UI can
-    /// show a size and an ETA instead of a bare stage label.
+
     HashEstimate {
         remaining_bytes: u64,
         bytes_per_sec: u64,
@@ -144,8 +135,7 @@ pub enum ProgressEvent {
         is_foxy: bool,
         app_update_url: Option<String>,
     },
-    /// The destination volume cannot take the planned download; always
-    /// followed by `Failed` carrying the same shortfall as text.
+
     DiskSpaceShortfall(crate::core::utils::disk_space::DiskSpaceShortfall),
     RetryableDownloadFailure,
     SharedVersionWarning {
@@ -168,7 +158,7 @@ pub enum SyncMode {
 #[derive(Clone)]
 pub struct RepositorySyncOptions {
     pub operation_id: String,
-    /// Build and persist the final download queue, but stop before backup or transfer.
+
     pub prepare_download_plan: bool,
     pub repository_space_shared_path: Option<String>,
     pub repository_space_members: Vec<(String, String)>,
@@ -179,13 +169,10 @@ pub struct RepositorySyncOptions {
     pub rollback_temp_directory: Option<String>,
     pub download_speed_limit_mbps: Option<u32>,
     pub recent_local_path_reset: bool,
-    /// The filesystem watcher saw the repository folder change after the last
-    /// prepared download queue, so a `Download` must rebuild the queue instead
-    /// of reusing it.
+
     pub discard_prepared_queue: bool,
     pub force_redownload: bool,
-    /// Keep the ordinary mismatch scope but download each queued file in full.
-    /// Used by the agent test harness for patch-versus-full controls.
+
     pub force_full_downloads: bool,
     pub allow_suspect_full_redownload: bool,
     pub download_pause_rx: watch::Receiver<bool>,
@@ -195,10 +182,7 @@ pub struct RepositorySyncOptions {
     /// Restore files the verified-hash record proves unchanged when the database
     /// holds no state for them, instead of reading them again.
     pub trust_verified_hashes: bool,
-    /// The caller's durable addon selection, written to `addons.enabled` before
-    /// the pipeline reads it. Distinct from the run's enabled overrides, which
-    /// can be a transient one-shot scope (a standalone addon download narrows
-    /// them to a single addon) that must never become the stored state.
+    /// Durable addon selection is distinct from transient per-run overrides; never persist the latter.
     pub persisted_addon_selection: Option<Vec<(String, bool)>>,
 }
 

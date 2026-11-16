@@ -23,10 +23,7 @@ fn addon_lists_complete(data: &serde_json::Value) -> bool {
     crate::core::tasks::remote_repository::publishes_complete_addon_lists(data)
 }
 
-/// Whether this repository instance has no linked subfile rows yet. This is the
-/// conflict-free case for plain/deferred part inserts even when a repository
-/// space has already populated `subfiles` for another repository in the same DB.
-/// On query error we return false (keep the safe `ON CONFLICT` path).
+/// Use plain inserts only for an empty repository instance; on query error retain the safe upsert path.
 async fn repository_subfiles_empty(db: &FoxyDb, repository_id: i64) -> bool {
     match db
         .query_all(
@@ -77,17 +74,16 @@ pub(crate) struct RemoteRebuildWork {
     pub(crate) mods: usize,
     pub(crate) files: usize,
     pub(crate) parts: usize,
-    /// Manifest response bodies received, in bytes.
+
     pub(crate) response_bytes: u64,
-    /// Summed per-mod service times; parallel tasks, so not wall time.
+
     pub(crate) fetch: std::time::Duration,
     pub(crate) parse: std::time::Duration,
     pub(crate) persist: std::time::Duration,
-    /// Wall time of the parallel manifest fan-out.
+
     pub(crate) fan_out_wall: std::time::Duration,
 }
 
-/// Process required and optional mods for given repository and pre-fetched repository json data
 pub(crate) async fn remote_mods_with_data(
     context: Arc<FoxyContext>,
     repository: Arc<FoxyRepository>,
@@ -97,10 +93,7 @@ pub(crate) async fn remote_mods_with_data(
 ) -> RemoteRebuildWork {
     let rebuild_start = std::time::Instant::now();
 
-    // If this repository has no linked subfile rows yet, the per-mod metadata
-    // tasks can buffer brand-new parts as conflict-free rows. The short-lived
-    // `fresh_subfiles_load` flag is only for this fan-out window; buffered rows
-    // keep a separate fresh marker for the later hash-bootstrap flush.
+    // Mark only the fan-out window fresh; buffered rows keep their own marker for the later hash flush.
     let fresh_bulk_load = repository_subfiles_empty(&context.db(), repository.id as i64).await;
     if fresh_bulk_load {
         info!(
@@ -123,10 +116,7 @@ pub(crate) async fn remote_mods_with_data(
         }
         _ => false,
     };
-    // Stream only when the part insert would otherwise be the critical path: a
-    // fresh deferred load that the verified-hash record may restore without
-    // hashing. Existing links would let a partly streamed graph pass the
-    // completeness probe after a crash.
+    // Stream only fresh deferred loads; existing links could make a partial graph pass completeness checks after a crash.
     let stream_parts = !verify_publication_snapshot
         && fresh_file_links
         && context.should_defer_part_inserts()
@@ -144,8 +134,7 @@ pub(crate) async fn remote_mods_with_data(
     let mut desired_mod_pairs: Vec<(String, String)> = Vec::new();
     let mut desired_mod_pairs_dedupe: HashSet<String> = HashSet::new();
 
-    // A missing list is an incomplete publication. In particular, do not let
-    // an omitted list turn into an empty desired set that prunes prior links.
+    // An omitted list is incomplete metadata, not an empty set that may prune existing links.
     let lists_complete = addon_lists_complete(&data);
 
     if let Some(required_mods_data) = data.get("requiredMods") {
@@ -224,9 +213,6 @@ pub(crate) async fn remote_mods_with_data(
         parallel_elapsed, repository.remote_url
     );
 
-    // Close the fresh bulk-load window: clear the flag so any subsequent writes in
-    // this session use the normal upsert path. Indexes were never dropped, so there is
-    // nothing to rebuild (analysis #6 Step 1 / "Option B").
     if fresh_bulk_load {
         context.set_fresh_subfiles_load(false);
     }
@@ -271,7 +257,7 @@ pub(crate) async fn remote_mods_with_data(
             sum_mod_durations,
             parallel_elapsed
         );
-        // Log all mods sorted by duration (slowest first) for easy profiling
+
         all_stats.sort_by_key(|stat| std::cmp::Reverse(stat.duration));
         for (rank, s) in all_stats.iter().enumerate() {
             let pct = if parallel_elapsed.as_secs_f64() > 0.0 {

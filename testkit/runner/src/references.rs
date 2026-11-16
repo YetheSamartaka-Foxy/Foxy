@@ -1,15 +1,10 @@
-//! Calibrated-estimate ratios: a row's measured time against the independent
-//! references `foxy-testkit calibrate` recorded for this machine and origin.
-//! The references a row may cite are chosen once per run (`select`) and kept
-//! on the row, so `replay` derives the same ratios from the same inputs.
+//! Pin reference IDs per run so replay derives ratios from the same independent inputs.
 
 use crate::collect::expect::dotted;
 use crate::ledger::round;
 use serde_json::{Value, json};
 
-/// The environment keys a calibration lane must share with the row before
-/// it can be a reference for it; the origin is checked for network lanes
-/// and the storage class and volume for the disk lane.
+/// References require matching environments; network lanes also match origin, disk lanes match storage class and volume.
 const MACHINE_KEYS: &[&str] = &["cpu", "os", "memory_gb"];
 
 fn same_machine(lane: &Value, environment: &Value) -> bool {
@@ -18,9 +13,7 @@ fn same_machine(lane: &Value, environment: &Value) -> bool {
     })
 }
 
-/// The lanes of `calibration` that apply to a run in `environment`, on
-/// `storage_class`, whose repository sits on `volume`: only their ids and the
-/// numbers the ratios use.
+/// A reference must match environment, storage class and volume; retain its ID and numeric inputs on the run.
 pub fn select(
     calibration: &Value,
     environment: &Value,
@@ -103,7 +96,6 @@ pub fn select(
     references
 }
 
-/// The lane ids a row cites, for the baseline's expiry check.
 pub fn ids(references: &Value) -> Value {
     let mut ids = json!({});
     for (lane, entry) in references.as_object().into_iter().flatten() {
@@ -119,21 +111,8 @@ fn ratio(ideal_s: f64, actual_s: f64) -> Option<f64> {
         .then(|| round(ideal_s / actual_s, 4))
 }
 
-/// Add `sol_calibrated` (unclamped, `T_reference / T_actual`) and the
-/// reference id to the operation records a reference exists for:
-///
-/// - `download`: body bytes at the origin's sustained aggregate rate;
-/// - `hash`: hashed bytes at the slower of the read lane (page cache for a
-///   warm row, the device for an explicitly evicted one) and the matching
-///   all-core algorithm lane, over the operation's total hash wall time;
-/// - `startup_probe`: one fresh request, since every probe runs at one depth;
-/// - `sync_action` on a no-change exit: one fresh index request plus a reused
-///   one per further index request;
-/// - `quick_scan`: walked entries at the volume's metadata rate;
-/// - gate-1 `db_persist` and `db_purge`: the sum of each affected statement
-///   kind at its matching row rate, provided no affected rows are unclassified;
-///
-/// Rows without a matching reference keep their records untouched.
+/// Apply unclamped T_reference/T_actual only with a matching independent reference.
+/// Hash uses total service time, cache-matched reads and algorithm capacity; unclassified DB rows remain unrated.
 pub fn attach(row: &mut Value) {
     let references = row["references"].clone();
     if references.as_object().is_none_or(|map| map.is_empty()) {
@@ -150,9 +129,7 @@ pub fn attach(row: &mut Value) {
         row["download"]["reference_id"] = references["network"]["id"].clone();
     }
     let evicted = row["cache_state"] == "evicted";
-    // The bound is the best the volume does under any access pattern: the
-    // faster of the single-reader and the parallel lane (an NVMe gains from
-    // parallel readers, a rotational disk loses to the seeks).
+    // Use the faster single/parallel read reference: concurrency helps NVMe but can penalize rotational storage.
     let candidates: [&str; 2] = if evicted {
         ["unbuffered_read_bps", "unbuffered_read_parallel_bps"]
     } else {
@@ -194,8 +171,7 @@ pub fn attach(row: &mut Value) {
             "algorithm": algorithm,
         });
     }
-    // Quick scan: entries the fingerprint walks enumerated at the volume's
-    // metadata rate (first pass for a cold or evicted row, warm otherwise).
+
     let first_pass = references["metadata"]["first_pass_entries_per_s"].as_f64();
     let warm = references["metadata"]["warm_entries_per_s"].as_f64();
     let entry_rate = if matches!(row["cache_state"].as_str(), Some("cold" | "evicted")) {
@@ -273,8 +249,7 @@ pub fn attach(row: &mut Value) {
         row["startup_probe"]["sol_calibrated"] = value.into();
         row["startup_probe"]["reference_id"] = references["latency"]["id"].clone();
     }
-    // A no-change action: the pipeline exited early, or it completed a
-    // recheck without fetching a graph or moving a byte.
+
     let outcome = row["sync_action"]["outcome"].as_str().unwrap_or_default();
     let no_change = outcome.starts_with("early-exit")
         || (outcome == "completed"
@@ -360,18 +335,18 @@ mod tests {
         attach(&mut row);
         assert_eq!(row["download"]["sol_calibrated"], 0.9292);
         assert_eq!(row["download"]["reference_id"], "network-1");
-        // 4.33 GB at min(9 GB/s warm read, 20 GB/s CPU) = 0.481 s ideal over 0.47 s.
+
         assert_eq!(row["hash"]["sol_calibrated"], 1.0239);
         assert_eq!(row["hash"]["reference_id"]["read_lane"], "warm_read_bps");
         assert_eq!(row["startup_probe"]["sol_calibrated"], 0.8696);
-        // fresh 0.080 + one reused 0.040 over 0.45 s.
+
         assert_eq!(row["sync_action"]["sol_calibrated"], 0.2667);
-        // 3000 entries at the better of 300k and 280k entries/s over 21 ms.
+
         assert_eq!(row["quick_scan"]["sol_calibrated"], 0.4762);
         assert_eq!(row["quick_scan"]["reference_id"], "metadata-1");
-        // 63k rows at 126k rows/s over a 1 s transaction.
+
         assert_eq!(row["db_purge"]["sol_calibrated"], 0.5);
-        // 2k inserts at 70k/s plus 3k updates at 50k/s over 200 ms.
+
         assert_eq!(row["db_persist"]["sol_calibrated"], 0.4429);
         assert_eq!(row["db_persist"]["reference_id"], "db-1");
 

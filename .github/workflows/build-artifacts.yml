@@ -125,10 +125,7 @@ jobs:
         shell: pwsh
         run: cargo build --release --target x86_64-pc-windows-msvc
 
-      # steamworks-sys unpacks the redistributable into its own OUT_DIR only.
-      # The Workshop helper needs it beside the exe, and the installer packages
-      # from this directory, so stage it explicitly rather than relying on
-      # build-script ordering.
+      # Stage the redistributable beside the exe for the Workshop helper and installer.
       - name: Stage Steamworks redistributable
         shell: pwsh
         run: |
@@ -242,9 +239,8 @@ jobs:
       - name: Build Linux release
         run: cargo build --release --target x86_64-unknown-linux-gnu
 
-      # The binary has a DT_NEEDED on libsteam_api.so and is built with an
-      # $ORIGIN rpath, so the library must sit beside it or the app will not
-      # start. There is no delay-load equivalent on Linux.
+      # The DT_NEEDED library must sit beside the binary for its $ORIGIN rpath;
+      # Linux has no delay-load equivalent.
       - name: Prepare Linux artifact
         run: |
           mkdir -p dist

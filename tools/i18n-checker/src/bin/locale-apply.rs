@@ -1,18 +1,3 @@
-//! locale-apply - applies a targeted translation batch to Foxy locale JSON.
-//!
-//! Run from the repository root:
-//!   cargo run --manifest-path tools/i18n-checker/Cargo.toml --bin locale-apply -- \
-//!       --translations translations.json --keys-out changed-keys.txt
-//!
-//! Input shape:
-//! {
-//!   "de": { "English key from en.json": "German value" },
-//!   "pt-BR": { "English key from en.json": "Brazilian Portuguese value" }
-//! }
-//!
-//! Existing entries are rewritten in place and new ones are inserted next to
-//! their en.json neighbour, so the diff stays value-only.
-
 use i18n_checker::{
     detect_line_ending, english_source_key, entry_indent, find_entry_line, is_valid_plural_extra,
     locale_entry_line_indented, parse_locale_object, placeholder_names, previous_present_key,

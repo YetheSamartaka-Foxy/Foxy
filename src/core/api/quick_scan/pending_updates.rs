@@ -148,11 +148,8 @@ pub(crate) async fn collect_repo_download_targets(
         return (file_ids, mod_ids);
     }
 
-    // When a mod-name filter is provided, use the name-aware query so we can
-    // restrict the download queue to only the addons the quick scan identified
-    // as needing updates.  Without this filter, stale download-target rows
-    // created by remote_repository() for *all* mismatched files would leak
-    // unrelated mods into the download queue.
+    // Keep the queue scoped to addons needing updates; remote refresh may leave
+    // stale target rows for unrelated addons.
     if let Some(allowed) = allowed_mod_names {
         let targets = match fetch_all_download_targets_with_mod_and_name(context.clone()).await {
             Ok(targets) => targets,
@@ -970,8 +967,6 @@ mod tests {
         assert_eq!(pending_file_name_leaf("addons/foo.pbo"), "foo.pbo");
     }
 
-    // ── normalize_pending_file_name ─────────────────────────────────────
-
     #[test]
     fn normalize_pending_file_name_already_normalized_is_unchanged() {
         assert_eq!(
@@ -1006,11 +1001,8 @@ mod tests {
 
     #[test]
     fn normalize_pending_file_name_only_separators() {
-        // Leading separators are trimmed; the remaining backslashes are converted.
         assert_eq!(normalize_pending_file_name("\\\\"), "");
     }
-
-    // ── pending_file_name_leaf ──────────────────────────────────────────
 
     #[test]
     fn pending_file_name_leaf_no_separator_returns_whole() {
@@ -1037,8 +1029,6 @@ mod tests {
         assert_eq!(pending_file_name_leaf(""), "");
     }
 
-    // ── patch_plan_estimate_bytes ───────────────────────────────────────
-
     #[test]
     fn patch_plan_estimate_equal_plan_and_file() {
         assert_eq!(patch_plan_estimate_bytes(100, Some(100)), 100);
@@ -1057,7 +1047,6 @@ mod tests {
 
     #[test]
     fn patch_plan_estimate_never_exceeds_full_size() {
-        // A plan larger than the file is always capped at the full file size.
         assert_eq!(patch_plan_estimate_bytes(64, Some(u64::MAX)), 64);
     }
 }

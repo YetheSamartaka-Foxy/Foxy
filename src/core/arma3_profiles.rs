@@ -2,22 +2,16 @@ use log::{debug, info, warn};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// An Arma 3 player profile detected on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arma3Profile {
-    /// Human-readable display name (percent-decoded from folder name).
     pub name: String,
-    /// Full path to the profile directory.
+
     pub path: PathBuf,
-    /// Whether this is the default profile (in Documents\Arma 3\)
-    /// vs an "Other Profile" (in Documents\Arma 3 - Other Profiles\).
+
     pub is_default: bool,
 }
 
-/// Percent-encode a profile name into its on-disk folder name, mirroring
-/// [`percent_decode`]. Arma 3 keeps ASCII letters, digits, `-` and `_`
-/// literal and encodes everything else (e.g., "John Doe" -> "John%20Doe",
-/// "Player [TAG]" -> "Player%20%5BTAG%5D").
+/// Percent-encode a profile name using Arma 3's on-disk naming rules.
 pub fn percent_encode(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     for byte in input.bytes() {
@@ -30,7 +24,6 @@ pub fn percent_encode(input: &str) -> String {
     result
 }
 
-/// Percent-decode a folder name (e.g., "John%20Doe" -> "John Doe").
 fn percent_decode(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let bytes = input.as_bytes();
@@ -50,14 +43,6 @@ fn percent_decode(input: &str) -> String {
     result
 }
 
-/// Detect all Arma 3 profiles on the system.
-///
-/// Scans:
-/// - `Documents\Arma 3\` for the default profile
-/// - `Documents\Arma 3 - Other Profiles\*\` for additional profiles
-///
-/// A directory is considered a valid profile if it contains at least one
-/// `*.Arma3Profile` file.
 pub fn detect_all_profiles(custom_profiles_dir: Option<&Path>) -> Vec<Arma3Profile> {
     let mut profiles = Vec::new();
 
@@ -71,7 +56,6 @@ pub fn detect_all_profiles(custom_profiles_dir: Option<&Path>) -> Vec<Arma3Profi
         return profiles;
     };
 
-    // 1. Default profile
     let default_dir = documents.join("Arma 3");
     if default_dir.is_dir()
         && let Some(profile_name) = find_arma3_profile_file(&default_dir)
@@ -84,7 +68,6 @@ pub fn detect_all_profiles(custom_profiles_dir: Option<&Path>) -> Vec<Arma3Profi
         });
     }
 
-    // 2. Other Profiles
     let other_profiles_dir = documents.join("Arma 3 - Other Profiles");
     if other_profiles_dir.is_dir() {
         match fs::read_dir(&other_profiles_dir) {
@@ -230,8 +213,6 @@ fn push_profile_if_new(
     });
 }
 
-/// Find the first `*.Arma3Profile` file in a directory and return
-/// its stem (filename without extension) as the profile name.
 fn find_arma3_profile_file(dir: &Path) -> Option<String> {
     let entries = fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
@@ -240,7 +221,6 @@ fn find_arma3_profile_file(dir: &Path) -> Option<String> {
             && let Some(ext) = path.extension()
             && ext.eq_ignore_ascii_case("Arma3Profile")
         {
-            // Skip .vars.Arma3Profile and .3den.Arma3Profile
             let stem = path.file_stem()?.to_string_lossy().to_string();
             if stem.ends_with(".vars") || stem.ends_with(".3den") {
                 continue;
@@ -251,16 +231,7 @@ fn find_arma3_profile_file(dir: &Path) -> Option<String> {
     None
 }
 
-/// Attempt to detect which Arma 3 profile is currently selected.
-///
-/// Detection strategy (first match wins):
-/// 1. Most recently modified `.Arma3Profile` file across all known profiles.
-///    The game writes to this file on every session, so the newest one is
-///    the profile last used.
-/// 2. Arma 3 Launcher JSON config files in `%LOCALAPPDATA%\Arma 3 Launcher\`.
-/// 3. Fallback to the default profile (from `Documents\Arma 3\`).
 pub fn detect_active_profile(known_profiles: &[Arma3Profile]) -> Option<String> {
-    // 1. Most recently modified .Arma3Profile file
     if let Some(name) = detect_most_recently_used_profile(known_profiles) {
         info!(
             "Detected active Arma 3 profile from most recently modified profile file: {}",
@@ -269,7 +240,6 @@ pub fn detect_active_profile(known_profiles: &[Arma3Profile]) -> Option<String> 
         return Some(name);
     }
 
-    // 2. Launcher JSON configs
     if let Some(local_app_data) = dirs::data_local_dir() {
         let launcher_dir = local_app_data.join("Arma 3 Launcher");
         if launcher_dir.is_dir() {
@@ -294,14 +264,10 @@ pub fn detect_active_profile(known_profiles: &[Arma3Profile]) -> Option<String> 
         }
     }
 
-    // 3. Default profile fallback
     fallback_default(known_profiles)
 }
 
-/// Find the profile whose `.Arma3Profile` file was most recently modified.
-///
-/// Arma 3 writes to `<ProfileName>.Arma3Profile` on every game session,
-/// so the newest modification timestamp indicates the last-used profile.
+/// Arma updates the profile file each session, so its latest mtime identifies the last-used profile.
 fn detect_most_recently_used_profile(known_profiles: &[Arma3Profile]) -> Option<String> {
     let mut best: Option<(String, std::time::SystemTime)> = None;
 
@@ -317,8 +283,6 @@ fn detect_most_recently_used_profile(known_profiles: &[Arma3Profile]) -> Option<
     best.map(|(name, _)| name)
 }
 
-/// Return the modification time of the primary `*.Arma3Profile` file in a
-/// directory, skipping `.vars.Arma3Profile` and `.3den.Arma3Profile`.
 fn newest_arma3profile_mtime(dir: &Path) -> Option<std::time::SystemTime> {
     let entries = fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
@@ -337,7 +301,6 @@ fn newest_arma3profile_mtime(dir: &Path) -> Option<std::time::SystemTime> {
     None
 }
 
-/// Search a JSON value for profile/name fields.
 fn extract_profile_from_json(json: &serde_json::Value) -> Option<String> {
     for key in &["profile", "name", "profileName", "playerName"] {
         if let Some(val) = json.get(key).and_then(|v| v.as_str())
@@ -373,15 +336,12 @@ fn extract_profile_from_json(json: &serde_json::Value) -> Option<String> {
     None
 }
 
-/// Parse `-name=ProfileName` from a launch parameters string.
-/// Handles both `-name=Profile` and `-name="Profile Name"` formats.
 fn parse_name_from_params(params: &str) -> Option<String> {
     let prefix = "-name=";
     let start = params.find(prefix)?;
     let rest = &params[start + prefix.len()..];
 
     if let Some(inner) = rest.strip_prefix('"') {
-        // Quoted value: find the closing quote
         let end = inner.find('"').unwrap_or(inner.len());
         let name = &inner[..end];
         if !name.is_empty() {
@@ -394,7 +354,6 @@ fn parse_name_from_params(params: &str) -> Option<String> {
             return Some(name.to_string());
         }
     } else {
-        // Unquoted: take until the next whitespace
         let name: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
         if !name.is_empty() {
             return Some(name);
@@ -411,7 +370,6 @@ fn fallback_default(known_profiles: &[Arma3Profile]) -> Option<String> {
         .map(|p| p.name.clone())
 }
 
-/// Why a proposed profile name was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileNameError {
     Empty,
@@ -420,7 +378,6 @@ pub enum ProfileNameError {
     Reserved,
 }
 
-/// Why a profile management operation (rename/clone/delete) failed.
 #[derive(Debug)]
 pub enum ProfileOpError {
     InvalidName(ProfileNameError),
@@ -444,10 +401,7 @@ impl std::fmt::Display for ProfileOpError {
     }
 }
 
-/// Validate a proposed new profile name. The allowed character set is kept
-/// conservative on purpose: it only contains characters whose on-disk
-/// encoding by Arma 3 is known, so `-name=<name>` resolves to the folder
-/// Foxy creates instead of silently spawning a fresh empty profile.
+/// Validate a profile name so Arma 3's `-name` resolves to the folder Foxy creates.
 pub fn validate_new_profile_name(name: &str) -> Result<(), ProfileNameError> {
     let name = name.trim();
     if name.is_empty() {
@@ -473,8 +427,6 @@ pub fn validate_new_profile_name(name: &str) -> Result<(), ProfileNameError> {
     Ok(())
 }
 
-/// Normalized comparison key for directory paths (separator- and, on
-/// Windows, case-insensitive).
 fn dir_key(path: &Path) -> String {
     let mut key = path.to_string_lossy().replace('\\', "/");
     while key.ends_with('/') {
@@ -486,23 +438,18 @@ fn dir_key(path: &Path) -> String {
     key
 }
 
-/// Whether two paths refer to the same directory after normalization.
 pub fn paths_refer_to_same_dir(a: &Path, b: &Path) -> bool {
     dir_key(a) == dir_key(b)
 }
 
-/// Whether `child` is `root` or lives underneath it, using the same
-/// normalization as [`paths_refer_to_same_dir`].
 pub fn path_is_under(child: &Path, root: &Path) -> bool {
     let child_key = dir_key(child);
     let root_key = dir_key(root);
     child_key == root_key || child_key.starts_with(&format!("{}/", root_key))
 }
 
-/// Whether `path` is one of the vanilla Arma 3 profile locations in
-/// Documents. Passing such a path as `-profiles` makes the game relocate
-/// player profiles into a `Users` subfolder and start with fresh settings
-/// and keybinds, so callers must never forward these as `-profiles`.
+/// Whether `path` is a vanilla profile location that must not be passed as `-profiles`.
+/// Arma 3 would relocate profiles under `Users` and start with fresh settings.
 pub fn is_vanilla_profiles_location(path: &Path) -> bool {
     let Some(documents) = dirs::document_dir() else {
         return false;
@@ -511,16 +458,10 @@ pub fn is_vanilla_profiles_location(path: &Path) -> bool {
         || paths_refer_to_same_dir(path, &documents.join("Arma 3 - Other Profiles"))
 }
 
-/// The vanilla root for named ("Other") profiles, used as the clone target
-/// when the source is the default profile.
 pub fn other_profiles_root() -> Option<PathBuf> {
     dirs::document_dir().map(|documents| documents.join("Arma 3 - Other Profiles"))
 }
 
-/// Collect the profile file renames/copies for a profile directory: every
-/// file named `<stem>.<...>Arma3Profile<...>` is mapped to the same name
-/// with `new_name` as the stem (covers `.Arma3Profile`,
-/// `.vars.Arma3Profile`, `.3den.Arma3Profile` and backup variants).
 fn profile_file_transfers(
     dir: &Path,
     source_stem: &str,
@@ -547,11 +488,6 @@ fn profile_file_transfers(
     Ok(transfers)
 }
 
-/// Rename an Arma 3 profile on disk: profile files get the new stem and,
-/// for profiles living in their own folder, the folder is renamed to the
-/// percent-encoded new name. Default-profile and profiles-root locations
-/// are renamed in place (files only). Returns the profile directory after
-/// the rename.
 pub fn rename_profile(
     profile: &Arma3Profile,
     new_name: &str,
@@ -627,11 +563,6 @@ pub fn rename_profile(
     }
 }
 
-/// Clone an Arma 3 profile: copies only the profile files (settings,
-/// keybinds, editor preferences) into a new percent-encoded folder. The
-/// default profile is cloned into `fallback_named_root` (normally
-/// `Documents\Arma 3 - Other Profiles`); named profiles are cloned next to
-/// the source folder. Returns the new profile directory.
 pub fn clone_profile(
     profile: &Arma3Profile,
     new_name: &str,
@@ -681,10 +612,7 @@ pub fn clone_profile(
     Ok(dest_dir)
 }
 
-/// Delete an Arma 3 profile by moving its folder into `trash_root` instead
-/// of removing it outright, so an accidental delete stays recoverable. The
-/// default profile and profile-root directories are refused. Returns the
-/// path the profile folder was moved to.
+/// Move deleted profiles to trash so accidental deletion stays recoverable; refuse default and profile-root directories.
 pub fn delete_profile(
     profile: &Arma3Profile,
     trash_root: &Path,
@@ -732,7 +660,6 @@ pub fn delete_profile(
     }
 
     if fs::rename(&profile.path, &dest).is_err() {
-        // Cross-device move: fall back to copy + remove.
         copy_dir_recursive(&profile.path, &dest).map_err(ProfileOpError::Io)?;
         fs::remove_dir_all(&profile.path).map_err(ProfileOpError::Io)?;
     }
@@ -757,9 +684,6 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Whether an Arma 3 game process is currently running. Profile files are
-/// held and rewritten by the game, so management operations are refused
-/// while it runs.
 pub fn is_arma3_running() -> bool {
     #[cfg(target_os = "windows")]
     {

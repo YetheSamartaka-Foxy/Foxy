@@ -1,22 +1,4 @@
-//! Execution engine for Settings -> Scheduling jobs.
-//!
-//! A [`crate::ui::types::ScheduledJob`] is defined and persisted in settings;
-//! this module turns a due job into a serial pipeline that reuses the existing
-//! sync/download machinery: an optional recheck stage (`RemoteRefreshOnly`),
-//! an optional auto-approved download stage (`Download`, only for repositories
-//! that have a pending update), and an optional cancellable post-action (close
-//! the app or shut down the PC).
-//!
-//! Design notes / safety:
-//! - Single-flight: only one job runs at a time, and never while a manual sync,
-//!   direct download, repository purge, or schema wipe is active. A job that
-//!   falls due meanwhile is held and starts as soon as that work finishes.
-//! - The scheduler only fires while Foxy is running. A job whose time passed
-//!   while the app was closed or the computer slept is recorded as missed (not
-//!   run late) once it is outside the grace window, so a stale "download then
-//!   shut down" job never fires hours after the fact.
-//! - Post-actions wait out a cancellable countdown overlay; PC shutdown also
-//!   uses the OS `shutdown /t` timer as a second, independent abort path.
+//! Scheduled jobs run serialized sync/download pipelines only while Foxy is open; missed jobs expire, and post-actions remain cancellable.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -31,7 +13,6 @@ use crate::ui::types::{
     PostAction, RepoInstanceKey, RepoState, missed_run_reason, scheduler_paused_between,
 };
 
-/// Which stage of the pipeline an in-progress run is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JobRunStage {
     Recheck,
@@ -39,36 +20,30 @@ enum JobRunStage {
     Finalize,
 }
 
-/// Live state of the scheduled job currently executing. Runtime-only; never
-/// persisted (only the job definition and last-run bookkeeping are).
 #[derive(Debug, Clone)]
 pub struct ScheduledJobRun {
     pub job_id: String,
     pub job_name: String,
-    /// Scheduled instant that triggered this run (Unix millis), recorded as the
-    /// job's `last_run` so the same occurrence cannot re-fire.
+
     fire_ms: u64,
     post_action: PostAction,
     post_action_only_on_success: bool,
     download: bool,
-    /// All resolved targets for the job, kept so the download stage can be built
-    /// after the recheck stage finishes.
+
     targets: Vec<RepoInstanceKey>,
     stage: JobRunStage,
-    /// Remaining targets in the current stage.
+
     queue: VecDeque<RepoInstanceKey>,
-    /// Target whose sync we dispatched and are waiting on.
+
     in_flight: Option<RepoInstanceKey>,
     succeeded: usize,
     failed: usize,
     skipped: usize,
-    /// The user cancelled the run's sync; the rest of the run and its
-    /// post-action are dropped.
+
     cancelled: bool,
 }
 
 impl ScheduledJobRun {
-    /// Short human-readable description of the current stage, for the status row.
     pub fn stage_label(&self) -> &'static str {
         match self.stage {
             JobRunStage::Recheck => "Rechecking",
@@ -78,15 +53,13 @@ impl ScheduledJobRun {
     }
 }
 
-/// A post-action waiting out its cancellable countdown before it fires.
 #[derive(Debug, Clone)]
 pub struct PendingPostAction {
     pub job_id: String,
     pub action: PostAction,
     pub job_name: String,
     pub deadline: Instant,
-    /// The countdown ended while other work was running; it restarts once the
-    /// work finishes so closing or shutting down never interrupts a download.
+
     pub deferred_for_work: bool,
     pub handoff_generation: u64,
     pub gameplay_generation: u64,
@@ -109,7 +82,6 @@ pub(crate) struct ScheduledJobChangePrompt {
     pub change: ScheduledJobChange,
 }
 
-/// A due occurrence waiting for other work to finish before it starts.
 #[derive(Debug, Clone)]
 pub struct HeldScheduledJob {
     pub fire_ms: u64,
@@ -117,8 +89,7 @@ pub struct HeldScheduledJob {
     pub reason: &'static str,
 }
 
-/// Whether the post-action may run: a cancelled run never runs it, and with
-/// "only on success" every target must have run and succeeded.
+/// A cancelled run never performs its post-action; with success-only enabled, every target must succeed.
 fn post_action_allowed(run: &ScheduledJobRun) -> bool {
     !run.cancelled && (!run.post_action_only_on_success || (run.failed == 0 && run.skipped == 0))
 }
@@ -143,9 +114,7 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Issue a PC shutdown. Windows uses `shutdown /s /t 30` which shows a native
-/// warning and can be aborted with `shutdown /a`, giving a second independent
-/// cancel path on top of the in-app countdown.
+/// Windows shutdown uses the native 30-second timer and `shutdown /a` as a second cancellation path.
 #[cfg(target_os = "windows")]
 pub(crate) fn initiate_pc_shutdown() -> Result<(), String> {
     std::process::Command::new("shutdown")
@@ -155,8 +124,6 @@ pub(crate) fn initiate_pc_shutdown() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// Local decision returned by a short-lived borrow of the active run, so the
-/// dispatch call that follows does not hold a borrow of `self`.
 enum SchedStep {
     Dispatch(RepoInstanceKey, SyncMode),
     EndRecheck,
@@ -297,11 +264,8 @@ impl Foxy {
         }
     }
 
-    /// Per-frame scheduler tick. Drives a pending post-action countdown, advances
-    /// an in-progress run, or starts the next due job. Cheap when idle.
     pub fn process_scheduled_jobs(&mut self, ctx: &egui::Context) {
-        // Only run once the app has finished its startup work, so a job can never
-        // fire during the first frames before state is ready.
+        // Do not run scheduled work until startup is complete.
         if !self.startup_tasks_started {
             return;
         }
@@ -404,14 +368,11 @@ impl Foxy {
         }
     }
 
-    /// The interval at which the loop should wake to service the scheduler, or
-    /// `None` when there is nothing scheduled. Capped so a hidden/idle app still
-    /// fires jobs near their time without burning frames.
     pub(in crate::ui::app) fn scheduler_repaint_interval(&self) -> Option<Duration> {
         if self.scheduler_pending_post_action.is_some() || self.scheduler_active_run.is_some() {
             return Some(Duration::from_millis(250));
         }
-        // Held jobs need steady ticks: a long silent gap reads as a sleeping PC.
+        // Keep held jobs ticking so a long gap cannot be mistaken for a sleeping computer.
         if !self.scheduler_held_jobs.is_empty() {
             return Some(Duration::from_secs(5));
         }
@@ -434,10 +395,11 @@ impl Foxy {
         Some(Duration::from_millis(millis))
     }
 
-    /// The work that makes it unsafe to start a scheduled job now, for the log.
     fn scheduled_job_block_reason(&self) -> Option<&'static str> {
         if self.scheduler_active_run.is_some() {
             Some("another scheduled job")
+        } else if !self.client_db_admission.allows() {
+            Some("client database access is paused")
         } else if self.repository_sync_active() {
             Some("the running check or update")
         } else if self.is_direct_download_running() {
@@ -446,6 +408,8 @@ impl Foxy {
             Some("the running repository database wipe")
         } else if self.pending_db_schema_wipe.is_some() {
             Some("the database rebuild")
+        } else if self.client_worker_handoff_active || self.pending_game_space_switch.is_some() {
+            Some("the game-space switch")
         } else if self.retained_files_cleanup_in_flight
             || self.pending_retained_file_removal.is_some()
         {
@@ -466,8 +430,7 @@ impl Foxy {
         self.record_scheduled_job_result(&id, fire_ms, JobRunOutcome::Missed, 0, 0, 0);
     }
 
-    /// Manually trigger a job now (the "Run now" button), ignoring its schedule
-    /// but still respecting the single-flight guards.
+    /// Run Now bypasses schedule timing but still respects single-flight guards.
     pub fn run_scheduled_job_now(&mut self, job_idx: usize) -> bool {
         if self.scheduler_active_run.is_some() || self.scheduler_pending_post_action.is_some() {
             self.show_error_toast(self.t("A scheduled job is already running."));
@@ -479,10 +442,7 @@ impl Foxy {
             );
             return false;
         }
-        // For a one-time job, anchor the run to its scheduled instant so a manual
-        // "Run now" also marks that occurrence handled and it cannot fire again on
-        // schedule (important when the post-action is a shutdown). Recurring jobs
-        // anchor to now so only the next future occurrence remains.
+        // Anchor one-time manual runs to their scheduled instant so shutdown cannot fire twice; recurring runs anchor to now.
         let fire_ms = match self.settings_view_state.scheduled_jobs.get(job_idx) {
             Some(job) => match &job.schedule {
                 JobSchedule::OnceAt { unix_ms } => *unix_ms,
@@ -577,9 +537,7 @@ impl Foxy {
         true
     }
 
-    /// Resolve a job target to concrete `(remote_url, local_path)` instances.
-    /// Space members are resolved at run time; vanished repositories are dropped
-    /// here and skipped at dispatch.
+    /// Resolve targets to `(remote_url, local_path)` instances at run time and skip repositories that disappeared.
     fn resolve_scheduled_targets(&self, target: &JobTarget) -> Vec<RepoInstanceKey> {
         match target {
             JobTarget::Repository(key) => vec![key.clone()],
@@ -596,8 +554,7 @@ impl Foxy {
         }
     }
 
-    /// Targets that currently have a pending update, in target order. Only these
-    /// are downloaded, so the download stage never re-fetches up-to-date repos.
+    /// Download only targets with pending updates, preserving target order.
     fn build_scheduled_download_queue(
         &self,
         targets: &[RepoInstanceKey],
@@ -613,6 +570,9 @@ impl Foxy {
     }
 
     fn advance_scheduled_job_run(&mut self) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         // Wait while any sync/download is in flight (ours, or a manual one).
         if self.pending_download_retry.is_some()
             || self.repository_sync_active()
@@ -626,9 +586,7 @@ impl Foxy {
                 let Some(run) = self.scheduler_active_run.as_mut() else {
                     return;
                 };
-                // The completion hook clears in_flight. A dispatched sync that
-                // ended without a matching completion has no known outcome, so
-                // it counts as failed rather than vanishing from the totals.
+                // Treat a dispatched sync without a matching completion as failed so it stays in run totals.
                 if run.in_flight.take().is_some() {
                     run.failed += 1;
                 }
@@ -651,12 +609,11 @@ impl Foxy {
                         if let Some(run) = self.scheduler_active_run.as_mut() {
                             run.in_flight = Some(target);
                         }
-                        return; // wait for completion
+                        return;
                     }
                     if let Some(run) = self.scheduler_active_run.as_mut() {
                         run.skipped += 1;
                     }
-                    // loop to the next target
                 }
                 SchedStep::EndRecheck => self.transition_scheduled_to_download(),
                 SchedStep::EndDownload => {
@@ -690,9 +647,10 @@ impl Foxy {
         }
     }
 
-    /// Dispatch a single sync for a scheduled target. Returns true when a sync
-    /// actually started (so the caller waits for completion).
     fn start_scheduled_sync(&mut self, target: &RepoInstanceKey, mode: SyncMode) -> bool {
+        if !self.client_db_admission.allows() {
+            return false;
+        }
         let normalized_url = Self::normalize_repo_url(&target.remote_url);
         let path_key = Self::repo_instance_path_key(&target.local_path);
         // Strict: an unattended job must never run on another folder's copy.
@@ -707,9 +665,7 @@ impl Foxy {
         self.syncing_repository == Some(idx)
     }
 
-    /// Hook called from the sync-completion path to count a scheduled target's
-    /// result against the active run. No-op when no scheduled job is running or
-    /// the completion does not match the in-flight target/stage.
+    /// Count completion only when it matches the active run's in-flight target and stage.
     pub(in crate::ui::app) fn record_scheduled_job_completion(
         &mut self,
         repo_idx: Option<usize>,
@@ -1024,10 +980,7 @@ impl Foxy {
         self.process_scheduled_post_action(ctx);
     }
 
-    /// Centered modal countdown shown before a post-action runs. The main safety
-    /// gate: a prominent Cancel always aborts; PC shutdown also keeps the OS
-    /// `shutdown /a` window as a second abort path. Rendered every frame from the
-    /// update loop so it appears regardless of the current view.
+    /// The countdown always offers Cancel; Windows shutdown also remains abortable through `shutdown /a`.
     pub fn render_scheduled_post_action_overlay(&mut self, ctx: &egui::Context) {
         let Some(pending) = self.scheduler_pending_post_action.as_ref() else {
             return;

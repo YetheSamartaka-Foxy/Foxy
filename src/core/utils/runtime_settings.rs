@@ -1,7 +1,3 @@
-//! Pushes the app-global settings that tune how Foxy works into the process:
-//! for the GUI on load, reset, space switch, and edit, and for every CLI
-//! command after it loads the settings.
-
 use crate::core::tasks::calculate_hashes::{HashStorageClass, set_storage_class_override};
 use crate::core::utils::proxy::{ProxySettings, set_proxy_settings};
 use crate::core::utils::resource_profile::{ResourcePressure, set_pressure_override};

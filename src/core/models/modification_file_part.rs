@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 
 const PART_STORAGE_SEPARATOR: char = '\u{001F}';
 
-/// Column list for selecting a subfile row into a [`FoxyModFilePart`] via
-/// [`FoxyModFilePart::from_row`].
 pub(crate) const SUBFILE_COLUMNS: &str = "id, file_id, path, remote_length, local_length, remote_start, local_start, \
      remote_checksum, local_checksum, data_order";
 
@@ -21,31 +19,29 @@ pub(crate) fn part_display_path(path: &str) -> &str {
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub(crate) struct FoxyModFilePart {
-    /// Database id if applicable
     pub(crate) id: u64,
-    /// File ID to distinguish between file parts of different files
+
     pub(crate) file_id: u64,
-    /// Internal storage key for a file part. Use `part_display_path` for user-facing text.
+
     pub(crate) path: String,
-    /// Remote size of part
+
     pub(crate) remote_length: u64,
-    /// Local size of part
+
     pub(crate) local_length: u64,
-    /// Remote offset of part from start of a file
+
     pub(crate) remote_start: u64,
-    /// Local offset of part from start of a file
+
     pub(crate) local_start: u64,
-    /// Remote checksum of part
+
     #[serde(skip)]
     pub(crate) remote_checksum: String,
-    /// Local checksum of part
+
     pub(crate) local_checksum: String,
-    /// Remote data order
+
     pub(crate) data_order: i64,
 }
 
 impl FoxyModFilePart {
-    /// Materialize a [`FoxyModFilePart`] from a seam [`DbRow`] selected with [`SUBFILE_COLUMNS`].
     pub(crate) fn from_row(row: &DbRow) -> Result<Self, DbErr> {
         Ok(FoxyModFilePart {
             id: row.get_i64("id")? as u64,

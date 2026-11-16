@@ -20,7 +20,6 @@ impl TrayManager {
         Vec::new()
     }
 
-    /// Returns whether the system tray is available on this platform.
     pub fn is_available() -> bool {
         false
     }

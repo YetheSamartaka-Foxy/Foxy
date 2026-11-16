@@ -119,10 +119,7 @@ pub fn check(case: &Value, root: &Path, config: &Path) -> Result<Value> {
     Ok(json!({"git":git,"storage_class":storage,"environment":environment_fingerprint(&origin)}))
 }
 
-/// The environment properties a baseline is only valid under: the CPU, the
-/// OS family and major version, the memory size bucket, and the origin the
-/// case measured against. A change in any of them expires accepted baselines
-/// instead of letting them stand as references for different hardware.
+/// Expire baselines when CPU, OS, memory bucket or origin changes; another environment is not a valid reference.
 pub fn environment_fingerprint(origin: &str) -> Value {
     let mut system = sysinfo::System::new();
     system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
@@ -158,8 +155,6 @@ pub fn memory_bucket_gb(total_bytes: u64) -> u64 {
     ((gib / 8.0).round() as u64) * 8
 }
 
-/// The host (and port) of a repository address; a loopback origin served by
-/// the kit itself is reported as `loopback`.
 pub fn origin_host(address: &str) -> String {
     let rest = address.split_once("://").map_or(address, |(_, rest)| rest);
     let host = rest.split('/').next().unwrap_or_default();

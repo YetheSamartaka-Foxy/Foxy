@@ -5,18 +5,14 @@ use std::path::{Path, PathBuf};
 use crate::mod_line::LaunchParam;
 use crate::types::RepoConfig;
 
-/// The launch scripts one config named in `modLineFiles`, with the parameters
-/// to write into them. Collected before generation and applied once the
-/// repository is published, so a failed build never leaves a launch script
-/// pointing at mods that were not written.
+/// Apply script rewrites only after publication, so failed builds cannot leave scripts pointing at missing mods.
 #[derive(Debug, Default)]
 pub struct PendingUpdate {
     pub files: Vec<PathBuf>,
     pub params: Vec<LaunchParam>,
 }
 
-/// The `modLineFiles` paths of a config, resolved from the config file's own
-/// directory so they do not depend on the working directory.
+/// Resolve modLineFiles relative to its config, independent of the working directory.
 pub fn resolve(config: &RepoConfig, config_path: &Path) -> Vec<PathBuf> {
     let dir = config_path
         .parent()
@@ -89,7 +85,6 @@ pub fn ensure_distinct<'a>(
     Ok(())
 }
 
-/// Writes the generated launch parameters into every listed file.
 pub fn apply_all(updates: &[PendingUpdate]) -> Result<()> {
     let mut written = Vec::new();
     for update in updates {
@@ -134,9 +129,6 @@ fn read(path: &Path) -> Result<String> {
         .with_context(|| format!("Failed to read {} as UTF-8 text", path.display()))
 }
 
-/// Replaces the value of every launch parameter occurrence, leaving quoting and
-/// the rest of each line untouched. Returns the new text and how often each
-/// parameter was replaced.
 pub fn rewrite(contents: &str, params: &[LaunchParam]) -> (String, Vec<usize>) {
     let mut text = contents.to_string();
     let mut counts = Vec::with_capacity(params.len());
@@ -172,9 +164,6 @@ fn replace_param(text: &str, param: &LaunchParam) -> (String, usize) {
     (out, count)
 }
 
-/// The byte range of the value that belongs to the flag found at `start`, or
-/// `None` when this is not a standalone occurrence of it (`--mod=`, `-addons`
-/// inside `-addonsDir`, a path ending in the flag name).
 fn value_span(
     text: &str,
     start: usize,

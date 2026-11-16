@@ -1,21 +1,16 @@
 use std::path::Path;
 
-/// Headroom kept free beyond the planned bytes so an update never fills the
-/// destination volume to the last byte.
 pub const DISK_SPACE_MARGIN_BYTES: u64 = 500 * 1024 * 1024;
 
-/// A destination volume that cannot take a planned download.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiskSpaceShortfall {
-    /// Planned bytes plus [`DISK_SPACE_MARGIN_BYTES`].
     pub needed_bytes: u64,
     pub available_bytes: u64,
-    /// The path whose volume was probed.
+
     pub path: String,
 }
 
 impl DiskSpaceShortfall {
-    /// Bytes the user has to free before the download can start.
     pub fn missing_bytes(&self) -> u64 {
         self.needed_bytes.saturating_sub(self.available_bytes)
     }

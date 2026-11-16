@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use crate::types::{Chunking, GameBuildConfig, RepoConfig, RepoGame, ResolvedMod};
 
-/// Read and validate the config JSON, expanding any wildcard mod references.
 pub fn load_config(config_path: &Path) -> Result<(RepoConfig, Vec<ResolvedMod>)> {
     let content = std::fs::read_to_string(config_path).context("Failed to read config file")?;
     let mut config: RepoConfig =
@@ -204,7 +203,6 @@ fn expand_mod_ref(
     }])
 }
 
-/// Generate a blank config JSON template for the given game.
 pub fn generate_template_config(output: &Path, game: RepoGame) -> Result<()> {
     let template = template_config_value(game);
     let json =
@@ -213,12 +211,6 @@ pub fn generate_template_config(output: &Path, game: RepoGame) -> Result<()> {
     Ok(())
 }
 
-/// Arma 3 keeps the historical template. Reforger drops the keys the game
-/// has no use for (Creator DLCs, client-side mods, BattlEye) and uses the
-/// game's default port; mod folders are the unpacked addon directories that
-/// hold the `.gproj` and `addons/*.pak`. A custom game names its build
-/// folder in `gameBuild`, with content chunking so a rebuilt executable or data
-/// archive only re-sends the parts that changed.
 pub fn template_config_value(game: RepoGame) -> serde_json::Value {
     match game {
         RepoGame::Arma3 => serde_json::json!({

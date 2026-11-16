@@ -1,7 +1,3 @@
-//! Cut the parts of the process log that belong to one benchmark: the startup
-//! block (machine summary, build, database open) and the frame of the action
-//! itself, then pull the structured lines (`SOL`, `PIPELINE SUMMARY`) out of it.
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -14,9 +10,7 @@ use super::record::BenchmarkStage;
 /// drag the whole log into every benchmark.
 pub const STARTUP_WINDOW_MS: i64 = 30_000;
 pub const STARTUP_MAX_LINES: usize = 500;
-/// Slack around the action frame: a little before the spawn (the UI stamps
-/// the start before the worker logs) and more after, since the summary is
-/// written right as the UI sees `Finished`.
+/// The UI timestamps before worker logging and sees Finished alongside the final summary, so capture slack on both sides.
 pub const FRAME_SLACK_BEFORE_MS: i64 = 250;
 pub const FRAME_SLACK_AFTER_MS: i64 = 1_500;
 
@@ -31,7 +25,6 @@ impl LogSlice {
         self.startup.len() + self.frame.len()
     }
 
-    /// The slice as one file: startup block, a marker, then the action frame.
     pub fn render(&self, header: &str) -> String {
         let mut out = String::new();
         out.push_str("# ");
@@ -51,8 +44,6 @@ impl LogSlice {
     }
 }
 
-/// Timestamp of a log line in unix milliseconds, `None` for continuation
-/// lines (multi-line records) or anything not in the logger's format.
 pub fn line_timestamp_ms(line: &str) -> Option<i64> {
     let rest = line.strip_prefix('[')?;
     let end = rest.find(']')?;
@@ -63,9 +54,7 @@ pub fn line_timestamp_ms(line: &str) -> Option<i64> {
         .map(|at| at.timestamp_millis())
 }
 
-/// Select the startup block and the action frame from `lines`, both given as
-/// inclusive unix millisecond ranges. Continuation lines follow the record
-/// they belong to.
+/// Ranges are inclusive Unix milliseconds; continuation lines stay attached to their timestamped record.
 pub fn slice_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
     startup: (i64, i64),
@@ -90,15 +79,9 @@ pub fn slice_lines<'a>(
     slice
 }
 
-/// How far a file's first "Logger initialized" stamp may sit from the process
-/// start and still be this process's file.
 const OWN_LOG_START_TOLERANCE_MS: i64 = 1_000;
 
-/// Whether a log file belongs to the process that started at `process_start_ms`.
-/// Every process opens its file with a `Logger initialized` record, so a file
-/// whose first record is that line at another time is another process (a CLI
-/// run against the same config dir); a file that starts mid-stream is a
-/// rotation continuation and is kept.
+/// A different Logger initialized timestamp identifies another process; mid-stream files are retained as rotations.
 pub fn file_belongs_to_process(first_line: &str, process_start_ms: i64) -> bool {
     if !first_line.contains("Logger initialized") {
         return true;
@@ -107,9 +90,6 @@ pub fn file_belongs_to_process(first_line: &str, process_start_ms: i64) -> bool 
         .is_some_and(|at| (at - process_start_ms).abs() <= OWN_LOG_START_TOLERANCE_MS)
 }
 
-/// Every line this process has logged, in order: its own `foxy_r*.log` files
-/// (the current one plus rotations), skipping files of other Foxy processes
-/// that share the folder.
 pub fn gather_log_lines(logs_dir: &Path, process_start_ms: i64) -> Vec<String> {
     let mut files: Vec<(i64, Vec<String>)> = fs::read_dir(logs_dir)
         .into_iter()
@@ -147,7 +127,6 @@ pub fn gather_log_lines(logs_dir: &Path, process_start_ms: i64) -> Vec<String> {
     files.into_iter().flat_map(|(_, lines)| lines).collect()
 }
 
-/// `key=value` tokens of every `SOL op=...` line in the frame.
 pub fn parse_sol_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
 ) -> Vec<BTreeMap<String, String>> {
@@ -161,11 +140,8 @@ pub fn parse_sol_lines<'a>(
         .collect()
 }
 
-/// The SOL grammar: space-separated `key=value` pairs, where a value may be
-/// double-quoted to carry spaces and `\"` or `\\` escapes. The last occurrence
-/// of a repeated key wins, and values keep their raw text so integer counters
-/// never round-trip through floating point here. Malformed input is retained
-/// where possible and marked with parser-owned status fields.
+/// SOL values support quoting and escapes; the last duplicate key wins.
+/// Keep raw counter text to avoid floating-point loss and mark malformed input explicitly.
 pub fn parse_sol_body(body: &str) -> BTreeMap<String, String> {
     let (mut map, errors) = parse_sol_fields(body);
     if !errors.is_empty() {
@@ -282,11 +258,7 @@ fn push_parse_error(errors: &mut Vec<&'static str>, error: &'static str) {
     }
 }
 
-/// The SOL lines a saved record owns: lines that carry an `op_id` belong to
-/// the record only when it matches the record's own operation id; lines
-/// without one (hash batches, quick scans, startup) are kept on the strength
-/// of the time frame alone. A record without an operation id keeps everything
-/// in its frame, as before ownership existed.
+/// Match op_id when present; legacy lines and records without IDs fall back to their captured time frame.
 pub fn owned_sol_lines(
     lines: Vec<BTreeMap<String, String>>,
     operation_id: Option<&str>,
@@ -300,7 +272,6 @@ pub fn owned_sol_lines(
         .collect()
 }
 
-/// One `PIPELINE SUMMARY` table: the operation it belongs to and its rows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PipelineSummary {
     pub operation_id: String,
@@ -321,10 +292,7 @@ pub fn parse_pipeline_summary<'a>(
         .cloned()
 }
 
-/// Every summary table in `lines`. The logger writes the table as one record,
-/// which lands in the file as a single line with the rows separated by runs
-/// of spaces; in memory it is still multi-line. Both forms tokenize the same
-/// way once the lines from the header to `TOTAL` are joined.
+/// Disk logs flatten summary rows into one line; joining through TOTAL normalizes both disk and in-memory forms.
 pub fn parse_pipeline_tables<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<PipelineSummary> {
     let mut tables = Vec::new();
     let mut pending: Option<String> = None;
@@ -404,7 +372,7 @@ mod tests {
     #[test]
     fn parses_logger_timestamps() {
         let at = line_timestamp_ms(LINE).expect("timestamp");
-        // 09:24:23.602 UTC
+
         assert_eq!(at, 1_789_464_263_602);
         assert_eq!(line_timestamp_ms("  continuation"), None);
         assert_eq!(line_timestamp_ms("[not a stamp] x"), None);

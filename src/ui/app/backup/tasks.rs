@@ -302,9 +302,7 @@ impl Foxy {
             ));
         }
 
-        // Resolve the addon folder tolerant of case differences between the
-        // manifest name and the on-disk folder; fall back to the plain join when
-        // no matching folder exists yet (e.g. a not-yet-downloaded addon).
+        // Match addon folders case-insensitively; if none exists yet, use the expected path for a not-yet-downloaded addon.
         let fallback = resolve_child_dir_case_insensitive(Path::new(repo_path), addon_name)
             .unwrap_or_else(|| Path::new(repo_path).join(addon_name));
         let candidate = preferred_path
@@ -330,6 +328,9 @@ impl Foxy {
         addon_name: &str,
         addon_path: Option<&str>,
     ) -> bool {
+        if !self.client_db_admission.allows() {
+            return false;
+        }
         if self.repository_sync_active()
             || self.is_direct_download_running()
             || self.has_addon_backup_task_running()
@@ -385,10 +386,18 @@ impl Foxy {
         });
         let task_tx = self.addon_backup_task_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
+        let Some(scope) = self.capture_worker_scope() else {
+            self.addon_backup_status = None;
+            return false;
+        };
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
         self.addon_backup_worker = Some(std::thread::spawn(move || {
             let result =
                 addon_backup::backup_addon_with_origin(&backup_root, &addon_path, Some(&origin))
                     .map(|record| AddonBackupTaskResult {
+                        space_id: space_id.clone(),
+                        generation,
                         repo_index,
                         action: AddonBackupTaskAction::Backup,
                         addon_name: record.addon_name,
@@ -398,6 +407,8 @@ impl Foxy {
                         trigger_recheck: false,
                     })
                     .unwrap_or_else(|err| AddonBackupTaskResult {
+                        space_id,
+                        generation,
                         repo_index,
                         action: AddonBackupTaskAction::Backup,
                         addon_name: addon_name_owned,
@@ -416,7 +427,13 @@ impl Foxy {
 
     pub(in crate::ui::app) fn poll_addon_backup_results(&mut self) {
         self.poll_backup_cleanup_results();
+        if self.client_worker_handoff_active {
+            return;
+        }
         while let Ok(result) = self.addon_backup_task_rx.try_recv() {
+            if !self.scoped_result_applies(&result.space_id, result.generation) {
+                continue;
+            }
             self.addon_backup_status = None;
             if let Some(ref handle) = self.addon_backup_worker
                 && handle.is_finished()

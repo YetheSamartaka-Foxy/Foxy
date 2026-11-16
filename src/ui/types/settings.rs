@@ -4,6 +4,7 @@ use super::enums::{
 };
 use super::repository::{ActiveUpdateSession, UpdateSummaryNotice};
 use super::scheduling::ScheduledJob;
+use crate::core::app_mode::AppMode;
 use crate::ui::fonts::FontSizes;
 use crate::ui::palette::PaletteColors;
 use crate::ui::theme::Theme;
@@ -24,6 +25,8 @@ pub struct Ts3PluginStatusRecord {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct SettingsViewState {
+    #[serde(default)]
+    pub app_mode: AppMode,
     pub debug_mode: bool,
     pub show_debug_windows: bool,
     #[serde(default)]
@@ -115,16 +118,13 @@ pub struct SettingsViewState {
     pub backup_directory: String,
     #[serde(default = "default_download_speed_limit_mbps")]
     pub download_speed_limit_mbps: Option<u32>,
-    /// Most of the whole computer's processor time Foxy's work may use, in
-    /// percent; `None` is no limit. Missing from older settings files, where
-    /// it takes the default.
+    /// Maximum share of total CPU time Foxy's work may use; `None` means unlimited and older settings use the default.
     #[serde(default = "default_cpu_usage_limit_percent")]
     pub cpu_usage_limit_percent: Option<u8>,
-    /// Processor threads hashing, scanning and checking plan around; `None`
-    /// is Auto, every processor the system reports.
+    /// Worker-thread limit for hashing, scanning, and checking; `None` uses all reported processors.
     #[serde(default)]
     pub cpu_thread_limit: Option<u32>,
-    /// Keep `cpu_thread_limit` within the processors the system reports.
+    /// Clamp `cpu_thread_limit` to the processors reported by the system.
     #[serde(default = "default_cpu_thread_limit_safe")]
     pub cpu_thread_limit_safe: bool,
     #[serde(default)]
@@ -155,8 +155,7 @@ pub struct SettingsViewState {
     pub proxy_bypass: String,
     #[serde(default)]
     pub hash_io_profile: HashIoProfilePreference,
-    /// After a database reset, restore files the verified-hash record proves
-    /// unchanged instead of reading them again. An integrity recheck always reads.
+    /// After reset, reuse files proven unchanged by verified hashes; integrity rechecks always read them.
     #[serde(default = "default_trust_verified_hashes")]
     pub trust_verified_hashes: bool,
     #[serde(default)]
@@ -173,12 +172,10 @@ pub struct SettingsViewState {
     pub cleanup_folders: Vec<(String, bool)>,
     #[serde(default)]
     pub font_sizes: FontSizes,
-    /// Global UI scale as a percentage applied to the egui zoom factor.
-    /// 100 means the platform's native scale; range is clamped to 5..=500.
+    /// UI scale percent relative to native platform scale, clamped to `5..=500`.
     #[serde(default = "default_ui_scale_percent")]
     pub ui_scale_percent: u16,
-    /// Pending UI scale edited by the slider; applied to `ui_scale_percent`
-    /// only when the user clicks Apply. Not persisted.
+    /// Apply a pending scale only after the user clicks Apply; do not persist the draft.
     #[serde(skip)]
     pub ui_scale_percent_draft: u16,
     #[serde(default)]
@@ -238,13 +235,10 @@ pub struct SettingsViewState {
     /// Whether the Swifty migration wizard has been offered to the user.
     #[serde(default)]
     pub swifty_migration_offered: bool,
-    /// Fingerprint of the storage-check findings the user chose not to see
-    /// again. The startup notice stays hidden only while the findings match
-    /// exactly; a new path, drive or filesystem raises it again.
+    /// Hide the notice only while findings match exactly; changed paths, drives, or filesystems raise it again.
     #[serde(default)]
     pub storage_notice_acknowledged: String,
-    /// User-defined scheduled jobs (Settings -> Scheduling). Each runs an opt-in
-    /// recheck/download pipeline and optional post-action while Foxy is open.
+    /// Scheduled jobs run opt-in recheck/download pipelines and optional post-actions only while Foxy is open.
     #[serde(default)]
     pub scheduled_jobs: Vec<ScheduledJob>,
     #[serde(skip)]
@@ -357,6 +351,7 @@ fn default_app_update_github_repo() -> String {
 impl Default for SettingsViewState {
     fn default() -> Self {
         Self {
+            app_mode: AppMode::Client,
             debug_mode: false,
             show_debug_windows: false,
             show_activity_log: false,
@@ -456,10 +451,7 @@ impl Default for SettingsViewState {
 }
 
 impl SettingsViewState {
-    /// Benchmarks need the detailed log, so enabling them also enables
-    /// extended diagnostics unless the user already had them on; disabling
-    /// benchmarks only reverts what this coupling switched on. Returns
-    /// whether `extended_diagnostics_logging` changed.
+    /// Enabling benchmarks enables extended diagnostics only if needed; disabling reverses only that coupling.
     pub fn set_benchmarks_enabled(&mut self, enabled: bool) -> bool {
         self.benchmarks_enabled = enabled;
         if enabled {
@@ -478,9 +470,7 @@ impl SettingsViewState {
         }
     }
 
-    /// An explicit choice of the user; the benchmarks coupling no longer
-    /// owns the diagnostics switch afterwards. Diagnostics cannot be turned
-    /// off while benchmarks are enabled; returns whether the value applied.
+    /// An explicit user choice releases the benchmark coupling; diagnostics cannot be disabled while benchmarks are enabled.
     pub fn set_extended_diagnostics_logging(&mut self, enabled: bool) -> bool {
         if !enabled && self.benchmarks_enabled {
             return false;
@@ -650,5 +640,40 @@ mod resource_setting_tests {
         assert_eq!(settings.progress_frame_rate, None);
         assert_eq!(settings.proxy_mode, ProxyMode::System);
         assert!(settings.proxy_url.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod app_mode_tests {
+    use super::{AppMode, SettingsViewState};
+
+    #[test]
+    fn old_settings_keep_client_mode() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        saved.as_object_mut().unwrap().remove("app_mode");
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.app_mode, AppMode::Client);
+    }
+
+    #[test]
+    fn app_mode_round_trips_without_changing_the_update_source() {
+        for mode in [AppMode::Client, AppMode::Server] {
+            let settings = SettingsViewState {
+                app_mode: mode,
+                ..Default::default()
+            };
+            let saved = serde_json::to_value(&settings).unwrap();
+            let restored: SettingsViewState = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored.app_mode, mode);
+            assert_eq!(restored.app_update_mode, settings.app_update_mode);
+            assert_eq!(
+                settings.app_mode.effective(Some(AppMode::Client)),
+                AppMode::Client
+            );
+            assert_eq!(
+                serde_json::to_value(settings).unwrap()["app_mode"],
+                serde_json::to_value(mode).unwrap()
+            );
+        }
     }
 }

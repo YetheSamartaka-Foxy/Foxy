@@ -6,12 +6,7 @@ use crate::core::api;
 use crate::core::utils::speed_of_light::{SolLight, sol_line};
 use crate::ui::app::Foxy;
 
-/// One launch's startup timeline, from process start to the last repository's
-/// sync verdict (`conventions/SPEED_OF_LIGHT.md` O8).
-///
-/// It drives two things: the `startup-sync` agent-driver busy reason, which is
-/// how the test kit brackets a startup measurement, and the single
-/// `SOL op=startup` line that carries the whole timeline.
+/// Track startup through the final repository verdict for the `startup-sync` busy reason and O8 `SOL op=startup` record.
 pub(crate) struct StartupSyncTracker {
     dispatched_at: Instant,
     to_first_frame: Duration,
@@ -58,8 +53,7 @@ fn startup_dependency_bound(
 }
 
 impl Foxy {
-    /// Start the O8 timeline. Called once, on the frame that dispatches startup
-    /// background work (which is the frame after first paint).
+    /// Start O8 timing on the frame that dispatches startup work, after first paint.
     pub(in crate::ui::app) fn begin_startup_sync_tracking(&mut self, to_first_frame: Duration) {
         let repositories = self.repository_view_state.repositories.len();
         self.startup_sync = Some(StartupSyncTracker::new(repositories, to_first_frame));
@@ -87,12 +81,7 @@ impl Foxy {
         }
     }
 
-    /// True until every repository has a startup verdict. Surfaced as the
-    /// `startup-sync` busy reason, which is how the test kit brackets O8.
-    ///
-    /// Startup work is dispatched on the frame *after* first paint, so an agent
-    /// that connects as soon as the first frame renders would otherwise see an
-    /// idle app and measure nothing. Treat the gap as busy.
+    /// Keep the app busy between first paint and startup-work dispatch so an early harness connection cannot measure an idle app.
     pub(in crate::ui::app) fn startup_sync_in_progress(&self) -> bool {
         if self.database_updates_blocked() {
             return false;
@@ -105,8 +94,7 @@ impl Foxy {
             .is_some_and(|tracker| !tracker.settled)
     }
 
-    /// Every startup-scoped background job has finished. Also the gate for
-    /// opportunistic idle work, so nothing competes with sync for the disk.
+    /// Wait for startup jobs to finish before scheduling opportunistic idle work, so it cannot compete with sync for disk.
     pub(in crate::ui::app) fn startup_sync_settled(&self) -> bool {
         self.startup_quick_scan_filter_worker.is_none()
             && self.startup_quick_scan_filter_rx.is_none()
@@ -118,7 +106,6 @@ impl Foxy {
             && self.syncing_repository.is_none()
     }
 
-    /// Drain the background startup system summary once it lands.
     pub(in crate::ui::app) fn poll_startup_diagnostics(&mut self) {
         let Some(rx) = self.startup_diagnostics_rx.as_ref() else {
             return;
@@ -142,7 +129,6 @@ impl Foxy {
         }
     }
 
-    /// Emit `SOL op=startup` once every repository has a verdict.
     pub(in crate::ui::app) fn maybe_emit_startup_sol(&mut self) {
         if !self.startup_sync_in_progress() || !self.startup_sync_settled() {
             return;

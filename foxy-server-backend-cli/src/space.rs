@@ -1,24 +1,5 @@
-//! `create-space`: generate every repository of a repository space and the
-//! `repository_space.json` that links them in one pass.
-//!
-//! The space config points at the ordinary per-repository config files that
-//! `create` consumes, so a space is a thin layer over the existing generator.
-//! The layouts differ only in where mod folders live on disk:
-//!
-//! - `copy`: every repository gets its own copy of every mod (what running
-//!   `create` per repository produces).
-//! - `pool`: each distinct mod is copied once into a shared pool folder and
-//!   each repository holds a relative symlink to it. Repositories of one space
-//!   share a single download folder on the client, so a mod name maps to one
-//!   content anyway; the pool just mirrors that on the server.
-//! - `link`: each repository holds a symlink straight to the source folder and
-//!   nothing is copied. The per-mod manifests are then written into the source
-//!   folders, and any later change there silently invalidates the published
-//!   checksums.
-//!
-//! In every layout the same mod name must hash identically across the
-//! repositories that list it; otherwise clients would fight over the shared
-//! folder, so the generator refuses.
+//! Clients share one folder per mod name, so all repositories must publish identical content for that name.
+//! Link layout writes manifests into sources; later source changes invalidate published checksums.
 
 use anyhow::{Context, Result, bail};
 use indicatif::ProgressBar;
@@ -41,16 +22,11 @@ pub const SPACE_MANIFEST: &str = "repository_space.json";
 const DEFAULT_POOL_DIR: &str = "pool";
 const DEFAULT_KEYS_DIR: &str = "keys";
 
-// ---------------------------------------------------------------------------
-// Input config
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 pub struct SpaceConfig {
     #[serde(alias = "spaceName")]
     pub name: String,
-    /// Public URL the repository folders are served under; each repository
-    /// without an explicit `address` gets `<baseUrl>/<folder>/`.
+
     #[serde(rename = "baseUrl", default)]
     pub base_url: String,
     #[serde(rename = "appUpdateUrl", default)]
@@ -65,15 +41,14 @@ pub struct SpaceConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct SpaceRepoRef {
-    /// Repository config JSON (the `create` input), relative to the space config file.
     pub config: String,
-    /// Output subfolder under the space output directory; defaults to the config file stem.
+
     #[serde(default)]
     pub folder: Option<String>,
-    /// Display name in `repository_space.json`; defaults to the repository's `repoName`.
+
     #[serde(default)]
     pub name: Option<String>,
-    /// Public URL of the repository; defaults to `<baseUrl>/<folder>/`.
+
     #[serde(default)]
     pub address: Option<String>,
     #[serde(default = "default_true")]
@@ -84,7 +59,6 @@ fn default_true() -> bool {
     true
 }
 
-/// One repository of the space with its config and resolved mods loaded.
 #[derive(Debug)]
 pub struct SpaceRepo {
     pub folder: String,
@@ -101,15 +75,12 @@ pub struct SpaceRepo {
 #[derive(Debug)]
 pub struct LoadedSpace {
     pub config: SpaceConfig,
-    /// Directory of the space config file; image paths resolve from here.
+
     pub config_dir: PathBuf,
     pub repos: Vec<SpaceRepo>,
 }
 
-/// Read the space config and load every referenced repository config.
-///
-/// Repository config paths resolve from the space config's directory; their
-/// `basePath` keeps the `create` semantics (relative to the working directory).
+/// Repository config paths are relative to the space config; basePath remains relative to the working directory.
 pub fn load_space_config(path: &Path) -> Result<LoadedSpace> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read space config: {}", path.display()))?;
@@ -218,7 +189,6 @@ fn default_folder_name(config_path: &Path) -> Result<String> {
         })
 }
 
-/// A repository folder is one path component under the space output.
 pub fn validate_folder_name(folder: &str) -> Result<()> {
     let component_count = Path::new(folder).components().count();
     let single_normal = matches!(
@@ -239,8 +209,6 @@ pub fn validate_folder_name(folder: &str) -> Result<()> {
     Ok(())
 }
 
-/// Trim and add the trailing slash Foxy expects on repository URLs; `None`
-/// when the value is blank.
 pub fn normalize_url(url: &str) -> Option<String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -263,18 +231,12 @@ fn ensure_unique(values: impl Iterator<Item = String>, what: &str) -> Result<()>
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Shared mods
-// ---------------------------------------------------------------------------
-
-/// One published mod name and every `(repo index, mod index)` slot that lists it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SharedMod {
     pub name: String,
     pub uses: Vec<(usize, usize)>,
 }
 
-/// Group every mod of the space by published name, in first-seen order.
 pub fn group_shared_mods(repos: &[SpaceRepo]) -> Vec<SharedMod> {
     group_by_name(repos.iter().enumerate().flat_map(|(r, repo)| {
         repo.mods
@@ -338,7 +300,6 @@ fn ensure_shared_chunking(repos: &[SpaceRepo], groups: &[SharedMod]) -> Result<(
     Ok(())
 }
 
-/// Every use of a shared name must hash identically to its first use.
 fn ensure_shared_mods_match<'a>(
     groups: &[SharedMod],
     slot: impl Fn(usize, usize) -> (&'a Checksums, &'a Path),
@@ -375,7 +336,6 @@ fn identity(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The mods a pool build copies: each shared name taken from its first use.
 fn pool_mods(space: &LoadedSpace, groups: &[SharedMod]) -> Vec<ResolvedMod> {
     groups
         .iter()
@@ -386,12 +346,6 @@ fn pool_mods(space: &LoadedSpace, groups: &[SharedMod]) -> Vec<ResolvedMod> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Symlinks
-// ---------------------------------------------------------------------------
-
-/// Path from the directory holding `link` to `target`, so the output tree can
-/// be moved as a whole; the absolute target when the two share no root.
 pub fn symlink_target(link: &Path, target: &Path) -> PathBuf {
     let Some(link_dir) = link.parent() else {
         return target.to_path_buf();
@@ -400,8 +354,6 @@ pub fn symlink_target(link: &Path, target: &Path) -> PathBuf {
         .unwrap_or_else(|| std::path::absolute(target).unwrap_or_else(|_| target.to_path_buf()))
 }
 
-/// Relative path from `from_dir` to `to`; `None` when they share no prefix
-/// (different drives) or either path is not absolute.
 pub fn relative_path(from_dir: &Path, to: &Path) -> Option<PathBuf> {
     if !from_dir.is_absolute() || !to.is_absolute() {
         return None;
@@ -429,8 +381,6 @@ pub fn relative_path(from_dir: &Path, to: &Path) -> Option<PathBuf> {
     Some(result)
 }
 
-/// Point `link` at `target`, replacing an existing symlink but never a real
-/// file or directory.
 pub fn replace_with_symlink(link: &Path, target: &Path) -> Result<()> {
     match std::fs::symlink_metadata(link) {
         Ok(meta) if meta.file_type().is_symlink() => remove_symlink(link)
@@ -482,10 +432,6 @@ fn symlink_hint() -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Output manifest
-// ---------------------------------------------------------------------------
-
 #[derive(Serialize)]
 struct RepositorySpaceJson<'a> {
     name: &'a str,
@@ -495,7 +441,7 @@ struct RepositorySpaceJson<'a> {
     icon: &'a str,
     #[serde(rename = "iconChecksum")]
     icon_checksum: String,
-    /// Change marker for clients; older clients ignore unknown fields.
+
     #[serde(rename = "spaceChecksum")]
     space_checksum: String,
     #[serde(rename = "appUpdateUrl", skip_serializing_if = "Option::is_none")]
@@ -503,8 +449,7 @@ struct RepositorySpaceJson<'a> {
     entries: Vec<RepositorySpaceEntryJson<'a>>,
 }
 
-/// Entry shape read by the desktop app; `Requiered` is the legacy key it
-/// expects.
+/// `Requiered` preserves the legacy key expected by the desktop client.
 #[derive(Serialize)]
 struct RepositorySpaceEntryJson<'a> {
     #[serde(rename = "Name")]
@@ -515,11 +460,8 @@ struct RepositorySpaceEntryJson<'a> {
     required: bool,
 }
 
-/// SHA-1 (lowercase hex) of the compact JSON array
-/// `[name, imageChecksum, iconChecksum, [[Name, Address, Requiered], ...]]`,
-/// entries in published order. The desktop app computes the same value
-/// (`repository_space_manifest_checksum`) to tell whether a space changed, so
-/// both sides pin the same test vector.
+/// Hash the compact JSON array [name, imageChecksum, iconChecksum, [[Name, Address, Requiered], ...]] in published order.
+/// The desktop client's repository_space_manifest_checksum must use the same SHA-1 contract.
 fn space_manifest_checksum(
     name: &str,
     image_checksum: &str,
@@ -573,14 +515,9 @@ fn write_space_manifest(
     Ok(path)
 }
 
-// ---------------------------------------------------------------------------
-// Layouts
-// ---------------------------------------------------------------------------
-
 struct LayoutResult {
-    /// Per repository, its mods in config order carrying that repository's flags.
     repo_mods: Vec<Vec<ProcessedMod>>,
-    /// Generated key files to feed `--collect-keys`.
+
     key_sources: Vec<PathBuf>,
     copied_bytes: u64,
 }
@@ -604,7 +541,6 @@ impl LayoutContext<'_> {
         &self.space.repos[repo_index].mods[mod_index]
     }
 
-    /// Fill each repository's mod list from a per-group processed mod.
     fn assign_from_groups(
         &self,
         per_group: impl Fn(usize, usize, usize) -> ProcessedMod,
@@ -763,8 +699,6 @@ fn build_pool(ctx: &LayoutContext<'_>, pool_dir: &Path) -> Result<LayoutResult> 
 }
 
 fn build_link(ctx: &LayoutContext<'_>) -> Result<LayoutResult> {
-    // Hash each distinct source folder once, even when several repositories
-    // link to it.
     let mut distinct: Vec<ResolvedMod> = Vec::new();
     let mut distinct_ids: Vec<(String, PathBuf)> = Vec::new();
     let mut slot_to_distinct: BTreeMap<(usize, usize), usize> = BTreeMap::new();
@@ -824,10 +758,6 @@ fn build_link(ctx: &LayoutContext<'_>) -> Result<LayoutResult> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Command
-// ---------------------------------------------------------------------------
-
 pub struct CreateSpaceOptions<'a> {
     pub layout: SpaceLayout,
     pub pool_dir: Option<PathBuf>,
@@ -844,7 +774,7 @@ pub struct CreateSpaceOptions<'a> {
     pub no_progress: bool,
     pub mod_line: mod_line::ModLineOptions<'a>,
     pub keys: KeyCollectionRequest,
-    /// Write `<repo>/keys` with each repository's own keys next to its manifests.
+
     pub per_repo_keys: bool,
 }
 
@@ -1353,8 +1283,6 @@ fn mb(bytes: u64) -> f64 {
     bytes as f64 / 1024.0 / 1024.0
 }
 
-/// A repository folder may not collide with the pool or keys folder when
-/// those live directly under the space output.
 fn ensure_folders_free(space: &LoadedSpace, output_dir: &Path, reserved: &[&Path]) -> Result<()> {
     let output_id = identity(output_dir);
     for dir in reserved {
@@ -1381,7 +1309,6 @@ fn ensure_folders_free(space: &LoadedSpace, output_dir: &Path, reserved: &[&Path
     Ok(())
 }
 
-/// `--per-repo-keys` writes `<repo>/keys`, which must not be a mod folder of that repository.
 fn ensure_repo_keys_dir_free<'a>(
     repos: impl Iterator<Item = (&'a str, &'a [ResolvedMod])>,
 ) -> Result<()> {

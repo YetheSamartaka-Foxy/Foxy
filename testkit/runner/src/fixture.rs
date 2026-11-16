@@ -57,8 +57,7 @@ fn generated(case: &Value) -> Result<Value> {
         .into_iter()
         .collect();
     let mut settings = json!({"auto_recheck_on_launch":false,"auto_quick_scan_on_launch":false,"swifty_migration_offered":true});
-    // `settings` overrides land in the generated settings file, so a case can
-    // pin a bandwidth cap or a hash profile without a hand-written fixture.
+
     if let Some(overrides) = case["settings"].as_object() {
         for (key, value) in overrides {
             settings[key] = value.clone();
@@ -70,8 +69,6 @@ fn generated(case: &Value) -> Result<Value> {
     }}))
 }
 
-/// One `repositories.json` entry for a `{name,address,path,space_id}` source,
-/// with the repository's published addons enabled.
 fn generated_repository(source: &Value) -> Result<Value> {
     let address = format!(
         "{}/",
@@ -128,8 +125,6 @@ fn generated_repository(source: &Value) -> Result<Value> {
         "no_logs",
         "include_steam_addons",
     ] {
-        // A case may switch a launch behaviour on for one repository (a
-        // startup probe lane needs `auto_quick_scan_on_launch`).
         repository[field] = json!(source[field].as_bool().unwrap_or(false));
     }
     for field in [
@@ -161,17 +156,10 @@ fn generated_repository(source: &Value) -> Result<Value> {
     Ok(repository)
 }
 
-/// Process-owned state that belongs to whichever app instance is running, not
-/// to the profile being measured. Copying it would hand the run a stale
-/// database claim or another session's logs.
+/// Do not copy process-owned claims or logs into a measured profile; they belong to the running app instance.
 const SEED_EXCLUDED: &[&str] = &["database.lock", "database.owner", "logs", "backups"];
 
-/// Copy a real Foxy configuration directory into the isolated config directory
-/// so a case can measure an already-populated profile (a warm database, real
-/// repositories, real spaces) instead of bootstrapping one.
-///
-/// The source is only read. `guards.require_no_other_foxy` is what keeps the
-/// copy from being torn by a live app writing into it.
+/// Read source configs only while guards exclude live Foxy writers, so the copied profile cannot be torn.
 pub fn seed(source: &Path, config: &Path) -> Result<u64> {
     ensure!(
         source.is_dir(),
@@ -202,9 +190,7 @@ pub fn install(case: &Value, config: &Path, run: &Path) -> Result<()> {
     let seeded = case.get("config_seed").and_then(Value::as_str).is_some();
     let fixture = match case.get("fixture").filter(|v| v["files"].is_object()) {
         Some(value) => value.clone(),
-        // A seeded config directory already carries the profile; generating a
-        // flat legacy fixture over it would trigger the game-space migration
-        // and replace the very state the case is measuring.
+        // Do not overlay seeded configs with legacy fixtures: migration would replace the measured profile.
         None if seeded => return Ok(()),
         None => {
             create_run_folders(case, run)?;
@@ -266,9 +252,6 @@ pub fn install_config_files(case: &Value, config: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Creates the generated repository and space folders that live inside the run
-/// directory, empty, as a person picks a fresh folder: a missing folder makes
-/// the app's first check stop at its moved-folder guard.
 fn create_run_folders(case: &Value, run: &Path) -> Result<()> {
     let extra_paths = case["extra_repositories"]
         .as_array()

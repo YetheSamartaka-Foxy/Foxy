@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Builds an experimental local macOS Apple Silicon dmg for Foxy.
-# Requirements:
-#   - macOS with a Rust toolchain that can build aarch64-apple-darwin
-#   - hdiutil, provided by macOS
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

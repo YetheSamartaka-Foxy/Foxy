@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "bindings_fingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+  "bindings": {
+    "schema_version": 1,
+    "game_space_id": "arma3",
+    "game_id": "arma3",
+    "instance_id": "server_00000000000000000000000000000001",
+    "generation": 2,
+    "instance_revision": 1,
+    "catalog_revision": 1,
+    "catalog_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+    "content_sources_fingerprint": "3333333333333333333333333333333333333333333333333333333333333333",
+    "bindings": [
+      {
+        "binding": { "source_id": "RepoAlpha", "role": "required", "order": 1 },
+        "profile": {
+          "name": "RepoAlpha",
+          "remote_url": "https://repo.example.invalid:8080/repo/",
+          "local_path": "R:/Mods/RepoAlpha",
+          "folder_id": "RepoAlpha",
+          "supply": "download",
+          "addons": ["@mod_01"]
+        },
+        "folder": { "id": "RepoAlpha", "path": "R:/Sources/RepoAlpha" }
+      }
+    ]
+  },
+  "sources": [
+    {
+      "profile_name": "RepoAlpha",
+      "source": "R:/Mods/RepoAlpha/@mod_01",
+      "destination": "addons/@mod_01"
+    }
+  ],
+  "acquisitions": [
+    {
+      "profile_name": "RepoAlpha",
+      "repository_url": "https://repo.example.invalid:8080/repo/",
+      "repository_local_path": "R:/Mods/RepoAlpha",
+      "publication_checksum": "4444444444444444444444444444444444444444444444444444444444444444",
+      "addons": [
+        {
+          "name": "@mod_01",
+          "checksum": "5555555555555555555555555555555555555555555555555555555555555555"
+        }
+      ]
+    }
+  ],
+  "entries": [
+    { "path": "addons", "kind": "directory", "bytes": 0, "blake3": null },
+    { "path": "addons/@mod_01", "kind": "directory", "bytes": 0, "blake3": null },
+    {
+      "path": "addons/@mod_01/example.pbo",
+      "kind": "file",
+      "bytes": 4096,
+      "blake3": "6666666666666666666666666666666666666666666666666666666666666666"
+    }
+  ],
+  "total_bytes": 4096
+}

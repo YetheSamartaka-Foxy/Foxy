@@ -313,6 +313,18 @@ pub fn run_command(cli: &CliArgs, command: CliCommand) -> Result<CommandSuccess,
             }),
             exit_code: exit_codes::SUCCESS,
         }),
+        CliCommand::ContentAcquisitionWorker => {
+            ensure_backend_ready();
+            crate::core::server::content_acquisition::worker::run().map_err(|error| {
+                CommandError::operation("content-acquisition-worker", error.to_string())
+            })?;
+            Ok(CommandSuccess {
+                action: "content-acquisition-worker".into(),
+                message: "Acquisition worker finished".into(),
+                data: json!({}),
+                exit_code: exit_codes::SUCCESS,
+            })
+        }
         CliCommand::AgentGui { command } => run_agent_gui_command(cli, command),
         CliCommand::Settings { command } => run_settings_command(cli, *command),
         CliCommand::Repo { command } => run_repo_command(cli, command),
@@ -520,9 +532,7 @@ fn run_repository_sync(
     ensure_backend_ready();
     let (tx, mut rx) = broadcast::channel(512);
     let (_pause_tx, pause_rx) = watch::channel(false);
-    // The sender has to outlive the worker: the pipeline treats a closed cancel
-    // channel as a cancellation, so a temporary sender here races the database
-    // open and intermittently fails the sync with "Cancelled".
+    // Keep the sender alive: a closed cancellation channel cancels the worker before database initialization.
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let options = api::RepositorySyncOptions {
         operation_id: api::next_operation_id("cli-sync"),

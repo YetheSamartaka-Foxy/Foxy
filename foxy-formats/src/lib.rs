@@ -96,9 +96,7 @@ pub trait ContentFormat: Send + Sync {
     fn remote_layout_matches(&self, part_paths: &[&str]) -> bool;
     fn parse_parts(&self, path: &Path) -> FormatResult<Vec<FilePart>>;
     fn parse_local_layout(&self, path: &Path) -> FormatResult<LocalLayout>;
-    /// [`ContentFormat::parse_local_layout`] over an open file of `file_len`
-    /// bytes. The reader may start anywhere and is left wherever the parse
-    /// finished.
+    /// Parses an open file of `file_len` bytes; the initial reader position is arbitrary and the final position unspecified.
     fn parse_local_layout_from(
         &self,
         reader: &mut dyn BufReadSeek,

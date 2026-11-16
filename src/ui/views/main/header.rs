@@ -22,8 +22,8 @@ impl Foxy {
         ui.horizontal(|ui| {
             let title = "Foxy";
             if let Some(icon) = &self.app_icon {
-                // In RTL mode, swap leading/trailing padding so the logo starts
-                // from the right edge and the title trails toward the left.
+
+
                 let (logo_leading, title_trailing) = if is_rtl() {
                     (TITLE_PADDING_FAR, LOGO_PADDING_NEAR)
                 } else {

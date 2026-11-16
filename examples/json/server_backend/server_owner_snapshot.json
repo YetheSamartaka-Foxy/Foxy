@@ -1,0 +1,17 @@
+{
+  "scope": {
+    "context_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "space_id": "arma3",
+    "instance_id": "space_catalog",
+    "owner_id": "owner_example",
+    "generation": 7
+  },
+  "game_id": "arma3",
+  "database_claimed": true,
+  "database_opened": false,
+  "metadata_permit": false,
+  "lifecycle_available": true,
+  "lifetime": "parent_bound",
+  "launch_id": "launch_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "active_sessions": 0
+}

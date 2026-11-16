@@ -314,9 +314,7 @@ pub(crate) async fn try_patch_first(
         );
     }
 
-    // Insert-op downloads run in parallel: non-overlapping blob offsets allow
-    // concurrent random-access writes, and the request budget is the same
-    // global range budget full downloads draw from.
+    // Non-overlapping blob ranges can run concurrently under the shared download-request budget.
     if let Err(err) = download_patch_blob_ranges_parallel(
         context.clone(),
         &artifact,
@@ -408,7 +406,7 @@ pub(crate) async fn try_patch_first(
         Ok(result) => result,
         Err(err) => {
             let cancelled_for_apply = *cancel_probe.borrow();
-            // Clean up the orphaned .foxy.tmp file before falling back
+
             if let Err(cleanup_err) = fs::remove_file(&tmp_path_for_cleanup).await
                 && cleanup_err.kind() != std::io::ErrorKind::NotFound
             {
@@ -459,8 +457,7 @@ pub(crate) async fn try_patch_first(
     patch_telemetry.promote_finished();
 
     let target_path = PathBuf::from(&artifact.local_target_path);
-    // Compute tree checksum from segment checksums collected during apply -
-    // avoids re-reading the entire output file from disk.
+    // Use apply-time segment checksums to avoid rereading the output file.
     let plan_segment_checksums = segment_checksums_with_empty_ops(&plan_ops, &segment_checksums);
     let final_tree_checksum =
         compute_tree_checksum_from_segment_checksums(plan_segment_checksums.iter().copied());
@@ -496,9 +493,7 @@ pub(crate) async fn try_patch_first(
                 );
             }
         }
-        // Clean up the .foxy.tmp file (it was already renamed to target, so
-        // it exists as the target now; after restore, the temp is gone).
-        // But ensure we also remove any lingering .foxy.tmp:
+
         let _ = fs::remove_file(&tmp_path_for_cleanup).await;
         mark_patch_fallback(
             context,
@@ -530,9 +525,7 @@ pub(crate) async fn try_patch_first(
         );
     }
 
-    // Fingerprint the promoted file now, while its bytes are still in the page
-    // cache; the post-download content-hash refresh reuses it instead of
-    // sampling a cold disk.
+    // Fingerprint while output remains cached so content refresh avoids a cold read.
     let promoted_path = artifact.local_target_path.clone();
     let content_hash = tokio::task::spawn_blocking(move || fast_file_content_hash(&promoted_path))
         .await

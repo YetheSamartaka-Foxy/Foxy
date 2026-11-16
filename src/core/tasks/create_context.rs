@@ -6,7 +6,31 @@ use crate::core::tasks::create_web_client::create_web_client;
 use crate::core::tasks::init_database::init_database;
 use log::debug;
 
-/// Create FoxyContext with shared data: available database connection and reqwest client
+static BACKGROUND_CONTEXT: tokio::sync::Mutex<Option<Arc<FoxyContext>>> =
+    tokio::sync::Mutex::const_new(None);
+
+pub(crate) fn invalidate_shared_background_context(
+    database: &crate::core::db::DbHandle,
+) -> Result<(), String> {
+    let mut slot = BACKGROUND_CONTEXT.try_lock().map_err(|_| {
+        "Background database context is still being prepared; retry when it finishes".to_string()
+    })?;
+    invalidate_cached_context(&mut slot, database);
+    Ok(())
+}
+
+fn invalidate_cached_context(
+    slot: &mut Option<Arc<FoxyContext>>,
+    database: &crate::core::db::DbHandle,
+) {
+    if slot
+        .as_ref()
+        .is_some_and(|context| Arc::ptr_eq(&context.database, database))
+    {
+        slot.take();
+    }
+}
+
 pub(crate) async fn create_context() -> Arc<FoxyContext> {
     debug!("Creating core context");
     let database = init_database().await;
@@ -15,15 +39,9 @@ pub(crate) async fn create_context() -> Arc<FoxyContext> {
     Arc::new(FoxyContext::new(database, client))
 }
 
-/// Process-wide base context for workers on the shared background runtime.
-/// Rebuilt when the active game space's database handle changes so cached
-/// contexts never outlive a runtime game-space switch.
 pub(crate) async fn shared_background_context() -> Arc<FoxyContext> {
-    static CONTEXT: tokio::sync::Mutex<Option<Arc<FoxyContext>>> =
-        tokio::sync::Mutex::const_new(None);
-
     let database = init_database().await;
-    let mut slot = CONTEXT.lock().await;
+    let mut slot = BACKGROUND_CONTEXT.lock().await;
     if let Some(context) = slot.as_ref()
         && Arc::ptr_eq(&context.database, &database)
     {
@@ -51,4 +69,51 @@ pub(crate) async fn create_context_with_recheck_level(
         recheck_level
     );
     Arc::new(context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalidating_the_cache_releases_only_its_own_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("database.db");
+        let database = Arc::new(
+            crate::core::tasks::db_turso::build_and_bootstrap(path.to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let running = Arc::new(FoxyContext::new(database.clone(), reqwest::Client::new()));
+        let mut cache = Some(running.clone());
+        invalidate_cached_context(&mut cache, &database);
+        assert!(cache.is_none());
+        assert_eq!(Arc::strong_count(&running), 1);
+        assert!(Arc::strong_count(&database) > 1);
+        drop(running);
+        assert_eq!(Arc::strong_count(&database), 1);
+    }
+
+    #[tokio::test]
+    async fn invalidating_another_database_preserves_the_cached_context() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.db");
+        let second = root.path().join("second.db");
+        let database = Arc::new(
+            crate::core::tasks::db_turso::build_and_bootstrap(first.to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let other = Arc::new(
+            crate::core::tasks::db_turso::build_and_bootstrap(second.to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let mut cache = Some(Arc::new(FoxyContext::new(
+            database.clone(),
+            reqwest::Client::new(),
+        )));
+        invalidate_cached_context(&mut cache, &other);
+        assert!(Arc::ptr_eq(&cache.as_ref().unwrap().database, &database));
+    }
 }

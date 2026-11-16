@@ -158,8 +158,7 @@ pub(crate) fn plan_file_patch(
     let mut insert_ops = 0usize;
 
     for new_part in &new_parts_sorted {
-        // An empty PBO entry moves no bytes but keeps its place in the file's
-        // checksum rollup, so it stays in the plan as an op nothing transfers.
+        // Preserve zero-length entries in checksum rollups even though they transfer no bytes.
         if new_part.remote_length == 0 {
             operations.push(PatchOperationArtifact {
                 data_order: new_part.data_order,
@@ -251,7 +250,7 @@ pub(crate) fn plan_file_patch(
             planned_download_bytes =
                 match planned_download_bytes.checked_add(new_part.remote_length) {
                     Some(value) => value,
-                    None => return Ok(None), // overflow - skip delta, fall back to full download
+                    None => return Ok(None),
                 };
             blob_offset = match blob_offset.checked_add(new_part.remote_length) {
                 Some(value) => value,
@@ -460,8 +459,6 @@ pub(super) async fn load_patch_artifact(path: &str) -> anyhow::Result<PatchArtif
 mod tests {
     use super::*;
 
-    // ── validate_plan_coverage ──────────────────────────────────────────
-
     #[test]
     fn validate_plan_coverage_empty_ops_errors() {
         let result = validate_plan_coverage(&[], 100);
@@ -516,7 +513,7 @@ mod tests {
         let ops = vec![PatchOperationArtifact {
             data_order: 0,
             op_type: PatchOpType::CopyLocal.as_str().to_string(),
-            dest_start: 10, // doesn't start at 0
+            dest_start: 10,
             length: 90,
             target_checksum: "A".to_string(),
             source_start: Some(10),
@@ -549,7 +546,7 @@ mod tests {
             PatchOperationArtifact {
                 data_order: 1,
                 op_type: PatchOpType::InsertRemote.as_str().to_string(),
-                dest_start: 60, // gap from 40..60
+                dest_start: 60,
                 length: 40,
                 target_checksum: "B".to_string(),
                 source_start: None,
@@ -568,7 +565,7 @@ mod tests {
             data_order: 0,
             op_type: PatchOpType::CopyLocal.as_str().to_string(),
             dest_start: 0,
-            length: 80, // covers only 80 out of 100
+            length: 80,
             target_checksum: "A".to_string(),
             source_start: Some(0),
             source_checksum: Some("A".to_string()),
@@ -669,8 +666,6 @@ mod tests {
         assert_eq!(ops[2].source_start, Some(10));
     }
 
-    // ── plan_savings_meet_threshold ─────────────────────────────────────
-
     #[test]
     fn plan_savings_zero_full_bytes_returns_false() {
         assert!(!plan_savings_meet_threshold(0, 0));
@@ -688,7 +683,6 @@ mod tests {
 
     #[test]
     fn plan_savings_some_savings_returns_true() {
-        // PATCH_MIN_SAVINGS_PERCENT is 0, so any savings should pass
         assert!(plan_savings_meet_threshold(50, 100));
     }
 
@@ -699,7 +693,6 @@ mod tests {
 
     #[test]
     fn plan_savings_zero_download_returns_true() {
-        // 100% savings
         assert!(plan_savings_meet_threshold(0, 100));
     }
 

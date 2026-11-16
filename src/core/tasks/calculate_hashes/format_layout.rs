@@ -10,9 +10,7 @@ fn expected_remote_end(parts: &[FoxyModFilePart]) -> Option<u64> {
         .max()
 }
 
-/// `game_formats` is the active game's declared container list. A game that
-/// ships one container never needs the file head to name it; only an
-/// undeclared game falls back to marker and magic detection.
+/// Use the active game's declared formats; inspect markers only when the game declares none.
 pub(super) fn remote_parts_format_id(
     file_path: &str,
     parts: &[FoxyModFilePart],

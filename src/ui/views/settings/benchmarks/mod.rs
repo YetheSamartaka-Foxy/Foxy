@@ -1,6 +1,3 @@
-//! Settings tab listing saved benchmarks: search, filters, sort, per-row
-//! actions, expandable detail with charts, and a two-way comparison.
-
 mod charts;
 mod compare;
 mod detail;
@@ -377,8 +374,7 @@ impl Foxy {
         {
             let ui = &mut frame.content_ui;
             ui.set_width(ui.available_width());
-            // Registered before the header widgets so the buttons drawn on
-            // top of it keep priority for their own clicks.
+            // Register the overlay before header widgets so their buttons retain click priority.
             let header_rect = Rect::from_min_size(
                 ui.cursor().min,
                 Vec2::new(ui.available_width(), ROW_HEADER_HEIGHT),

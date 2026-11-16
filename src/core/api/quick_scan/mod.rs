@@ -12,7 +12,6 @@ mod shared_cache;
 mod unexpected_files;
 mod worker;
 
-// Public API (re-exported by api/mod.rs)
 #[cfg(test)]
 pub(crate) use worker::{RemoteFreshness, remote_freshness};
 pub use worker::{
@@ -22,7 +21,6 @@ pub use worker::{
     startup_probe_retry_is_blocked,
 };
 
-// Crate-visible items
 pub(crate) use content_hash::{
     refresh_content_hashes_for_file_ids, refresh_content_hashes_for_repository,
     refresh_content_hashes_for_tree_files,
@@ -35,7 +33,6 @@ pub(crate) use local_path_preflight::{
     summarize_local_path_availability, suspect_local_path_mismatch,
 };
 
-// Items used by sync_pipeline.rs
 pub(super) use pending_updates::{
     apply_download_target_estimates_to_pending_updates,
     apply_patch_plan_estimates_to_pending_updates, collect_repo_download_targets,
@@ -47,7 +44,7 @@ pub(super) use readiness::{
     collect_targeted_init_content_baseline_files, quick_scan_preflight_for_local_check,
     tree_local_checksums_baseline_missing, tree_local_checksums_missing,
 };
-// Re-exported for integration tests (api/tests.rs) only; not referenced by the binary.
+
 #[cfg(test)]
 pub(super) use db_helpers::{
     content_hash_baseline_ready_joined, remote_checksum_state_ready_joined,

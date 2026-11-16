@@ -1,0 +1,11 @@
+[package]
+name = "steamcmd-local"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.191"

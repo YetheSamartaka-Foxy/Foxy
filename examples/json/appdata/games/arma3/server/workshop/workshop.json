@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "game_space_id": "arma3",
+  "generation": 2,
+  "items": [
+    {
+      "item_id": "1000000001",
+      "title": "Synthetic Workshop Item",
+      "consumer_app_id": 107410,
+      "pinned_manifest": "2000000000000000002",
+      "pinned_time_updated": 1700000100,
+      "revisions": [
+        "2000000000000000001",
+        "2000000000000000002"
+      ],
+      "profile": "workshop-1000000001"
+    }
+  ]
+}

@@ -1,7 +1,4 @@
-//! Shared locale-file helpers for the `i18n-checker` and `locale-apply` binaries.
-//!
-//! Locale JSON is edited line-by-line rather than reserialized, so diffs stay
-//! value-only: no key reordering, indentation churn, or CRLF/LF churn.
+//! Edit locale JSON by line to preserve ordering, indentation and newline bytes.
 
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,7 +9,6 @@ use std::{env, fs};
 /// These are CLDR plural categories used by the app's `plural_category` function.
 pub const VALID_PLURAL_SUFFIXES: &[&str] = &[".one", ".few", ".other"];
 
-/// Indentation used for every top-level entry in the locale JSON files.
 pub const ENTRY_INDENT: &str = "    ";
 
 #[derive(Debug)]
@@ -32,7 +28,7 @@ pub fn find_locales_dir() -> Result<PathBuf, String> {
             return Ok(candidate.clone());
         }
     }
-    // Fall back: check CARGO_MANIFEST_DIR (set during `cargo run`).
+
     if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR") {
         let from_manifest = Path::new(&manifest_dir).join("../../src/ui/locales");
         if from_manifest.is_dir() {
@@ -45,7 +41,6 @@ pub fn find_locales_dir() -> Result<PathBuf, String> {
     )
 }
 
-/// Non-English locale files in the directory, sorted by path.
 pub fn translation_files(locales_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(locales_dir).map_err(|e| {
         format!(
@@ -248,9 +243,7 @@ pub fn english_source_key<'a>(
         .find(|base| en.contains_key(*base))
 }
 
-/// Splits on `\n` only, keeping the terminator so `\r\n` files round-trip
-/// byte-for-byte. JSON forbids raw control characters inside strings, so no
-/// value can be split apart by this.
+/// Preserve newline terminators for byte-exact round trips; JSON strings cannot contain raw control characters.
 pub fn split_lines_keep_ends(raw: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut start = 0usize;

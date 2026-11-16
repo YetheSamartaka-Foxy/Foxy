@@ -78,11 +78,8 @@ impl Foxy {
         } else if !has_addon_actions && ts3_attention {
             self.t("TeamSpeak 3 is not running")
         } else if !has_addon_actions && !pending.unavailable_enabled.is_empty() {
-            // Opened solely to warn about enabled addons that can't be found.
             self.t("Some enabled addons are missing")
         } else if !has_addon_actions {
-            // Every warning this modal opened for has cleared (the TeamSpeak/Steam
-            // re-check flipped it), so it now only waits for the user to proceed.
             if pending.launch_only {
                 self.t("Ready to launch")
             } else {
@@ -548,10 +545,7 @@ impl Foxy {
                         .ambiguous
                         .iter()
                         .any(|ambiguous| ambiguous.selected_candidate.is_some());
-                    // Extra enabled addons are always actionable on the "launch
-                    // with selected addons" path: a ticked entry is kept loaded
-                    // and an unticked one is stripped, so either tick state is a
-                    // meaningful selection.
+                    // On the selected-addons path, checked extras stay loaded and unchecked extras are stripped.
                     let has_extra_enabled = !pending.extra_enabled.is_empty();
                     let selected_known_remote =
                         pending.known_remote.iter().any(|remote| remote.selected);
@@ -594,9 +588,7 @@ impl Foxy {
                         }
                     }
 
-                    // With no addon actions this is a TeamSpeak/Steam-only modal,
-                    // so the button just proceeds: "Launch" for a plain launch,
-                    // "Join" for a server join, rather than "Launch without ...".
+                    // With no addon actions, proceed with Launch or Join rather than offering a misleading "without addons" action.
                     let launch_without_label = if pending.addon_query_error.is_some() {
                         self.t("Join without addon check")
                     } else if has_addon_list_actions {
@@ -910,7 +902,6 @@ impl Foxy {
             });
     }
 
-    /// Renders one Creator DLC change list; returns whether a tick changed.
     fn join_preflight_dlc_section(
         &self,
         ui: &mut Ui,
@@ -1367,9 +1358,6 @@ impl Foxy {
                 ui.label(self.t("Repository address or repository space address"));
                 let input = ui.add(
                     TextEdit::singleline(&mut self.add_repository_input_address)
-                        // Stable id so the agent GUI driver's `focus` command can
-                        // target this field deterministically (see agent_driver
-                        // AGENT_FOCUS_TARGETS).
                         .id(egui::Id::unique("agent.add-repository-input"))
                         .desired_width(ui.available_width()),
                 );
@@ -1377,9 +1365,6 @@ impl Foxy {
                     ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Text);
                 }
 
-                // Optional overrides applied only when the input resolves to a
-                // plain repository (not a repository space). Empty name derives
-                // one from the address; empty path leaves the folder unset.
                 let optional_hint = self.t("Optional");
                 ui.add_space(8.0);
                 ui.label(self.t("Name"));
@@ -1454,8 +1439,6 @@ impl Foxy {
                         close = true;
                     }
 
-                    // The address is checked against the server off the UI
-                    // thread; show progress so the dialog doesn't look frozen.
                     if importing {
                         ui.add(crate::ui::app::PacedSpinner::new());
                     }
@@ -1492,9 +1475,6 @@ impl Foxy {
             return;
         }
 
-        // Probe the address for a repository-space manifest off the UI thread.
-        // The result is applied by `poll_repository_space_import_results`, which
-        // either opens the space selector or falls back to adding a plain repo.
         self.add_repository_input_error = None;
         let name_input = self.add_repository_input_name.trim().to_string();
         let path_input = self.add_repository_input_path.trim().to_string();

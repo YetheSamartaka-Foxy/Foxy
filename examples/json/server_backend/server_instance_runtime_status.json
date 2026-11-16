@@ -1,0 +1,17 @@
+{
+  "instance_id": "server_00000000000000000000000000000001",
+  "owner_id": "owner_example",
+  "owner_generation": 1,
+  "run_generation": 2,
+  "activation_generation": 3,
+  "runtime_id": "runtime_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "phase": "running",
+  "process_id": 1234,
+  "process_exists": true,
+  "readiness_verified": false,
+  "cleanup_verified": false,
+  "stop_timed_out": false,
+  "forced": false,
+  "root_exit_code": null,
+  "observation_age_ms": 20
+}

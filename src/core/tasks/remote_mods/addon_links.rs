@@ -33,7 +33,6 @@ pub(super) async fn reconcile_repository_addon_links(
             let desired_ids = desired_ids.clone();
             let desired_mod_ids = desired_mod_ids.clone();
             Box::pin(async move {
-                // Insert desired links (chunked multi-row INSERT ... ON CONFLICT DO NOTHING).
                 if !desired_ids.is_empty() {
                     let chunk_size = crate::core::tasks::init_database::bulk_write_rows_for(2);
                     for chunk in desired_ids.chunks(chunk_size) {

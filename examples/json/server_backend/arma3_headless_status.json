@@ -1,0 +1,60 @@
+{
+  "ready_unix_ms": 1700000020000,
+  "clients": [
+    {
+      "id": "hc_00000000000000a1",
+      "name": "HC1",
+      "state": "running",
+      "wanted": true,
+      "reason": null,
+      "process_id": 4100,
+      "started_unix_ms": 1700000020050,
+      "connection": "joined",
+      "joined_unix_ms": 1700000029000,
+      "starts": 2,
+      "automatic_restarts": 1,
+      "next_start_unix_ms": null,
+      "last_exit": {
+        "unix_ms": 1700000400000,
+        "exit_code": 240,
+        "forced": false,
+        "requested": false
+      }
+    },
+    {
+      "id": "hc_00000000000000a2",
+      "name": "HC2",
+      "state": "restart_suspended",
+      "wanted": true,
+      "reason": "restart_budget_exhausted",
+      "process_id": null,
+      "started_unix_ms": 1700000500000,
+      "connection": null,
+      "joined_unix_ms": null,
+      "starts": 6,
+      "automatic_restarts": 5,
+      "next_start_unix_ms": null,
+      "last_exit": {
+        "unix_ms": 1700000510000,
+        "exit_code": 1,
+        "forced": false,
+        "requested": false
+      }
+    },
+    {
+      "id": "hc_00000000000000a3",
+      "name": "Spare",
+      "state": "stopped",
+      "wanted": false,
+      "reason": "manual_start_required",
+      "process_id": null,
+      "started_unix_ms": null,
+      "connection": null,
+      "joined_unix_ms": null,
+      "starts": 0,
+      "automatic_restarts": 0,
+      "next_start_unix_ms": null,
+      "last_exit": null
+    }
+  ]
+}

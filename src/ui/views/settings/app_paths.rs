@@ -27,8 +27,6 @@ pub(super) struct ApplicationPathChangeFlags {
 }
 
 impl Foxy {
-    /// Steam, temporary, and addon backup directory path settings + browse
-    /// dialogs. Game-specific directories live on the game-space settings tab.
     pub(super) fn render_application_settings_paths(
         &mut self,
         ui: &mut Ui,
@@ -38,7 +36,6 @@ impl Foxy {
         default_temp_path: &str,
         change_flags: &mut ApplicationPathChangeFlags,
     ) {
-        // Steam Directory
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             ui.label(tr("Steam Directory"));
@@ -115,7 +112,6 @@ impl Foxy {
         });
         ui.separator();
 
-        // Temporary Directory
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             ui.label(tr("Temporary Directory"));
@@ -180,7 +176,6 @@ impl Foxy {
         );
         ui.separator();
 
-        // Addon Backup Directory
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             ui.label(tr("Addon Backup Directory"));

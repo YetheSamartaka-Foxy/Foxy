@@ -24,18 +24,42 @@ impl Foxy {
         }
 
         self.repository_addon_size_load_pending = true;
+        let Some(scope) = self.capture_worker_scope() else {
+            self.repository_addon_size_load_pending = false;
+            return;
+        };
         let tx = self.repository_addon_size_load_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
-            let result = load_repository_addon_sizes();
+        let admission = self.client_db_admission.clone();
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
+        let handle = std::thread::spawn(move || {
+            if !crate::ui::app::admit_database_section(&admission) {
+                let _ = tx.send(RepositoryAddonSizeLoadResult {
+                    space_id,
+                    generation,
+                    sizes_by_repo_and_addon: Default::default(),
+                });
+                return;
+            }
+            let mut result = load_repository_addon_sizes();
+            result.space_id = space_id;
+            result.generation = generation;
             if tx.send(result).is_ok() {
                 Foxy::request_background_repaint(repaint_ctx.as_ref());
             }
         });
+        self.repository_addon_size_load_worker = Some(handle);
     }
 
     pub(crate) fn poll_repository_addon_size_load_results(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         while let Ok(result) = self.repository_addon_size_load_rx.try_recv() {
+            if !self.scoped_result_applies(&result.space_id, result.generation) {
+                continue;
+            }
             self.repository_addon_size_load_pending = false;
             self.repository_addon_size_bytes_by_repo_and_addon = result.sizes_by_repo_and_addon;
             self.repository_addons_list_cache = crate::ui::app::RepositoryAddonListCache::default();
@@ -381,9 +405,7 @@ impl Foxy {
                 .map(|favorites| favorites.iter().map(|name| name.to_lowercase()).collect())
                 .unwrap_or_default(),
         };
-        // Client-side markings only mean something for a game whose servers
-        // tolerate addons they do not run; for the others the row shows no
-        // client-side state at all.
+        // Only show client-side markings for games whose servers tolerate unlisted local addons.
         let client_side_supported = Self::client_side_addons_supported();
         let optional_client_side_names: HashSet<String> = match kind {
             RepositoryAddonListKind::OptionalAddons if client_side_supported => self
@@ -483,7 +505,7 @@ impl Foxy {
             cache.client_side_only_filter = false;
             cache.include_file_search_filter = false;
             cache.filters_dirty = true;
-            // Names and resolved paths changed, so the shaped galleys are stale.
+
             cache.galleys = Default::default();
             cache.galley_prewarm_cursor = 0;
             cache.galley_prewarm_path_width = None;
@@ -1056,9 +1078,6 @@ impl Foxy {
         let scope_key =
             repository_external_addon_scope_key(&self.repository_view_state.repositories);
 
-        // Detect changes without allocating: this runs every frame while the
-        // External Addons tab is open, so cloning the local addon name vectors
-        // here (only to compare) would churn allocations during scrolling.
         let local_names_changed = |cached: &[String], source: &[(String, bool)]| -> bool {
             cached.len() != source.len()
                 || cached
@@ -1235,7 +1254,7 @@ impl Foxy {
             cache.client_side_only_filter = false;
             cache.include_file_search_filter = false;
             cache.filters_dirty = true;
-            // Row names, paths and origins changed, so the shaped galleys are stale.
+
             cache.galleys = Default::default();
             cache.galley_prewarm_cursor = 0;
             cache.galley_prewarm_path_width = None;

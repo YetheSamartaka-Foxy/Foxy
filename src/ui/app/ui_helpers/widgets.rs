@@ -19,18 +19,10 @@ impl Foxy {
         self.needs_repaint = true;
     }
 
-    /// Render a small circled-i help icon that reveals `help_text` on hover.
-    ///
-    /// Used to annotate filter inputs throughout the app with an explanation of
-    /// the supported filter criteria, so the pattern stays visually consistent.
     pub(crate) fn filter_help_icon(&self, ui: &mut egui::Ui, help_text: &str) {
         Self::filter_help_icon_colored(ui, self.color_text_dim(), help_text);
     }
 
-    /// `&self`-free variant of [`filter_help_icon`](Self::filter_help_icon) for
-    /// call sites that still hold a borrow of `self` (e.g. an addon row's
-    /// `&mut bool`) when the filter row is rendered. The caller supplies the
-    /// already-resolved dim text color.
     pub(crate) fn filter_help_icon_colored(
         ui: &mut egui::Ui,
         color: egui::Color32,
@@ -61,9 +53,7 @@ impl Foxy {
             return;
         };
 
-        // Read elapsed through the driver-controlled virtual clock so the
-        // agent-gui `clock advance` command can fire toast expiry on demand;
-        // with no driver running this is exactly `toast.shown_at.elapsed()`.
+        // Use the driver virtual clock for deterministic toast expiry; ordinary sessions use elapsed wall time.
         let elapsed = crate::ui::app::agent_support::virtual_elapsed(toast.shown_at);
         if elapsed >= toast.duration {
             self.ui_toast = None;

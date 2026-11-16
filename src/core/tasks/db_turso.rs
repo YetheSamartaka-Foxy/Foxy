@@ -1,24 +1,6 @@
-//! Turso data-layer keystone.
-//!
-//! This is the Turso counterpart of the SeaORM/SQLite keystone in
-//! `init_database.rs`: it builds the local database, applies the single
-//! authoritative bootstrap schema (`sql/turso_schema.sql`), hands out tuned
-//! connections, and wraps write transactions in a retry loop matched to Turso's
-//! error variants. This is the live persistence engine for the GUI, CLI, and
-//! `foxy-server-backend-cli`.
-//!
-//! Compatibility findings carried into this module:
-//! - FKs are OFF by default → enabled per-connection.
-//! - Honored PRAGMAs: `foreign_keys`, `synchronous`, `temp_store`, `cache_size`.
-//! - `busy_timeout` is a `Connection` method, not a PRAGMA.
-//! - `wal_autocheckpoint` / `journal_size_limit` / `mmap_size` are no-ops (Turso
-//!   manages its own WAL) → dropped, not reproduced.
-//! - `connect()` builds a fresh pager, reads page 1 and clones the schema, and
-//!   its statement cache dies with it → tuned connections are pooled per
-//!   database and hand out cached programs (see `connect_pooled`).
-//! - No statement interrupt / query timeout on `Connection` in 0.7.2 (unlike the
-//!   Python SDK) → cancellation stays cooperative at the task level.
-#![allow(dead_code)] // A few helpers (db_retry_transaction, etc.) are exercised only by tests.
+//! Tuned connections enable foreign keys and are pooled because opening one
+//! rebuilds its pager; task cancellation remains cooperative.
+#![allow(dead_code)]
 
 use std::fs;
 use std::future::Future;
@@ -67,17 +49,18 @@ pub(crate) fn discard_corrupt_database() -> Result<(), String> {
     }
     Ok(())
 }
+mod lifecycle;
+pub(crate) use lifecycle::{
+    close_active_database, init_turso_database, init_turso_database_with_path,
+    resume_database_access,
+};
 
 #[cfg(test)]
 #[path = "db_turso/round2_benches.rs"]
 mod round2_benches;
 
-/// The folded bootstrap schema (migrations 01..21 in final state). Applied once
-/// to a fresh database; the auto-wipe gate (`db_schema_version.rs`) guarantees a
-/// clean rebuild on the breaking Turso upgrade so no incremental replay is needed.
 pub(crate) const TURSO_BOOTSTRAP_SCHEMA: &str = include_str!("../../../sql/turso_schema.sql");
 
-/// Canonical `subfiles` table DDL, kept token-identical to `sql/turso_schema.sql`.
 pub(crate) const SUBFILES_CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS subfiles (\
     id INTEGER PRIMARY KEY, \
     file_id INTEGER NOT NULL, \
@@ -91,22 +74,14 @@ pub(crate) const SUBFILES_CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS subfi
     data_order INTEGER, \
     FOREIGN KEY (file_id) REFERENCES files(id))";
 
-/// `subfiles` unique `(file_id, path)` index that backs `ON CONFLICT`.
-/// The whole-wipe purge recreates it with the table.
-///
-/// Schema v24 dropped `idx_subfiles_path_remote_checksum`. Schema v25 dropped
-/// `idx_subfiles_file_id_data_order`; ordered part reloads sort in process.
 pub(crate) const SUBFILES_INDEX_CREATE_SQL: [&str; 1] =
     ["CREATE UNIQUE INDEX IF NOT EXISTS idx_subfiles_file_id_path ON subfiles(file_id, path)"];
 
-/// `subfiles` index names, for `DROP INDEX IF EXISTS` when rebuilding the indexes.
 pub(crate) const SUBFILES_INDEX_NAMES: [&str; 1] = ["idx_subfiles_file_id_path"];
 
 const DB_BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 const DB_MAX_RETRIES: usize = 5;
 
-/// Every file the Turso engine may leave beside `database.db`. Shared by the
-/// startup wipe and the game-space layout migration.
 pub(crate) const DATABASE_ARTIFACT_FILE_NAMES: [&str; 9] = [
     "database.db",
     "database.db-wal",
@@ -123,9 +98,6 @@ pub(crate) const DATABASE_REBUILD_BACKUP_PREFIX: &str = "database.db.rebuild-bac
 
 pub(crate) const WIPE_MARKER_FILE_NAME: &str = ".wipe_database_on_next_start";
 
-/// Filesystem path to `database.db` in the active game space dir, creating the
-/// parent directory and an empty file if missing (Turso's `Builder::new_local`
-/// takes a path, not a `sqlite://` URL).
 pub(crate) fn database_file_path() -> PathBuf {
     let db_path = crate::core::game::spaces::active_game_space_dir().join("database.db");
     if let Some(parent) = db_path.parent()
@@ -140,21 +112,15 @@ pub(crate) fn database_file_path() -> PathBuf {
     db_path
 }
 
-/// Open + bootstrap a Turso database at `path`. Factored out of
-/// [`init_turso_database`] so the engine and schema can be validated against a
-/// temp path in tests without the process-wide handle slot.
 pub(crate) async fn build_and_bootstrap(path: &str) -> turso::Result<Database> {
     let db = Builder::new_local(path).build().await?;
-    // Schema creation needs FK enforcement on so the CASCADE chains are recorded.
+
     let conn = connect_tuned(&db).await?;
     apply_schema(conn.raw(), TURSO_BOOTSTRAP_SCHEMA).await?;
     Ok(db)
 }
 
-/// Apply a multi-statement schema. Turso 0.7.2 has `execute_batch`, but the
-/// bootstrap file is heavily commented (including inline `-- …` column notes),
-/// so we strip comments and execute statement-by-statement for deterministic
-/// behavior regardless of the engine's batch tokenizer.
+/// Strip SQL comments before statement-by-statement execution because inline schema notes can confuse batch tokenization.
 async fn apply_schema(conn: &Connection, schema: &str) -> turso::Result<()> {
     let stripped: String = schema
         .lines()
@@ -175,14 +141,7 @@ async fn apply_schema(conn: &Connection, schema: &str) -> turso::Result<()> {
     Ok(())
 }
 
-/// Live wipe-and-rebuild for the running app (Turso counterpart of
-/// `init_database::wipe_database_live`). Drops every known table on an existing
-/// connection, then re-applies the bootstrap schema - so the in-process handle
-/// stays valid across the wipe (used by the schema-version wipe prompt).
 pub(crate) async fn wipe_and_rebuild_live(db: &Database) -> turso::Result<()> {
-    // Full live wipe is a destructive bulk operation. Hold the same exclusive
-    // barrier as repository purge so this cannot race another seam read/write on
-    // the shared Turso handle and surface as "database is locked".
     let _exclusive = crate::core::tasks::init_database::acquire_db_exclusive().await;
     // FK enforcement is on per tuned connection; drop in dependency order so the
     // CASCADE chains don't fight the explicit DROPs.
@@ -213,12 +172,7 @@ pub(crate) async fn wipe_and_rebuild_live(db: &Database) -> turso::Result<()> {
     Ok(())
 }
 
-/// Whether Turso's MVCC concurrent-write mode is active.
-///
-/// Defaults **OFF**. `FOXY_DB_MVCC=1` (or `true`/`on`/`yes`) opts into
-/// `journal_mode='mvcc'` + `BEGIN CONCURRENT`. On Turso 0.7.2 that is still
-/// worse for measured Foxy sync and purge; see
-/// `conventions/CORE_CONVENTIONS.md` (WAL vs MVCC).
+/// Default to single-writer WAL; MVCC remains opt-in because it performed worse for Foxy's write workload.
 pub(crate) fn mvcc_enabled() -> bool {
     matches!(
         std::env::var("FOXY_DB_MVCC")
@@ -231,28 +185,14 @@ pub(crate) fn mvcc_enabled() -> bool {
     )
 }
 
-/// Read back the engine's effective `journal_mode` for a tuned connection.
-/// Used at startup to confirm the file is on single-writer WAL (not a leftover
-/// `mvcc` from the default-on era); the regression-analysis benchmark keys off
-/// this line.
 pub(crate) async fn read_journal_mode(conn: &Connection) -> Option<String> {
     let mut rows = conn.query("PRAGMA journal_mode", ()).await.ok()?;
     let row = rows.next().await.ok()??;
     row.get::<String>(0).ok()
 }
 
-/// Statement programs kept per connection. `prepare_cached` stores compiled
-/// programs in an unbounded map inside the engine, so admission is capped here:
-/// without a cap a long session's one-off `IN (?, ?, ...)` shapes would pin a
-/// program each.
 const MAX_CACHED_STATEMENTS: usize = 128;
 
-/// Idle connections kept warm per database. Each holds its own pager and its own
-/// page cache (`cache_size = -16384`, so 16 MiB apiece at full), which bounds the
-/// idle pool's resident cost at six times that, roughly 96 MiB. The limit does
-/// not cap active concurrency: a burst may open more, and connections above it
-/// are discarded on return. Override with `FOXY_DB_POOL_IDLE`, where `0` is the
-/// unpooled A/B control.
 const DEFAULT_MAX_IDLE_CONNECTIONS: usize = 6;
 
 fn max_idle_connections() -> usize {
@@ -269,11 +209,8 @@ fn max_idle_connections() -> usize {
 static DB_CONNECTIONS_OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DB_CONNECTIONS_REUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Bumped whenever DDL runs. A cached statement program is only rechecked
-/// against its own connection's schema snapshot, and that snapshot is refreshed
-/// only when a statement is compiled - so a connection that DDL happened
-/// *around* can serve a program built against dropped roots. Pooled connections
-/// carry the epoch they were opened at and are retired once it moves.
+/// Cached programs may reference roots replaced by DDL; changing the epoch
+/// retires connections opened against the old schema.
 static DB_SCHEMA_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Retire every pooled connection: their cached programs may reference roots the
@@ -286,7 +223,6 @@ fn schema_epoch() -> u64 {
     DB_SCHEMA_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Whether a statement changes the schema, and so has to retire cached programs.
 pub(crate) fn sql_is_ddl(sql: &str) -> bool {
     let head = sql.trim_start();
     let word_len = head
@@ -298,7 +234,6 @@ pub(crate) fn sql_is_ddl(sql: &str) -> bool {
     )
 }
 
-/// Connections opened and connections served from the pool since process start.
 pub(crate) fn connection_counters() -> (u64, u64) {
     (
         DB_CONNECTIONS_OPENED.load(std::sync::atomic::Ordering::Relaxed),
@@ -306,11 +241,7 @@ pub(crate) fn connection_counters() -> (u64, u64) {
     )
 }
 
-/// A tuned connection plus the admission record for its statement cache.
-///
-/// Cloneable because the seam hands the same connection to a transaction handle
-/// and its statements; clones share one engine connection, so they must not run
-/// statements concurrently (Turso rejects overlapping use of one connection).
+/// Clones share one connection; callers must not issue statements concurrently on it.
 #[derive(Clone)]
 pub(crate) struct TunedConnection {
     conn: Connection,
@@ -320,8 +251,6 @@ pub(crate) struct TunedConnection {
 
 #[derive(Default)]
 struct StatementAdmission {
-    /// SQL seen once; a shape is only admitted to the engine cache on its second
-    /// use so single-shot statements never consume a cache slot.
     seen: std::collections::HashSet<u64>,
     cached: std::collections::HashSet<u64>,
 }
@@ -342,13 +271,10 @@ impl TunedConnection {
         }
     }
 
-    /// The underlying engine connection, for call sites that need it directly.
     pub(crate) fn raw(&self) -> &Connection {
         &self.conn
     }
 
-    /// Prepare `sql`, reusing this connection's compiled program when the shape
-    /// has been seen before and the cache still has room.
     pub(crate) async fn prepare_tuned(&self, sql: &str) -> turso::Result<Statement> {
         let cacheable = {
             let fingerprint = sql_fingerprint(sql);
@@ -417,11 +343,7 @@ impl TunedConnection {
     }
 }
 
-/// Warm tuned connections for one database handle.
-///
-/// A checkout is exclusive: the guard owns the connection until it drops, so
-/// pooling changes only where a connection comes from, never how many tasks
-/// share one.
+/// Checkout owns the connection until drop, preventing concurrent use of one Turso connection.
 struct ConnectionPool {
     idle: Mutex<Vec<TunedConnection>>,
 }
@@ -477,11 +399,7 @@ fn pool_for(db: &Arc<Database>) -> Arc<ConnectionPool> {
     pool
 }
 
-/// Drop every idle connection for every database.
-///
-/// Idle connections hold the engine database alive, so releasing a game space's
-/// file (a space switch, a live wipe) has to drain them or the directory stays
-/// locked.
+/// Idle connections keep the database alive; drain pools before releasing or deleting a game space.
 pub(crate) fn drain_connection_pools() {
     let mut pools = CONNECTION_POOLS
         .lock()
@@ -495,18 +413,33 @@ pub(crate) fn drain_connection_pools() {
     pools.clear();
 }
 
-/// A tuned connection borrowed from its database's pool, returned on drop.
+fn drain_connection_pool(database: &Arc<Database>) {
+    let mut pools = CONNECTION_POOLS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    pools.retain(|(weak, pool)| {
+        if weak.as_ptr() == Arc::as_ptr(database) {
+            pool.idle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+            false
+        } else {
+            true
+        }
+    });
+}
+
 pub(crate) struct PooledConnection {
     conn: TunedConnection,
     pool: Arc<ConnectionPool>,
     retire: bool,
+
+    _database: Arc<Database>,
 }
 
 impl PooledConnection {
-    /// Drop this connection on release instead of returning it to the pool.
-    /// Callers that change connection-scoped state (the purge's
-    /// `foreign_keys = OFF`) must retire it so the change cannot leak into the
-    /// next borrower.
+    /// Retire connections whose scoped settings changed so they cannot leak to the next borrower.
     pub(crate) fn retire(&mut self) {
         self.retire = true;
     }
@@ -530,12 +463,12 @@ impl Drop for PooledConnection {
     }
 }
 
-/// Borrow a tuned connection from `db`'s pool, opening one if none is idle.
 pub(crate) async fn connect_pooled(db: &Arc<Database>) -> turso::Result<PooledConnection> {
     let pool = pool_for(db);
     if let Some(conn) = pool.take() {
         DB_CONNECTIONS_REUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return Ok(PooledConnection {
+            _database: db.clone(),
             conn,
             pool,
             retire: false,
@@ -543,72 +476,39 @@ pub(crate) async fn connect_pooled(db: &Arc<Database>) -> turso::Result<PooledCo
     }
     let conn = connect_tuned(db.as_ref()).await?;
     Ok(PooledConnection {
+        _database: db.clone(),
         conn,
         pool,
         retire: false,
     })
 }
 
-/// Open a fresh connection and apply the honored PRAGMAs + busy timeout.
-///
-/// Prefer [`connect_pooled`]: a connect builds a pager, reads page 1 and clones
-/// the schema, and the five pragmas below are five more prepared statements.
-/// This unpooled form is for bootstrap, compaction, and callers that mutate
-/// connection-scoped pragmas.
+/// Use pooling except for bootstrap, compaction, or callers changing connection-scoped pragmas.
 pub(crate) async fn connect_tuned(db: &Database) -> turso::Result<TunedConnection> {
     DB_CONNECTIONS_OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let conn = TunedConnection::new(db.connect()?);
-    // Honored PRAGMAs only (spike §11). `pragma_update` issues `PRAGMA x = v`
-    // and drains any returned row.
+
     conn.pragma_update("foreign_keys", "ON").await?;
     conn.pragma_update("synchronous", "NORMAL").await?;
     conn.pragma_update("temp_store", "MEMORY").await?;
-    conn.pragma_update("cache_size", "-16384").await?; // 16 MiB page cache
-    // MVCC concurrent writes are opt-in only. When enabled, set per-connection
-    // so every task's connection shares the mode; paired with `BEGIN CONCURRENT`.
-    //
-    // Default (off) sets single-writer WAL. Setting it EXPLICITLY (rather than
-    // leaving it unset) is required to MIGRATE an existing database created under
-    // the old default-on MVCC era: Turso persists `journal_mode='mvcc'` in the
-    // file, so a connection that merely skips the pragma keeps running the MVCC
-    // engine - which is catastrophically slow even without `BEGIN CONCURRENT`
-    // (measured on the real DB: a 66k-row purge took ~900s under mvcc vs ~33s
-    // under WAL - the source of the force-redownload "hang"). The switch is
-    // idempotent (a no-op once the file is WAL) and runs on the bootstrap
-    // connection before any concurrency, when exclusive access is guaranteed.
+    conn.pragma_update("cache_size", "-16384").await?; // Explicitly set WAL to migrate files that may retain the old MVCC mode; initialize before concurrent access.
     if mvcc_enabled() {
         conn.pragma_update("journal_mode", "mvcc").await?;
     } else {
         conn.pragma_update("journal_mode", "wal").await?;
     }
-    // busy_timeout is a method in Turso, not a PRAGMA.
+
     conn.busy_timeout(DB_BUSY_TIMEOUT)?;
     Ok(conn)
 }
 
-// --- Startup bloat inspection + opt-in compaction (analysis4 P0) --------------
-//
-// MVCC-era churn left `database.db` ~97% free pages (e.g. 349 648 pages / 338 750
-// free = 1.37 GB on disk for ~44 MB of live rows). Under WAL the file no longer
-// hangs, but every B-tree walk (the 66k-row `subfiles` upsert / hash-persist /
-// purge, plus the post-write read scans) pays the bloat: the production purge txn
-// is 30.6 s vs 0.51 s pre-Turso, and `db_write_time_ms` is 15× the SQLite
-// baseline - almost entirely on `subfiles`. Compacting the file rebuilds those
-// B-trees densely and is the single highest-value lever (analysis4 §P0).
-//
-// In-place `VACUUM` is still experimental in Turso 0.7.2. `VACUUM INTO` is
-// supported and 0.7 claims a nested-yield panic fix, but 0.6.1 panicked on
-// large/bloated files (`vdbe/vacuum.rs`) even though the tiny
-// `probe_vacuum_into` passed. Keep the manual row copy until a large bloated
-// file survives VACUUM INTO; then swap in VACUUM INTO with this copy as fallback.
-
-/// Compact only when the file is BOTH substantially free-paged AND large enough
-/// that the walk cost matters - a fresh/small db is never churned.
+// Compaction rebuilds dense B-trees; keep row-copy until VACUUM INTO passes a large-file probe.
+// Compact only large files with substantial free-page bloat.
 const COMPACT_MIN_FREE_PAGES: i64 = 20_000;
 const COMPACT_MIN_FREE_RATIO: f64 = 0.5;
-/// Automatic startup compaction live-row ceiling.
+
 const COMPACT_AUTO_MAX_LIVE_MIB: f64 = 512.0;
-/// How long a post-compaction backup is kept.
+
 const DB_BACKUP_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy)]
@@ -654,7 +554,6 @@ async fn read_db_bloat_stats(conn: &Connection) -> Option<DbBloatStats> {
     })
 }
 
-/// Startup compaction mode from `FOXY_DB_COMPACT`.
 fn compact_mode() -> String {
     std::env::var("FOXY_DB_COMPACT")
         .ok()
@@ -662,9 +561,6 @@ fn compact_mode() -> String {
         .unwrap_or_default()
 }
 
-/// Append a literal suffix to a path's filename (e.g. `database.db` + `-wal` →
-/// `database.db-wal`; + `.bak` → `database.db.bak`). Not `set_extension`, which
-/// would clobber the existing `.db`.
 fn with_suffix(path: &std::path::Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(suffix);
@@ -677,13 +573,10 @@ fn remove_db_artifacts(path: &std::path::Path) {
     let _ = fs::remove_file(with_suffix(path, "-shm"));
 }
 
-/// Remove stale maintenance artifacts next to `database.db`.
 fn sweep_stale_db_artifacts(path: &Path) {
     let compacting = with_suffix(path, ".compacting");
     let bak = with_suffix(path, ".bak");
-    // A compaction swap interrupted after moving the original aside and before
-    // installing the copy leaves no live file; reopening would silently start
-    // from an empty database while the real one sits in the backup.
+    // A failed swap must preserve the original database; otherwise reopening can silently create an empty one.
     if !path.exists() && bak.exists() && compacting.exists() {
         warn!(
             "STARTUP: restoring {} from an interrupted compaction swap",
@@ -740,7 +633,6 @@ fn sweep_stale_db_artifacts(path: &Path) {
     }
 }
 
-/// Move WAL/SHM sidecars alongside their main database file destination.
 async fn move_db_sidecars(from: &Path, to: &Path) -> std::io::Result<()> {
     for suffix in ["-wal", "-shm"] {
         let from_s = with_suffix(from, suffix);
@@ -775,7 +667,6 @@ fn rebuild_backup_path(path: &Path) -> PathBuf {
     with_suffix(path, ".rebuild-backup")
 }
 
-/// Preserve a failed database before creating a clean replacement.
 async fn move_db_artifacts_to_rebuild_backup(path: &Path) -> std::io::Result<PathBuf> {
     let backup = rebuild_backup_path(path);
     if path.exists() {
@@ -800,6 +691,7 @@ async fn build_or_rebuild_after_failure(path: &Path, path_str: &str) -> turso::R
                 "STARTUP: Turso database initialization failed ({}); attempting clean rebuild",
                 first_err
             );
+
             match move_db_artifacts_to_rebuild_backup(path).await {
                 Ok(backup) => info!(
                     "STARTUP: moved failed database artifacts to {} before rebuild",
@@ -834,9 +726,6 @@ async fn build_or_rebuild_after_failure(path: &Path, path_str: &str) -> turso::R
     }
 }
 
-/// Tables copied during a manual compaction, FK-parent-first (FK enforcement is
-/// disabled on the destination during the copy, so order is not strictly
-/// required, but parent-first keeps it intuitive). Mirrors the bootstrap schema.
 const COMPACT_COPY_TABLES: &[&str] = &[
     "repositories",
     "pending_updates",
@@ -851,7 +740,6 @@ const COMPACT_COPY_TABLES: &[&str] = &[
     "download_patch_op",
 ];
 
-/// Inspect the open database and decide whether startup should compact it.
 async fn should_compact_database(db: &Database) -> bool {
     let conn = match connect_tuned(db).await {
         Ok(c) => c,
@@ -890,9 +778,6 @@ async fn should_compact_database(db: &Database) -> bool {
     false
 }
 
-/// Copy every row of `table` from `src` into `dst` in chunked multi-row inserts.
-/// Generic over schema: reads the column list from the prepared statement and
-/// round-trips raw `turso::Value`s, so it needs no per-table knowledge.
 async fn copy_table(src: &Connection, dst: &Connection, table: &str) -> turso::Result<usize> {
     const CHUNK_ROWS: usize = 256;
     let mut rows = src.query(&format!("SELECT * FROM {table}"), ()).await?;
@@ -919,8 +804,7 @@ async fn copy_table(src: &Connection, dst: &Connection, table: &str) -> turso::R
                 "INSERT INTO {table} ({col_list}) VALUES {}",
                 vec![row_ph.as_str(); pending].join(", ")
             );
-            // Sequential await: 0.7 rejects a second write on the same connection
-            // while one is in flight (`StatementsInProgress`, not lock Busy).
+
             dst.execute(&sql, std::mem::take(&mut buf)).await?;
             pending = 0;
         }
@@ -935,24 +819,15 @@ async fn copy_table(src: &Connection, dst: &Connection, table: &str) -> turso::R
     Ok(total)
 }
 
-/// Build a fully compacted copy of the database at `path` into a sibling temp
-/// file by re-inserting every live row into a fresh schema (a dense rebuild -
-/// the only free pages it has are its own). Returns the temp path on success.
-///
-/// NB: we do NOT use `VACUUM INTO` yet. It panicked inside Turso 0.6.1 on
-/// large/bloated files (the tiny `probe_vacuum_into` passed). 0.7.2 claims a
-/// nested-yield fix, but compaction stays on this copy path until a large-file
-/// probe is green.
+/// Keep row-copy compaction until `VACUUM INTO` passes a large-file probe.
 async fn build_compacted_copy(path: &Path) -> turso::Result<PathBuf> {
     let tmp = with_suffix(path, ".compacting");
     remove_db_artifacts(&tmp);
     let tmp_str = tmp.to_string_lossy().to_string();
 
-    // Source: a fresh handle (the live handle was dropped by the caller).
     let src_db = Builder::new_local(&path.to_string_lossy()).build().await?;
     let src = connect_tuned(&src_db).await?;
-    // Destination: fresh file with the bootstrap schema; FK off so insert order
-    // never blocks, synchronous OFF since a crash just discards this temp file.
+
     let dst_db = build_and_bootstrap(&tmp_str).await?;
     let dst = dst_db.connect()?;
     dst.pragma_update("foreign_keys", "OFF").await?;
@@ -964,12 +839,9 @@ async fn build_compacted_copy(path: &Path) -> turso::Result<PathBuf> {
         debug!("STARTUP: compaction copied {n} rows from {table}");
     }
     dst.execute("COMMIT", ()).await?;
-    // Best-effort checkpoint to shrink the WAL; Turso may not honor it, so we do
-    // NOT rely on it - `swap_compacted_file` moves the `<tmp>-wal`/`-shm`
-    // sidecars alongside the main file so committed rows are never left behind.
+    // Move WAL/SHM sidecars with the database so committed rows remain available after the swap.
     let _ = dst.execute("PRAGMA wal_checkpoint(TRUNCATE)", ()).await;
 
-    // Close every handle so the file can be swapped on Windows.
     drop(dst);
     drop(dst_db);
     drop(src);
@@ -977,12 +849,7 @@ async fn build_compacted_copy(path: &Path) -> turso::Result<PathBuf> {
     Ok(tmp)
 }
 
-/// Run a panic-safe compaction of the database file at `path`, swapping the
-/// dense copy in on success. Returns true if the live file was replaced. The
-/// source file is only read (the copy is written to a sibling temp), so any
-/// failure - including a Turso panic - leaves the original intact; we just log
-/// and continue uncompacted. **Call only after the live `Database` handle is
-/// dropped.**
+/// Any failure leaves the original intact; call only after dropping the live database handle.
 async fn compact_database_file(path: &Path) -> bool {
     let started = Instant::now();
     info!(
@@ -1035,17 +902,12 @@ async fn rename_with_retry(from: &std::path::Path, to: &std::path::Path) -> std:
     Err(last.unwrap_or_else(|| std::io::Error::other("rename failed")))
 }
 
-/// Swap the freshly compacted copy at `tmp` into `path`, keeping the original as
-/// `database.db.bak`. The compacted copy is a complete standalone db, so the old
-/// WAL/SHM sidecars are discarded. Returns true on success; on any failure the
-/// original is restored and left in place. Call only after the live `Database`
-/// handle has been dropped.
+/// Restore the original on swap failure; call only after dropping the live database handle.
 async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
     let bak = with_suffix(path, ".bak");
-    // Clear any stale backup (main + sidecars).
+
     remove_db_artifacts(&bak);
 
-    // Move the original aside as a complete backup (main + its WAL/SHM).
     if let Err(e) = rename_with_retry(path, &bak).await {
         warn!(
             "STARTUP: could not move old database aside ({}); discarding compacted copy",
@@ -1056,7 +918,7 @@ async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
     }
     let _ = move_db_sidecars(path, &bak).await;
 
-    // Install the compacted copy (main + its WAL/SHM) at the live path.
+    // Keep the original available until the compacted replacement is installed.
     if let Err(e) = rename_with_retry(tmp, path).await {
         warn!(
             "STARTUP: could not install compacted database ({}); restoring original",
@@ -1075,18 +937,15 @@ async fn swap_compacted_file(path: &Path, tmp: &Path) -> bool {
     true
 }
 
-/// Set while startup compaction and reopen hold the database.
 static DB_STARTUP_COMPACTION_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static DB_STARTUP_COMPACTION_STARTED: std::sync::Mutex<Option<Instant>> =
     std::sync::Mutex::new(None);
 
-/// True while startup compaction is holding the database.
 pub(crate) fn db_startup_compaction_active() -> bool {
     DB_STARTUP_COMPACTION_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Elapsed time for the active startup compaction.
 pub(crate) fn db_startup_compaction_elapsed() -> Option<Duration> {
     if !db_startup_compaction_active() {
         return None;
@@ -1104,71 +963,12 @@ fn set_db_startup_compaction_active(active: bool) {
     DB_STARTUP_COMPACTION_ACTIVE.store(active, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Slot holding the handle for the active game space's database, keyed by
-/// file path so switching the active space at runtime opens the target
-/// space's database. Dropping the previous handle here is safe: in-flight
-/// tasks that cloned it keep the old database alive until they finish.
-static DB_SLOT: tokio::sync::Mutex<Option<(PathBuf, Arc<Database>)>> =
-    tokio::sync::Mutex::const_new(None);
-
-/// Process-wide Turso database handle for the active game space, mirroring
-/// the `Arc<DatabaseConnection>` shape so it slots into `FoxyContext`.
-pub(crate) async fn init_turso_database() -> Arc<Database> {
-    init_turso_database_with_path().await.1
-}
-
-/// Same as [`init_turso_database`], also returning the file path the handle
-/// was opened for, so callers that key one-time per-database work never race
-/// a concurrent game-space switch by re-resolving the path themselves.
-pub(crate) async fn init_turso_database_with_path() -> (PathBuf, Arc<Database>) {
-    let path = database_file_path();
-    let mut slot = DB_SLOT.lock().await;
-    if let Some((open_path, db)) = slot.as_ref()
-        && *open_path == path
-    {
-        return (path, db.clone());
-    }
-    if slot.is_some() {
-        info!(
-            "Active game space changed; opening database {}",
-            sanitize_log_path(&path)
-        );
-    }
-    let db = open_and_prepare_database(&path).await;
-    *slot = Some((path.clone(), db.clone()));
-    (path, db)
-}
-
-/// Drop the cached handle for whichever database is currently open, releasing
-/// the file so the previous game space's directory can be deleted. In-flight
-/// tasks that cloned the handle keep their database alive until they finish;
-/// the next [`init_turso_database`] reopens whatever the active space now
-/// resolves to.
-pub(crate) async fn close_active_database() {
-    let mut slot = DB_SLOT.lock().await;
-    // Idle pooled connections hold the engine database alive, so they have to go
-    // before the handle for the space directory to become deletable.
-    drain_connection_pools();
-    if let Some((path, _)) = slot.take() {
-        info!(
-            "Released the database handle for {}",
-            sanitize_log_path(&path)
-        );
-    }
-    // The lock file lives in the space directory this call exists to free, so
-    // the claim has to go with the handle.
-    crate::core::tasks::db_process_lock::release();
-}
-
 async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
     let init_start = Instant::now();
     let path_str = path.to_string_lossy().to_string();
     info!("Ensuring Turso database {}", sanitize_log_path(path));
 
-    // Backstop for the entry-point claims in the GUI startup and CLI dispatch.
-    // Turso has no multi-process access, so opening a database this process does
-    // not own is a correctness bug wherever it happens; make it loud rather than
-    // let it corrupt quietly.
+    // Enforce the process claim at the database seam because Turso does not support multi-process access.
     if !crate::core::tasks::db_process_lock::holds(path) {
         match crate::core::tasks::db_process_lock::acquire(path) {
             crate::core::tasks::db_process_lock::LockOutcome::Acquired => {}
@@ -1182,10 +982,9 @@ async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
                 );
                 panic!("database is owned by another Foxy process");
             }
-            crate::core::tasks::db_process_lock::LockOutcome::Unavailable(reason) => warn!(
-                "STARTUP: could not verify exclusive database access ({}); continuing",
-                reason
-            ),
+            crate::core::tasks::db_process_lock::LockOutcome::Unavailable(_) => {
+                panic!("Refusing to open database: exclusive access could not be verified");
+            }
         }
     }
 
@@ -1199,9 +998,6 @@ async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
             panic!("Failed to initialize Turso database: {}", e);
         });
 
-    // Inspect for free-page bloat and, if needed, rebuild a dense copy
-    // (analysis4 P0). The file swap needs no open handle to the source, so
-    // drop `db` first, compact (panic-safe - never crashes startup), reopen.
     if should_compact_database(&db).await {
         let compact_start = Instant::now();
         set_db_startup_compaction_active(true);
@@ -1222,10 +1018,7 @@ async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
         }
     }
 
-    // Confirm once per open that the file is on single-writer WAL unless
-    // MVCC was explicitly opted in.
-    // An unexpected `mvcc` here is the signature of the force-redownload hang
-    // (see `mvcc_enabled` rationale).
+    // Verify single-writer WAL on open unless MVCC was explicitly enabled.
     match connect_tuned(&db).await {
         Ok(conn) => {
             let mode = read_journal_mode(conn.raw())
@@ -1242,9 +1035,7 @@ async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
         Err(e) => warn!("STARTUP: could not read Turso journal_mode: {}", e),
     }
 
-    // The bootstrap above is `CREATE ... IF NOT EXISTS`, so it silently no-ops on
-    // a database an older Foxy built. Confirm the live schema can actually run
-    // this build's statements before the app starts syncing against it.
+    // CREATE IF NOT EXISTS does not repair old schemas; probe the live database before syncing.
     let _ = crate::core::tasks::db_schema_check::probe_database(path, &db).await;
 
     info!(
@@ -1254,10 +1045,6 @@ async fn open_and_prepare_database(path: &Path) -> Arc<Database> {
     Arc::new(db)
 }
 
-/// Build a throwaway file-backed Turso database with the full bootstrap schema,
-/// for tests that need a real engine behind a `FoxyContext`. The temp dir is
-/// intentionally leaked so the database file stays valid for the duration of the
-/// test (test-only; the OS reclaims it).
 #[cfg(test)]
 pub(crate) async fn build_test_database() -> Arc<Database> {
     let dir = tempfile::tempdir().expect("create temp dir for test database");
@@ -1269,16 +1056,13 @@ pub(crate) async fn build_test_database() -> Arc<Database> {
     Arc::new(db)
 }
 
-/// Same-connection overlap: Turso 0.7 maps `StatementsInProgress` to `Error::Busy`
-/// (SQLITE_BUSY class) but waiting cannot help - only finishing or resetting the
-/// in-flight statement can. Must not burn [`DB_BUSY_TIMEOUT`] / retry backoff.
+/// Same-connection overlap cannot be fixed by waiting; let the in-flight statement finish instead of retrying.
 fn db_error_is_same_connection_overlap(message: &str) -> bool {
     message
         .to_ascii_lowercase()
         .contains("sql statements in progress")
 }
 
-/// Shared classifier for transient DB errors used by every retry loop.
 pub(crate) fn db_error_message_is_retryable(message: &str) -> bool {
     if db_error_is_same_connection_overlap(message) {
         return false;
@@ -1290,13 +1074,7 @@ pub(crate) fn db_error_message_is_retryable(message: &str) -> bool {
         || m.contains("no transaction is active")
 }
 
-/// Whether a Turso error should be retried by [`db_retry_transaction`].
-///
-/// Default-mode busy/locked → `Busy`/`BusySnapshot`. MVCC write–write conflicts
-/// surface as `Error(msg)` containing `"conflict"`, and an aborted conflicting
-/// txn can report `"no transaction is active"` at COMMIT (spike §11). All are
-/// transient and safe to retry after a fresh `BEGIN`. Same-connection
-/// `StatementsInProgress` arrives as `Busy` but is not lock contention.
+/// Retry transient lock/conflict errors, but not same-connection statement overlap.
 pub(crate) fn db_is_retryable(err: &Error) -> bool {
     match err {
         Error::Busy(msg) if !db_error_is_same_connection_overlap(msg) => true,
@@ -1306,20 +1084,11 @@ pub(crate) fn db_is_retryable(err: &Error) -> bool {
     }
 }
 
-/// Exponential backoff identical in shape to the SQLite path
-/// (`init_database::sqlite_lock_backoff`).
 fn db_retry_backoff(attempt: usize) -> Duration {
     Duration::from_millis(50 * 2u64.saturating_pow(attempt as u32))
 }
 
-/// Run `work` inside a transaction on `conn`, retrying on Turso's transient
-/// busy/conflict errors with exponential backoff. The `concurrent` flag selects
-/// `BEGIN CONCURRENT` (MVCC) vs a plain `BEGIN`; under MVCC
-/// the conflict is detected at the write or commit and the whole txn is retried.
-///
-/// Statements inside `work` run on the same `conn` (Turso ties transaction state
-/// to the connection), matching the `concurrent_writes` example and the existing
-/// `sqlite_retry_transaction` contract.
+/// Transaction state belongs to the connection; retry the whole transaction after transient conflicts.
 pub(crate) async fn db_retry_transaction<F>(
     conn: &Connection,
     label: &str,
@@ -1653,22 +1422,12 @@ mod tests {
         assert!(rows.next().await.unwrap().is_none());
     }
 
-    /// Benchmark (run explicitly: `cargo test --release bench_fresh_insert_vs_upsert
-    /// -- --ignored --nocapture`). Settles analysis3.md bucket A: on a freshly
-    /// purged `subfiles` table (the force-redownload case, where no row can
-    /// conflict), is a plain `INSERT` materially faster than the production
-    /// `INSERT … ON CONFLICT (file_id, path) DO UPDATE`, and where is the
-    /// per-statement chunk-size knee? Inserts 66 336 rows (a large-repo part
-    /// count) under single-writer WAL, one transaction, chunked - mirroring
-    /// `remote_file_parts::batch::file_part_upsert_*`. Prints wall time for both
-    /// statement shapes across several chunk sizes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_fresh_insert_vs_upsert() {
         const ROWS: usize = 66_336;
         const PARAMS_PER_ROW: usize = 6;
 
-        // file_id=1 must exist (FK target for subfiles.file_id).
         async fn seed_file(db: &Database) -> TunedConnection {
             let conn = connect_tuned(db).await.unwrap();
             conn.execute(
@@ -1695,7 +1454,6 @@ mod tests {
                 .collect()
         }
 
-        // Build the chunk SQL for `n` rows in each shape.
         fn upsert_sql(n: usize) -> String {
             let ph = vec!["(?, ?, 0, 0, ?, ?, '', ?, ?)"; n].join(", ");
             format!(
@@ -1716,8 +1474,6 @@ mod tests {
         fn binds(chunk: &[(i64, String, i64, i64, String, i64)]) -> Vec<turso::Value> {
             let mut v = Vec::with_capacity(chunk.len() * PARAMS_PER_ROW);
             for (file_id, path, _ll, _ls, rc, ord) in chunk {
-                // Matches the 6 bound params: file_id, path, remote_length,
-                // remote_start, remote_checksum, data_order.
                 v.push(turso::Value::Integer(*file_id));
                 v.push(turso::Value::Text(path.clone()));
                 v.push(turso::Value::Integer(4096));
@@ -1756,11 +1512,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (run explicitly: `cargo test --release bench_bulk_update_chunk
-    /// -- --ignored --nocapture`). Confirms the chunk-size knee also applies to
-    /// the bulk part-hash persist `UPDATE … FROM (VALUES …)` shape (analysis3.md
-    /// bucket A `persist bulk part hashes`), whose default packs ~8190 rows/stmt.
-    /// Seeds 66 336 subfiles then re-updates their local checksums chunked.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_bulk_update_chunk() {
@@ -1773,7 +1524,7 @@ mod tests {
         )
         .await
         .unwrap();
-        // Seed in small (fast) chunks.
+
         conn.execute("BEGIN", ()).await.unwrap();
         for chunk_start in (0..ROWS).step_by(256) {
             let chunk_end = (chunk_start + 256).min(ROWS);
@@ -1792,7 +1543,6 @@ mod tests {
         }
         conn.execute("COMMIT", ()).await.unwrap();
 
-        // ids to update (sorted by PK, as the real persist path does).
         let mut ids = Vec::with_capacity(ROWS);
         let mut rows = conn
             .query("SELECT id FROM subfiles ORDER BY id", ())
@@ -1806,7 +1556,6 @@ mod tests {
             let started = Instant::now();
             conn.execute("BEGIN", ()).await.unwrap();
             for chunk in ids.chunks(chunk_rows) {
-                // UPDATE subfiles SET local_checksum/length/start FROM (VALUES …) - 4 binds/row.
                 let vals = vec!["(?, ?, ?, ?)"; chunk.len()].join(", ");
                 let sql = format!(
                     "WITH v(id, lc, ll, ls) AS (VALUES {vals}) \
@@ -1833,12 +1582,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (run explicitly: `cargo test --release bench_mvcc_write_degradation
-    /// -- --ignored --nocapture`). Reproduces a large production-repo pattern: a
-    /// populated `subfiles` table re-upserted by a long series of independent write
-    /// transactions, each on its own fresh connection (matching the seam). Prints
-    /// per-batch timings for MVCC on vs off so the O(N²) version-store growth is
-    /// visible directly rather than only at 24 GB scale.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_mvcc_write_degradation() {
@@ -1852,7 +1595,6 @@ mod tests {
             let path_str = path.to_str().unwrap().to_string();
             let db = Builder::new_local(&path_str).build().await.unwrap();
 
-            // One tuned-equivalent connection just to bootstrap + seed.
             let seed = db.connect().unwrap();
             seed.pragma_update("foreign_keys", "ON").await.unwrap();
             seed.pragma_update("synchronous", "NORMAL").await.unwrap();
@@ -1881,8 +1623,6 @@ mod tests {
             }
             drop(seed);
 
-            // Re-upsert the whole table across BATCHES independent transactions,
-            // each on a fresh connection (as the seam does). Time each batch.
             let mut timings = Vec::with_capacity(BATCHES);
             let begin_sql = if mvcc { "BEGIN CONCURRENT" } else { "BEGIN" };
             for b in 0..BATCHES {
@@ -1924,11 +1664,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (run explicitly: `cargo test --release bench_mvcc_concurrent_writers
-    /// -- --ignored --nocapture`). Validates that the non-MVCC single-writer WAL path
-    /// handles the production metadata-rebuild fan-out (many concurrent upsert
-    /// transactions, each on its own connection) via busy_timeout + retry without a
-    /// lock storm. Reports total wall time and failures for MVCC on vs off.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_mvcc_concurrent_writers() {
@@ -1993,7 +1728,7 @@ mod tests {
                     }
                     conn.busy_timeout(DB_BUSY_TIMEOUT).unwrap();
                     let begin_sql = if mvcc { "BEGIN CONCURRENT" } else { "BEGIN" };
-                    // Mirror the seam's 5-retry loop so busy/conflict is handled.
+
                     let mut attempt = 0;
                     loop {
                         let step: turso::Result<()> = async {
@@ -2031,7 +1766,6 @@ mod tests {
         }
     }
 
-    /// The bootstrap schema applies cleanly and creates every expected table.
     #[tokio::test]
     async fn bootstrap_creates_all_tables() {
         let (_dir, db) = temp_db().await;
@@ -2061,7 +1795,7 @@ mod tests {
             let n = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
             assert_eq!(n, 1, "table {table} should exist after bootstrap");
         }
-        // file_subfiles was dropped by migration 20 - must NOT exist.
+
         let mut rows = conn
             .query(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='file_subfiles'",
@@ -2073,7 +1807,6 @@ mod tests {
         assert_eq!(n, 0, "file_subfiles must be absent (migration 20)");
     }
 
-    /// Tuned connections enforce FK cascades from the bootstrap schema.
     #[tokio::test]
     async fn cascade_chain_from_bootstrap_schema() {
         let (_dir, db) = temp_db().await;
@@ -2110,10 +1843,6 @@ mod tests {
         );
     }
 
-    /// P0-b (after_turso_regression_analysis5.md): the deferred-index bulk load
-    /// drops the subfiles indexes, plain-INSERTs into the bare table, then rebuilds
-    /// the indexes once. Verify the cycle is sound: a plain bulk load succeeds with
-    /// indexes dropped, and after the rebuild the unique index is enforced again.
     #[tokio::test]
     async fn deferred_index_bulk_load_rebuilds_enforced_unique_index() {
         let (_dir, db) = temp_db().await;
@@ -2126,14 +1855,12 @@ mod tests {
         .await
         .unwrap();
 
-        // Drop indexes (mirrors entry.rs::drop_subfiles_indexes).
         for name in SUBFILES_INDEX_NAMES {
             conn.execute(&format!("DROP INDEX IF EXISTS {name}"), ())
                 .await
                 .unwrap();
         }
 
-        // Plain conflict-free bulk INSERT into the bare table.
         for i in 0..500i64 {
             conn.execute(
                 "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, \
@@ -2145,7 +1872,6 @@ mod tests {
             .unwrap();
         }
 
-        // Rebuild indexes once (mirrors entry.rs::rebuild_subfiles_indexes).
         for sql in SUBFILES_INDEX_CREATE_SQL {
             conn.execute(sql, ()).await.unwrap();
         }
@@ -2157,7 +1883,6 @@ mod tests {
         let n = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
         assert_eq!(n, 500, "all bulk-loaded rows must be present");
 
-        // The rebuilt unique index must now reject a duplicate (file_id, path).
         let dup = conn
             .execute(
                 "INSERT INTO subfiles (file_id, path, local_length, local_start, remote_length, \
@@ -2172,7 +1897,6 @@ mod tests {
         );
     }
 
-    /// The retry wrapper commits a successful transaction.
     #[tokio::test]
     async fn retry_transaction_commits() {
         let (_dir, db) = temp_db().await;
@@ -2203,7 +1927,6 @@ mod tests {
         assert_eq!(name, "n");
     }
 
-    /// A non-retryable failure inside the txn rolls back (no partial write).
     #[tokio::test]
     async fn retry_transaction_rolls_back_on_constraint() {
         let (_dir, db) = temp_db().await;
@@ -2215,7 +1938,7 @@ mod tests {
                     (),
                 )
                 .await?;
-                // Duplicate (remote_url, local_path) violates the UNIQUE constraint.
+
                 c.execute(
                     "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (4, 'dup', 'u3', 'p3')",
                     (),
@@ -2321,9 +2044,6 @@ mod tests {
         }
     }
 
-    /// Diagnostic: inspect a copy of the production database for bloat (free
-    /// pages) vs real rows. Set FOXY_INSPECT_DB to the db path. Run:
-    /// `cargo test -p Foxy inspect_db -- --ignored --nocapture`
     #[tokio::test]
     #[ignore]
     async fn inspect_db() {
@@ -2379,11 +2099,6 @@ mod tests {
         }
     }
 
-    /// Diagnostic: dump the repository/addon link graph of a database copy:
-    /// which repositories exist, how many `repository_addons` links each has,
-    /// and whether any links or addons dangle. Set FOXY_INSPECT_DB to the db
-    /// path (copy only). Run:
-    /// `cargo test -p Foxy inspect_repo_links -- --ignored --nocapture`
     #[tokio::test]
     #[ignore]
     async fn inspect_repo_links() {
@@ -2479,8 +2194,6 @@ mod tests {
             );
         }
 
-        // Id churn: max id far above the row count means rows are being
-        // deleted and recreated across rechecks instead of upserted in place.
         for t in ["addons", "files", "subfiles", "repositories"] {
             let sql = format!("SELECT COUNT(*), MIN(id), MAX(id) FROM {t}");
             match conn.query(&sql, ()).await {
@@ -2516,8 +2229,6 @@ mod tests {
             );
         }
 
-        // Which repo owns which id range: reveals creation order and whether a
-        // repo's graph was recreated after the other repo's.
         for (label, sql) in [
             (
                 "addon id ranges",
@@ -2549,17 +2260,12 @@ mod tests {
         }
     }
 
-    /// Probe: does Turso 0.7.2 `VACUUM INTO 'file'` survive a bloated copy
-    /// (compacted copy to a new file, which does NOT need the experimental
-    /// in-place vacuum flag)? Tiny dbs passed on 0.6.1; large files panicked.
-    /// Keep `copy_table` until a large bloated file is green. Run:
-    /// `cargo test -p Foxy probe_vacuum_into -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore]
     async fn probe_vacuum_into() {
         let (dir, db) = temp_db().await;
         let conn = connect_tuned(&db).await.unwrap();
-        // Make some bloat: insert a file + many subfiles, then delete them.
+
         conn.execute(
             "INSERT INTO files (id, name, remote_path, local_path) VALUES (1,'f','rp','lp')",
             (),
@@ -2615,12 +2321,6 @@ mod tests {
         }
     }
 
-    /// Large-file companion to [`probe_vacuum_into`]. The tiny probe passed on
-    /// 0.6.1 while production-sized files panicked in `vdbe/vacuum.rs`, so
-    /// `build_compacted_copy` cannot be replaced by VACUUM INTO until a bloated
-    /// multi-hundred-MB file is green. Bloats the db to `FOXY_VACUUM_PROBE_MB`
-    /// (default 512), deletes every row, then vacuums into a sibling file. Run:
-    /// `cargo test --release -p Foxy probe_vacuum_into_large_bloated_file -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore]
     async fn probe_vacuum_into_large_bloated_file() {
@@ -2679,7 +2379,7 @@ mod tests {
             "VACUUM INTO '{}'",
             into.to_string_lossy().replace('\\', "/")
         );
-        // A panic here (not an Err) is the 0.6.1 failure this probe exists to catch.
+
         match conn.execute(&vacuum_sql, ()).await {
             Ok(_) => {
                 let vacuumed_bytes = fs::metadata(&into).map(|m| m.len()).unwrap_or(0);
@@ -2696,11 +2396,6 @@ mod tests {
         }
     }
 
-    /// The shipped compaction path (manual SELECT/INSERT rebuild + file swap)
-    /// must preserve every live row and actually shrink the free list. Seeds a
-    /// file, bloats it with deletes, runs `compact_database_file`, then reopens
-    /// and verifies the swapped-in file has the same rows and far fewer free
-    /// pages.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn compaction_rebuilds_dense_and_preserves_rows() {
         let dir = tempfile::tempdir().unwrap();
@@ -2718,8 +2413,6 @@ mod tests {
             }
         }
 
-        // Seed: 1 repo, 1 addon, 1 file, link rows, and 6000 subfiles; then delete
-        // 5000 subfiles to strand free pages.
         {
             let db = build_and_bootstrap(&path_str).await.unwrap();
             let conn = connect_tuned(&db).await.unwrap();
@@ -2754,7 +2447,6 @@ mod tests {
             drop(db);
         }
 
-        // End-to-end through the panic-safe wrapper (rebuild copy + swap).
         assert!(
             compact_database_file(&path).await,
             "compaction should install the dense copy"
@@ -2780,14 +2472,10 @@ mod tests {
             free_after < 50,
             "expected dense file, got {free_after} free pages"
         );
-        // The original is retained as a backup.
+
         assert!(with_suffix(&path, ".bak").exists(), "original kept as .bak");
     }
 
-    /// Diagnostic: probe which repair ops Turso supports on a bloated db copy
-    /// (journal_mode switch off mvcc, VACUUM, incremental_vacuum). Operates on
-    /// the FOXY_INSPECT_DB copy (mutates it - copy only). Run:
-    /// `cargo test -p Foxy repair_db_probe -- --ignored --nocapture`
     #[tokio::test]
     #[ignore]
     async fn repair_db_probe() {
@@ -2822,12 +2510,6 @@ mod tests {
         run(&conn, "PRAGMA freelist_count").await;
     }
 
-    /// Decisive: run the real purge transaction on a copy of the bloated
-    /// production DB, after migrating it off mvcc to WAL. If this is ~tens of
-    /// seconds (vs the multi-minute production hang), switching journal mode off
-    /// mvcc fixes the hang in-place with no data loss. Set FOXY_INSPECT_DB to a
-    /// throwaway copy (mutated). `MODE=mvcc` env keeps mvcc as a control.
-    /// Run: `cargo test -p Foxy bench_purge_on_real_copy -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn bench_purge_on_real_copy() {
@@ -2940,16 +2622,6 @@ mod tests {
         );
     }
 
-    /// Isolate the REAL production wedge with ZERO concurrency: a single
-    /// connection running the SCOPED purge of ONE repo (leaving sibling repos'
-    /// rows in place), toggling `foreign_keys`. The whole-DB `bench_purge_on_real_copy`
-    /// never wedges because it deletes every child row first, so its FK checks are
-    /// trivial. Production deletes one repo among many, so `delete addons`/`delete
-    /// files` must FK-verify against the huge surviving sibling tables (~400k
-    /// `subfiles`) per deleted row. Run FK=ON (default) vs FK=OFF:
-    ///   FOXY_INSPECT_DB=<copy> REPO_LIKE=<url-substring> FK=ON  cargo test -p Foxy diag_scoped_purge_fk -- --ignored --nocapture
-    ///   FOXY_INSPECT_DB=<copy> REPO_LIKE=<url-substring> FK=OFF cargo test -p Foxy diag_scoped_purge_fk -- --ignored --nocapture
-    /// If ON wedges/crawls and OFF is fast, FK enforcement is the hang.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore]
     async fn diag_scoped_purge_fk() {
@@ -2962,13 +2634,12 @@ mod tests {
         conn.pragma_update("journal_mode", "wal")
             .await
             .expect("wal");
-        // foreign_keys MUST be set outside any transaction (ignored inside BEGIN).
+
         conn.pragma_update("foreign_keys", fk.as_str())
             .await
             .expect("fk");
         eprintln!("[diag-fk] repo_like={repo_like} foreign_keys={fk}");
 
-        // Build the scoped id sets in autocommit first (cheap, not the subject).
         for sql in [
             "CREATE TEMP TABLE temp.fp_repo (id INTEGER PRIMARY KEY)",
             "CREATE TEMP TABLE temp.fp_oaddon (addon_id INTEGER PRIMARY KEY)",
@@ -3059,20 +2730,6 @@ mod tests {
         );
     }
 
-    /// Reproduce the production force-redownload hang AND validate the fix: the
-    /// purge's big single write transaction runs while OTHER connections read the
-    /// same `Arc<turso::Database>` from SEPARATE runtimes (exactly what the UI /
-    /// background tasks do during the download). The single-connection
-    /// `bench_purge_on_real_copy` always completes in WAL, so a wedge here pins the
-    /// hang on cross-connection contention, not the SQL itself.
-    ///
-    /// Default routes the purge through the seam's exclusive transaction and the
-    /// readers through `FoxyDb::query_all`, so the `DB_EXCLUSIVE` barrier makes
-    /// readers yield and the purge completes - the test PASSES. Set
-    /// `BYPASS_BARRIER=1` to issue raw ungated connections instead (no barrier):
-    /// that wedges forever, demonstrating the original bug. Tune the concurrent
-    /// reader count with `READERS` (default 2).
-    /// Run: `FOXY_INSPECT_DB=<copy> REPO_LIKE=<url-substring> cargo test -p Foxy repro_purge_wedge_under_concurrency -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn repro_purge_wedge_under_concurrency() {
@@ -3088,7 +2745,7 @@ mod tests {
             .unwrap_or(2);
         let bypass = std::env::var("BYPASS_BARRIER").is_ok();
         let db = Arc::new(Builder::new_local(&path).build().await.expect("open db"));
-        // Migrate the copy off any persisted mvcc journal_mode to WAL (matches prod).
+
         {
             let conn = connect_tuned(&db).await.expect("connect");
             conn.pragma_update("journal_mode", "wal")
@@ -3103,15 +2760,12 @@ mod tests {
             let db = db.clone();
             let stop = stop.clone();
             workers.push(std::thread::spawn(move || {
-                // Each background reader gets its OWN tokio runtime and its OWN
-                // connection from the shared Arc<Database> - the production shape.
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async move {
                     let foxy = FoxyDb::from_turso(db.clone());
                     let mut n: i64 = 0;
                     while !stop.load(Ordering::Relaxed) {
                         if bypass {
-                            // Raw, ungated read on a fresh connection (pre-fix path).
                             if let Ok(conn) = connect_tuned(&db).await
                                 && let Ok(mut rows) =
                                     conn.query("SELECT COUNT(*) FROM subfiles", ()).await
@@ -3119,7 +2773,6 @@ mod tests {
                                 let _ = rows.next().await;
                             }
                         } else {
-                            // Seam read - takes the shared barrier, yields to purge.
                             let _ = foxy
                                 .query_all("SELECT COUNT(*) FROM subfiles", vec![])
                                 .await;
@@ -3136,9 +2789,7 @@ mod tests {
             "INSERT OR IGNORE INTO temp.fp_repo SELECT id FROM repositories WHERE remote_url LIKE '%{}%'",
             repo_like.replace('\'', "''")
         );
-        // Scope to ONE repository (REPO_LIKE substring of remote_url) so the
-        // purge matches a production single-repo force-redownload and leaves
-        // sibling repos' rows in place.
+
         let steps: Vec<(&str, String)> = vec![
             (
                 "create repo_ids",
@@ -3201,7 +2852,6 @@ mod tests {
 
         let txn = Instant::now();
         if bypass {
-            // Pre-fix path: raw connection, no barrier - wedges under readers.
             let conn = connect_tuned(&db).await.expect("purge connect");
             conn.execute("BEGIN", ()).await.unwrap();
             for (label, sql) in &steps {
@@ -3213,7 +2863,6 @@ mod tests {
             }
             conn.execute("COMMIT", ()).await.unwrap();
         } else {
-            // Fixed path: exclusive seam transaction quiesces the readers.
             let foxy = FoxyDb::from_turso(db.clone());
             foxy.transaction_exclusive("repro purge", |tx| {
                 let steps = steps.clone();
@@ -3242,12 +2891,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (`cargo test --release bench_connection_reuse -- --ignored --nocapture`).
-    /// The seam opens a fresh tuned connection for every `execute`/`query`, on the
-    /// 0.5-era claim that connections are ~16us. Turso 0.7.2 builds a new `Pager`,
-    /// reads page 1, clones the schema and runs five pragmas per connect, and its
-    /// statement cache dies with the connection - so this measures what the seam
-    /// pays per call and what reuse plus `prepare_cached` would save.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_connection_reuse() {
@@ -3255,7 +2898,6 @@ mod tests {
         const CALLS: usize = 2_000;
         let (_dir, db) = temp_db().await;
 
-        // Seed a realistically sized subfiles table so page-cache warmth matters.
         let seed = connect_tuned(&db).await.unwrap();
         seed.execute(
             "INSERT INTO files (id, name, remote_path, local_path) VALUES (1, 'f', 'rp', 'lp')",
@@ -3343,8 +2985,6 @@ mod tests {
             per_fresh / per_cached
         );
 
-        // Same comparison for a small write statement, which is what the seam's
-        // `execute_retry` and per-row upserts actually do.
         let wsql = "UPDATE subfiles SET data_order = data_order WHERE file_id = 1 AND path = ?";
         let t = Instant::now();
         for i in 0..500 {
@@ -3368,10 +3008,6 @@ mod tests {
         );
     }
 
-    /// Benchmark (`cargo test --release bench_cached_chunk_knee -- --ignored --nocapture`).
-    /// `bulk_write_chunk_rows` sits at 256 because Turso's per-statement parse and
-    /// plan cost is superlinear in row count. A pooled connection reuses compiled
-    /// programs, so this re-measures the knee with and without that reuse.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_cached_chunk_knee() {
@@ -3432,10 +3068,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (`cargo test --release bench_bulk_read_path -- --ignored --nocapture`).
-    /// The incremental hasher reloads every `subfiles` row for the repository in
-    /// one statement (433k rows, 1.66 s on the profiled case). Splits that between
-    /// the engine scan and the seam's per-row `DbRow`/`DbValue` materialization.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_bulk_read_path() {
@@ -3482,7 +3114,7 @@ mod tests {
         let ordered =
             format!("SELECT {COLUMNS} FROM subfiles ORDER BY file_id ASC, data_order ASC, id ASC");
         let in_list = vec!["?"; FILES].join(", ");
-        // The shape the incremental hasher actually issues (`model_tree.rs`).
+
         let scoped = format!(
             "SELECT {COLUMNS} FROM subfiles WHERE file_id IN ({in_list})              ORDER BY file_id ASC, data_order ASC, id ASC"
         );
@@ -3493,7 +3125,6 @@ mod tests {
         let shared = Arc::new(db);
         let fdb = crate::core::db::FoxyDb::from_turso(shared.clone());
 
-        // Warm the page cache so this measures materialization, not first-touch IO.
         let _ = fdb
             .query_all(&sql, crate::core::db::params![])
             .await
@@ -3537,7 +3168,6 @@ mod tests {
         let scoped_s = started.elapsed().as_secs_f64();
         assert_eq!(scoped_rows.len(), ROWS);
 
-        // The same scoping expressed as a subquery instead of a literal id list.
         let subquery = format!(
             "SELECT {COLUMNS} FROM subfiles WHERE file_id IN (SELECT id FROM files)              ORDER BY file_id ASC, data_order ASC, id ASC"
         );
@@ -3549,7 +3179,6 @@ mod tests {
         let subquery_s = started.elapsed().as_secs_f64();
         assert_eq!(subquery_rows.len(), ROWS);
 
-        // Unordered scan plus an in-process sort, for comparison with ORDER BY.
         let started = Instant::now();
         let mut sorted = fdb
             .query_all(&bare, crate::core::db::params![])
@@ -3564,7 +3193,7 @@ mod tests {
         });
         let rust_sort_s = started.elapsed().as_secs_f64();
         assert_eq!(sorted.len(), ROWS);
-        // Keep the database-side scoping but sort in process.
+
         let scoped_unordered =
             format!("SELECT {COLUMNS} FROM subfiles WHERE file_id IN ({in_list})");
         let binds: Vec<crate::core::db::DbValue> = (1..=FILES as i64)
@@ -3593,10 +3222,6 @@ mod tests {
         );
     }
 
-    /// Benchmark (`cargo test --release bench_subfiles_index_cost -- --ignored --nocapture`).
-    /// The download-overlapped deferred flush inserts 433k `subfiles` rows against
-    /// live indexes. Splits that cost between the table write, index maintenance in
-    /// key order, and index maintenance in arrival order.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_subfiles_index_cost() {
@@ -3611,8 +3236,6 @@ mod tests {
             )
         }
 
-        // (file_id, data_order) in either key order or the mod-completion order the
-        // deferred buffer actually arrives in.
         fn rows(sorted: bool) -> Vec<(i64, i64)> {
             let per_file = ROWS / FILES;
             let mut out = Vec::with_capacity(ROWS);
@@ -3698,10 +3321,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (`cargo test --release bench_subfiles_checksum_encoding -- --ignored --nocapture`).
-    /// The deferred flush writes each part's remote checksum as 64 hex characters.
-    /// Compares that against a 32-byte blob, in key order against the live unique
-    /// index, with part paths shaped like the real manifest's.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_subfiles_checksum_encoding() {
@@ -3789,10 +3408,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (`cargo test --release bench_subfiles_bulk_knobs -- --ignored --nocapture`).
-    /// The streamed part insert with foreign keys off, in key order against the
-    /// live unique index: page cache size and rows per statement, with the
-    /// insert, commit and a following checkpoint timed apart.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_subfiles_bulk_knobs() {
@@ -3875,10 +3490,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (`FOXY_BENCH_MANIFEST_DIR=<manifest_cache dir> cargo test --release
-    /// bench_subfiles_real_manifest_order -- --ignored --nocapture`). Inserts the part
-    /// rows of real cached manifests sorted by `data_order` (the file's entry order)
-    /// against sorted by `path` (the unique index's key order).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_subfiles_real_manifest_order() {
@@ -3969,11 +3580,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (`cargo test --release bench_addon_files_insert -- --ignored --nocapture`).
-    /// `addon_files insert` costs ~190 µs/row on the metadata rebuild, more than
-    /// twice the eight-column `files` upsert it accompanies, which points at its
-    /// two `ON DELETE CASCADE` parents rather than at row width. Splits the cost
-    /// between FK enforcement, the conflict clause, and the write itself.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_addon_files_insert() {
@@ -4042,15 +3648,11 @@ mod tests {
         }
     }
 
-    /// A released connection goes back to its database's pool, and the next
-    /// borrow reuses it rather than paying another connect.
     #[tokio::test]
     async fn pooled_connection_is_reused_after_release() {
         let (_dir, db) = temp_db().await;
         let db = Arc::new(db);
-        // Asserted against this database's own pool and connection identity, not
-        // the global connect counters: every other database test shares those and
-        // runs in parallel with this one.
+
         let first = {
             let conn = connect_pooled(&db).await.unwrap();
             conn.query("SELECT 1", ()).await.unwrap();
@@ -4073,8 +3675,6 @@ mod tests {
         );
     }
 
-    /// A connection left inside a transaction is dropped rather than pooled, so
-    /// the next borrower never inherits an open write.
     #[tokio::test]
     async fn connection_in_a_transaction_is_not_pooled() {
         let (_dir, db) = temp_db().await;
@@ -4090,8 +3690,6 @@ mod tests {
         );
     }
 
-    /// DDL retires pooled connections: a cached program compiled against the old
-    /// index roots must not survive a DROP/CREATE of that index.
     #[tokio::test]
     async fn ddl_retires_pooled_connections() {
         let (_dir, db) = temp_db().await;
@@ -4103,7 +3701,7 @@ mod tests {
         )
         .await
         .unwrap();
-        // Run the read twice so its program is admitted to the statement cache.
+
         let sql = "SELECT COUNT(*) AS c FROM subfiles WHERE file_id = 1";
         for _ in 0..2 {
             fdb.query_one(sql, crate::core::db::params![])
@@ -4145,9 +3743,6 @@ mod tests {
         );
     }
 
-    /// A database written under WAL can be reopened as MVCC and back without
-    /// losing rows. The engine mode is a file property, so switching the default
-    /// would have to migrate live databases in place rather than rebuild them.
     #[tokio::test]
     async fn wal_database_round_trips_through_mvcc() {
         let dir = tempfile::tempdir().unwrap();
@@ -4171,8 +3766,6 @@ mod tests {
         let conn = db.connect().unwrap();
         conn.pragma_update("journal_mode", "mvcc").await.unwrap();
         {
-            // A live `Rows` pins a read transaction, and dropping the database
-            // under one leaves the file locked for the next open.
             let mut rows = conn
                 .query("SELECT name FROM repositories WHERE id = 1", ())
                 .await

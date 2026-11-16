@@ -1,11 +1,9 @@
 use super::*;
 use crate::ui::app::debug_modals::DebugModal;
 
-/// How long a successful app update answer stays good.
 const APP_UPDATE_RECHECK_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(6 * 60 * 60);
-/// How soon a failed check is retried. Shorter than the success interval: a
-/// failure means the answer is unknown, and unknown is the state worth leaving.
+/// Retry failed checks sooner than successful checks because a failure leaves update status unknown.
 const APP_UPDATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 impl Foxy {
@@ -22,7 +20,6 @@ impl Foxy {
     }
 
     pub fn poll_app_update_events(&mut self) {
-        // Collect events first to avoid borrow conflicts with &self.app_update_event_rx
         let events: Vec<_> = self
             .app_update_event_rx
             .as_ref()
@@ -43,7 +40,7 @@ impl Foxy {
                         info.manifest.latest,
                         info.current_version
                     );
-                    // GitHub mode pre-populates changelogs; server mode fetches lazily
+
                     if !info.fetched_changelogs.is_empty() {
                         self.app_update_changelogs = std::mem::take(&mut info.fetched_changelogs);
                         self.app_update_changelogs_requested = true;
@@ -71,9 +68,7 @@ impl Foxy {
                 AppUpdateEvent::Error(msg) => {
                     log::warn!("Update check failed: {}", msg);
                     self.app_update_status = UpdateCheckStatus::Failed(msg);
-                    // Record the attempt, not just the answer: the retry timer
-                    // reads this, and without it a failed check would restart on
-                    // the next frame.
+                    // Record failed attempts so retry timing does not restart on every frame.
                     self.app_update_last_check = Some(std::time::Instant::now());
                     self.app_update_prompt_armed = false;
                     self.needs_repaint = true;
@@ -82,7 +77,6 @@ impl Foxy {
             }
         }
 
-        // Poll changelog fetch results (separate channel)
         if let Some(rx) = &self.app_update_changelog_rx {
             while let Ok(event) = rx.try_recv() {
                 match event {
@@ -106,7 +100,6 @@ impl Foxy {
             }
         }
 
-        // Poll download progress
         if let Some(rx) = &self.app_update_download_rx {
             while let Ok(event) = rx.try_recv() {
                 match event {
@@ -150,27 +143,15 @@ impl Foxy {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Actions
-    // -----------------------------------------------------------------------
-
-    /// Re-check for an app update while the session is still running.
-    ///
-    /// The launch check is the only one Foxy used to perform, so a session left
-    /// open across a release never learned about it. A background re-check costs
-    /// one request against a manifest that is already fetched at every launch.
     pub(in crate::ui) fn maybe_recheck_app_update(&mut self) {
         if !self.settings_view_state.app_update_auto_check || !self.app_update_source_configured() {
             return;
         }
-        // A real check would overwrite the seeded preview status, which is the
-        // same reason the launch check skips it.
+        // Skip checks during preview so they do not overwrite seeded status.
         if self.previewing_debug_modal(DebugModal::AppUpdate) {
             return;
         }
-        // Never interrupt a check in flight, a download, or a staged installer:
-        // restarting the check would discard state the user is about to act on.
-        // `Available` stops the timer too - the answer is already on screen.
+        // Do not restart checks during a check, download, or staged installer; an available update also stops polling.
         let interval = match &self.app_update_status {
             UpdateCheckStatus::Idle | UpdateCheckStatus::UpToDate(_) => APP_UPDATE_RECHECK_INTERVAL,
             UpdateCheckStatus::Failed(_) => APP_UPDATE_RETRY_INTERVAL,
@@ -186,10 +167,7 @@ impl Foxy {
             "Re-checking for an app update: no answer in the last {} minutes",
             interval.as_secs() / 60
         );
-        // Deliberately not arming the prompt. That modal is the launch prompt;
-        // opening it over a session in progress interrupts whatever the user is
-        // doing. The status still becomes `Available`, and the prompt returns on
-        // the next launch.
+        // Manual checks update status but do not interrupt the session with the launch-only prompt; it returns next launch.
         self.start_update_check();
     }
 
@@ -226,7 +204,6 @@ impl Foxy {
         self.app_update_changelog_loading.clear();
         self.app_update_changelogs_requested = false;
 
-        // Reset changelog channel
         let (cl_tx, cl_rx) = std::sync::mpsc::channel::<AppUpdateEvent>();
         self.app_update_changelog_tx = Some(cl_tx);
         self.app_update_changelog_rx = Some(cl_rx);
@@ -258,7 +235,6 @@ impl Foxy {
                 self.settings_view_state.app_update_url.trim().to_string()
             }
             crate::ui::types::AppUpdateMode::GitHub => {
-                // GitHub mode stores full URLs in installer_path, base_url is unused
                 String::new()
             }
         };
@@ -388,8 +364,4 @@ impl Foxy {
             }
         });
     }
-
-    // -----------------------------------------------------------------------
-    // Shared: download/install status rendering (used by both views)
-    // -----------------------------------------------------------------------
 }

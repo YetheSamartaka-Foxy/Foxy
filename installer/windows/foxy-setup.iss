@@ -1,7 +1,4 @@
-; Foxy Installer - Inno Setup Script
-; Build with: iscc /DAppVersion="0.6.0" /DSourceDir="..\..\target\x86_64-pc-windows-msvc\release" foxy-setup.iss
-; Needs Inno Setup 6.7 or later. Regenerate the art folder with tools/installer-art.
-
+; Requires Inno Setup 6.7 or newer.
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
@@ -60,17 +57,14 @@ WelcomeLabel2=This will install [name/ver], the multi-game mod updater, on your 
 [Tasks]
 Name: "startmenu"; Description: "Create Start Menu shortcut"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-; Only offered when a previous installation or its data directory is present.
-; Downloaded mod folders live wherever the user pointed each repository and are
-; never touched.
+; Offer data deletion only for an existing installation; downloaded mod folders
+; are user-managed and never removed.
 Name: "deleteuserdata"; Description: "Delete all existing Foxy user data (settings, databases, caches, logs)"; GroupDescription: "Existing installation:"; Flags: unchecked checkedonce; Check: HasExistingInstall
 
 [Files]
 Source: "{#SourceDir}\Foxy.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\foxy.ico"; DestDir: "{app}"; Flags: ignoreversion
-; Steamworks redistributable for the Workshop helper. Foxy delay-loads it, so a
-; missing copy only disables Workshop operations, but it must ship for
-; subscribe/download/remove to work at all.
+; Required by the Workshop helper's delayed Steamworks import.
 Source: "{#SourceDir}\steam_api64.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
@@ -79,21 +73,13 @@ Name: "{group}\Uninstall Foxy"; Filename: "{uninstallexe}"; Tasks: startmenu
 Name: "{autodesktop}\Foxy"; Filename: "{app}\Foxy.exe"; IconFilename: "{app}\foxy.ico"; Tasks: desktopicon; Comment: "Foxy - Arma 3 mod updater"
 
 [Registry]
-; Foxy must not run elevated: a game (and Steam) started from an elevated Foxy
-; inherits the admin token, which breaks Discord/TeamSpeak hotkeys and OBS
-; capture for the game window. Earlier installers set the "Run as
-; administrator" AppCompat layer here, so remove any leftover value for this
-; exe path. The HKLM copy can only be removed when setup itself is elevated.
+; Foxy needs no administrator token and must interoperate with unelevated overlays.
 Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"; ValueType: none; ValueName: "{app}\Foxy.exe"; Flags: deletevalue; Check: IsAdminInstallMode
 Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"; ValueType: none; ValueName: "{app}\Foxy.exe"; Flags: deletevalue
 
 [Run]
-; shellexec starts Foxy through ShellExecute, so a "Run as administrator"
-; compatibility flag the user set on Foxy.exe produces a UAC prompt instead of
-; CreateProcess failing with error 740 (ERROR_ELEVATION_REQUIRED) from the
-; unelevated setup.
+; ShellExecute honors a user-set elevation flag and prompts for consent.
 Filename: "{app}\Foxy.exe"; Description: "Launch Foxy"; Flags: nowait postinstall skipifsilent shellexec
-; In silent mode (auto-update), always relaunch
 Filename: "{app}\Foxy.exe"; Flags: nowait skipifnotsilent shellexec
 
 [UninstallDelete]

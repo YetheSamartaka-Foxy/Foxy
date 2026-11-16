@@ -134,11 +134,9 @@ mod tests {
                 ..Default::default()
             },
         ];
-        // max of (0+200=200, 100+200=300)
+
         assert_eq!(expected_remote_end(&parts), Some(300));
     }
-
-    // ── log_suspicious_manifest_paths ──────────────────────────────────
 
     #[test]
     fn log_suspicious_manifest_paths_empty_parts_does_not_panic() {
@@ -147,7 +145,7 @@ mod tests {
             remote_path: "test".to_string(),
             ..Default::default()
         };
-        // Should not panic on empty parts
+
         log_suspicious_manifest_paths(&file, &[]);
     }
 
@@ -188,11 +186,9 @@ mod tests {
         };
         let mut dup2 = dup.clone();
         dup2.data_order = 1;
-        // Two parts share the same display path - should not panic while logging.
+
         log_suspicious_manifest_paths(&file, &[dup, dup2]);
     }
-
-    // ── local_file_matches_part_layout (filesystem) ─────────────────────
 
     fn file_with_local(path: &std::path::Path, length: u64) -> FoxyModFile {
         FoxyModFile {
@@ -265,7 +261,7 @@ mod tests {
         let path = dir.path().join("f.pbo");
         std::fs::write(&path, vec![0u8; 100]).unwrap();
         let file = file_with_local(&path, 100);
-        // Parts only describe 90 bytes while the file is 100 bytes long.
+
         let parts = vec![FoxyModFilePart {
             remote_start: 0,
             remote_length: 90,

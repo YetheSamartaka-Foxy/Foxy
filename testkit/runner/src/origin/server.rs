@@ -24,7 +24,6 @@ use tokio::{net::TcpListener, sync::oneshot, task::JoinSet};
 use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
-/// Response-shape controls for adverse-origin lanes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Impairment {
     pub delay_ms: u64,
@@ -197,10 +196,7 @@ pub struct Origin {
     thread: Option<thread::JoinHandle<()>>,
 }
 
-/// Give every manifest under `root` a fresh modification time, as a server that
-/// regenerates its repository does. The origin answers conditional requests from
-/// `Last-Modified` alone, so a switched-in root whose manifests are older than the
-/// ones a client cached would otherwise be served as 304 and never seen.
+/// Refresh Last-Modified on republish; older timestamps would incorrectly return 304 against the client's cached manifests.
 pub fn touch_manifests(root: &Path) -> Result<usize> {
     let now = std::time::SystemTime::now();
     let mut touched = 0;

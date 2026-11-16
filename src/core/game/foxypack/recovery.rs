@@ -198,7 +198,6 @@ pub(super) fn begin_import_recovery(space_dir: &Path) -> Result<(), String> {
     .map_err(|err| format!("Failed to write config-pack recovery journal: {}", err))
 }
 
-/// Restores an interrupted config-pack import for this game space.
 pub fn recover_pending_import(space_dir: &Path) -> Result<(), String> {
     let _claim = ImportClaim::acquire(space_dir, false)?;
     recover_pending_import_inner(&_claim.space_dir)
@@ -242,7 +241,6 @@ pub(super) fn recover_pending_import_inner(space_dir: &Path) -> Result<(), Strin
         .map_err(|err| format!("Failed to clear config-pack recovery data: {}", err))
 }
 
-/// Rolls back a failed import that is still owned by this process.
 pub fn rollback_pending_import(space_dir: &Path) -> Result<(), String> {
     let key = canonical_space_dir(space_dir)?;
     let operation = active_import_operation_lock(&key)?;
@@ -258,7 +256,6 @@ pub fn rollback_pending_import(space_dir: &Path) -> Result<(), String> {
     result
 }
 
-/// Marks the current import durable after the caller has saved its config files.
 pub fn commit_pending_import(space_dir: &Path) -> Result<(), String> {
     let key = canonical_space_dir(space_dir)?;
     let operation = active_import_operation_lock(&key)?;

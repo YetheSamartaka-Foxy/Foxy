@@ -2,17 +2,7 @@ use super::persistence::{calculate_compound_content_hash, persist_repository_che
 use super::*;
 use crate::core::db::{FoxyDb, params};
 
-/// Lightweight pre-propagation: before running expensive hashing for a repository,
-/// copy `local_checksum` values from sibling files/parts that share the same
-/// `local_path` and `remote_checksum`. This lets the hashing phase skip files
-/// that were already hashed by a sibling repository on the same disk.
-///
-/// The content-hash baseline is copied alongside: a file the hash pass skips
-/// because a sibling already proved it synced never gets its own baseline
-/// refresh, and the quick scan treats an empty baseline as a content mismatch
-/// while the download queue (built from tree checksums) stays empty.
-///
-/// Returns the number of file-level checksum updates applied.
+/// Propagate sibling checksums and content baselines so skipped files remain quick-scan complete.
 pub(crate) async fn pre_propagate_sibling_checksums(
     context: Arc<FoxyContext>,
     repository_url: &str,
@@ -29,9 +19,6 @@ async fn pre_propagate_sibling_tree_checksums(
     repository_url: &str,
     start: Instant,
 ) -> u64 {
-    // Early bail-out: check if this repo has any unsynced files with a synced
-    // sibling. This cheap EXISTS avoids running expensive UPDATEs when there is
-    // nothing to propagate (e.g. single-repository setups).
     let has_propagatable = matches!(
         db.query_one(
             r#"SELECT 1
@@ -67,14 +54,7 @@ async fn pre_propagate_sibling_tree_checksums(
         return 0;
     }
 
-    // NOTE: Part-level pre-propagation is intentionally skipped here.
-    // When a file is selected for hashing, build_file_hash_jobs hashes ALL its
-    // parts regardless of existing checksums - propagated part checksums would
-    // just be overwritten. Only file-level and addon-level propagation matter
-    // because they prevent entire files/addons from entering the hash pipeline.
-
-    // Propagate file-level checksums from sibling files with the same local_path
-    // and remote_checksum that are already synced.
+    // Part checksums are recomputed for every selected file; propagate only file/addon state that skips hashing.
     let file_updates = match db
         .execute_retry(
             "pre-propagate sibling file checksums",
@@ -114,7 +94,6 @@ async fn pre_propagate_sibling_tree_checksums(
         }
     };
 
-    // Propagate addon-level checksums from siblings with same name + local_path.
     let addon_updates = match db
         .execute_retry(
             "pre-propagate sibling addon checksums",
@@ -164,10 +143,7 @@ async fn pre_propagate_sibling_tree_checksums(
     file_updates
 }
 
-/// Copy `local_content_hash` from synced siblings onto files and addons of the
-/// repository that are tree-synced but have no content-hash baseline yet. Runs
-/// independently of the tree-checksum bail-out because the tree checksums may
-/// already have been propagated by an earlier pass that predates this copy.
+/// Copy content baselines independently; tree checksums may have been propagated by an earlier pass.
 async fn pre_propagate_sibling_content_hashes(db: &FoxyDb, repository_url: &str) {
     let start = Instant::now();
     let has_propagatable = matches!(
@@ -325,12 +301,7 @@ struct SiblingPropagationStats {
     file_content_hash_updates: u64,
 }
 
-/// Propagate synced checksum state to sibling repositories that share the same
-/// addon local paths and expect the same remote content. This prevents redundant
-/// re-downloads when multiple repositories in the same space reference identical addons.
-///
-/// Only propagates where the sibling's `remote_checksum` matches the source's, guarding
-/// against incorrectly marking a different-version addon as synced.
+/// Propagate only matching remote checksums so a sibling on another version is never marked synced.
 pub(crate) async fn propagate_checksums_to_siblings(
     context: Arc<FoxyContext>,
     repository_url: &str,
@@ -338,9 +309,6 @@ pub(crate) async fn propagate_checksums_to_siblings(
     let db = context.db();
     let start = Instant::now();
 
-    // Early bail-out: check if this repository has any sibling addons at all.
-    // This is a cheap EXISTS query that avoids running expensive 12-table JOINs
-    // when there are no siblings to propagate to.
     let has_siblings = matches!(
         db.query_one(
             r#"SELECT 1 FROM repository_addons ra_source
@@ -374,8 +342,6 @@ pub(crate) async fn propagate_checksums_to_siblings(
     let repository_url_owned = repository_url.to_owned();
     let stats_state = Arc::new(std::sync::Mutex::new(SiblingPropagationStats::default()));
 
-    // Transaction 1: Propagate checksums (addon, file, part).
-    // Split from content hash propagation to reduce write-lock hold time.
     {
         let stats_state_cloned = Arc::clone(&stats_state);
         let repo_url = repository_url_owned.clone();
@@ -514,9 +480,7 @@ pub(crate) async fn propagate_checksums_to_siblings(
         }
     }
 
-    // Transaction 2: Propagate content hashes (addon, file).
-    // Logically independent from checksums - a partial failure here is recoverable
-    // because a subsequent run will pick up any missing content hashes.
+    // Content-hash propagation is independent and recoverable on a later run.
     {
         let stats_state_cloned = Arc::clone(&stats_state);
         let repo_url = repository_url_owned.clone();
@@ -677,9 +641,7 @@ pub(crate) async fn propagate_checksums_to_siblings(
         repository_url
     );
 
-    // Finalize repository-level hashes for affected sibling repos so their
-    // quick scan sees a fully consistent tree. Only needed when checksum-level
-    // propagation occurred (content-hash-only changes don't affect repo checksums).
+    // Recompute repository rollups only after tree-checksum propagation.
     if !any_checksum_updates && !any_content_hash_updates {
         return Vec::new();
     }
@@ -744,8 +706,7 @@ pub(crate) async fn propagate_checksums_to_siblings(
         );
     }
 
-    // A sibling's pending update can still hold addons the source repository
-    // does not share, so it is left for the sibling's own quick scan to settle.
+    // Preserve sibling pending updates for addons this source repository does not contain.
     sibling_urls
 }
 

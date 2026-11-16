@@ -69,7 +69,6 @@ impl Foxy {
         self.last_applied_palette = Some(palette.clone());
     }
 
-    /// Returns the cached Color32 values, rebuilding the cache if the palette changed.
     fn color_cache(&self) -> &CachedPaletteColor32 {
         self.cached_color32
             .as_ref()
@@ -253,9 +252,7 @@ impl Foxy {
         Self::square_icon_button_size(icon_size, 30.0)
     }
 
-    /// Body and title-bar chrome for titled modal dialogs. Pass the same frame to
-    /// `Window::frame` and `Window::title_frame` so the title bar follows Foxy's
-    /// palette instead of the default window style.
+    /// Reuse one frame for body and title bar so both follow Foxy's palette.
     pub fn modal_window_chrome(&self, ctx: &egui::Context) -> egui::Frame {
         egui::Frame::window(&ctx.global_style())
             .fill(self.color_card_bg())
@@ -427,10 +424,7 @@ impl Foxy {
         .inner
     }
 
-    /// Apply the user-selected global UI scale to the egui zoom factor.
-    /// The percentage multiplies the platform's native scale, so 100% leaves
-    /// the OS-reported scaling untouched. Only updates when the value actually
-    /// differs to avoid forcing a relayout every frame.
+    /// Apply UI scale relative to native platform scale; update only on change to avoid per-frame relayout.
     pub(in crate::ui::app) fn apply_runtime_ui_scale(&self, ctx: &egui::Context) {
         let target = (self.settings_view_state.ui_scale_percent as f32 / 100.0).clamp(0.05, 5.0);
         if (ctx.zoom_factor() - target).abs() > f32::EPSILON {
@@ -438,9 +432,7 @@ impl Foxy {
         }
     }
 
-    /// Reduce motion zeroes egui's animation time, which stops Foxy's activity
-    /// visuals along with egui's own transitions. Stable-render screenshots
-    /// own the value while they are on.
+    /// Stable-render controls reduced-motion state while active.
     pub(in crate::ui::app) fn apply_runtime_motion_preference(&self, ctx: &egui::Context) {
         if self
             .agent_gui
@@ -459,13 +451,6 @@ impl Foxy {
         }
     }
 
-    /// Drop every frame-persistent galley cache.
-    ///
-    /// Cached `Arc<Galley>`s hold pixel UVs into egui's font atlas. When egui
-    /// recreates that atlas (glyphs repack into new positions), the stale UVs
-    /// sample the wrong glyphs and paint as garbled text. The per-cache
-    /// fingerprints track font sizes and colors but not atlas recreation, so we
-    /// drop the caches here to force a one-off re-shape against the current atlas.
     pub(in crate::ui::app) fn reset_all_list_galley_caches(&mut self) {
         self.mission_row_galleys = Default::default();
         self.activity_log_galleys = Default::default();
@@ -485,6 +470,7 @@ impl Foxy {
         &mut self,
         ctx: &egui::Context,
     ) {
+        // Atlas changes invalidate cached galley UVs even when layout inputs stay the same.
         let size = ctx.fonts(|fonts| fonts.font_image_size());
         let pixels_per_point = ctx.pixels_per_point();
         if size == self.last_font_image_size
@@ -503,17 +489,12 @@ impl Foxy {
             .as_ref()
             .is_none_or(|last| *last != self.settings_view_state.palette_colors);
 
-        // Rebuild the Color32 cache and Visuals only when palette actually changed.
         self.ensure_color32_cache();
 
         if !palette_changed {
             return;
         }
 
-        // A palette/theme change can recreate the font atlas while the list views
-        // are off-screen, leaving their persistent galley caches stale. Drop them
-        // here so the views re-shape on return, without depending on the atlas-size
-        // detector's frame timing.
         self.reset_all_list_galley_caches();
 
         let cache = self.color_cache();
@@ -527,9 +508,7 @@ impl Foxy {
         visuals.error_fg_color = cache.error;
         visuals.interact_cursor = Some(CursorIcon::PointingHand);
 
-        // Preserve egui's original dark tones for unchanged default palette
-        // colors. Once a related palette color is customized (including by a
-        // preset), the surface follows that color instead.
+        // Preserve default dark tones until a related palette color is customized.
         let primary_changed = cache.primary_accent != palette::PRIMARY_ACCENT;
         let main_changed = cache.main_bg != palette::MAIN_BG;
         let card_changed = cache.card_bg != palette::CARD_BG;

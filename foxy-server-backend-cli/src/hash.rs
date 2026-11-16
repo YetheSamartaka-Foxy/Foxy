@@ -13,9 +13,8 @@ use crate::types::{
 };
 
 const BUF_SIZE_SWIFTY: usize = 256 * 1024;
-const BUF_SIZE_FOXY: usize = 1024 * 1024; // BLAKE3 benefits from larger buffers
+const BUF_SIZE_FOXY: usize = 1024 * 1024;
 
-/// Unified hasher wrapping either MD5 or BLAKE3.
 enum FlexHasher {
     Md5(Md5),
     Blake3(Box<blake3::Hasher>),
@@ -51,7 +50,6 @@ fn buf_size_for_mode(mode: GenerationMode) -> usize {
     }
 }
 
-/// Assemble a `Checksums` from optional MD5 and BLAKE3 values based on mode.
 fn assemble_checksums(
     md5: Option<String>,
     blake3: Option<String>,
@@ -79,17 +77,14 @@ fn finalize_checksums(
     )
 }
 
-/// A file work item bundled with its mod context.
 struct FileWorkItem {
     file: DiscoveredFile,
     mod_index: usize,
     file_data_order: usize,
-    /// `None` when the mod is hashed in place and nothing is copied.
+
     output_path: Option<std::path::PathBuf>,
 }
 
-/// Process all mods: hash parts and compute checksums, copying every file into
-/// `<output_dir>/<mod>/` when an output directory is given.
 pub fn process_mods(
     resolved_mods: &[ResolvedMod],
     output_dir: Option<&Path>,
@@ -225,12 +220,10 @@ pub(crate) fn compute_mod_checksums(files: &[ModFile], mode: GenerationMode) -> 
     assemble_checksums(md5, blake3, mode)
 }
 
-/// Compute the repository-level checksum (SHA-1, SwiftyMode-compatible).
 pub fn compute_repo_checksum(mods: &[ProcessedMod]) -> String {
     compute_repo_checksum_for_ticks(mods, current_utc_ticks())
 }
 
-/// Compute the repository-level BLAKE3 checksum (FoxyMode).
 pub fn compute_foxy_repo_checksum(mods: &[ProcessedMod]) -> String {
     let mut hasher = FlexHasher::new_blake3();
     for checksum in mods
@@ -250,7 +243,6 @@ pub fn compute_foxy_repo_checksum(mods: &[ProcessedMod]) -> String {
     hasher.finalize_hex()
 }
 
-/// Compute SHA-1 hash of a file at the given path (for repo/icon images).
 pub fn hash_file_sha1(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
@@ -266,8 +258,6 @@ pub fn hash_file_sha1(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()).to_uppercase())
 }
 
-/// Hash a file's parts in a single I/O pass, copying it to `dest` when given.
-/// In HybridMode, computes both MD5 and BLAKE3 from the same read.
 fn copy_and_hash_file(
     source: &Path,
     dest: Option<&Path>,
@@ -361,7 +351,6 @@ fn copy_and_hash_file(
         part.checksums = finalize_checksums(md5_hasher, b3_hasher, mode);
     }
 
-    // Copy any remaining bytes after the last part
     loop {
         let n = src_file.read(&mut buf).context("Failed to read")?;
         if n == 0 {
@@ -383,8 +372,6 @@ fn copy_and_hash_file(
     })
 }
 
-/// Hash a file into content-defined parts while copying it, in one read: the
-/// boundaries are found in the same buffers the part hashers consume.
 fn copy_and_hash_content_defined(
     source: &Path,
     dest: Option<&Path>,
@@ -519,8 +506,6 @@ fn compute_file_checksums(parts: &[FilePart], mode: GenerationMode) -> Checksums
     assemble_checksums(md5, blake3, mode)
 }
 
-/// Destination of the bytes read while hashing: the copied file, or nothing
-/// when a mod is hashed in place.
 enum Sink {
     File(BufWriter<std::fs::File>),
     Discard,
@@ -542,7 +527,6 @@ impl Sink {
     }
 }
 
-/// Copy exactly `count` bytes from reader to writer without hashing.
 fn copy_bytes(
     reader: &mut std::fs::File,
     writer: &mut Sink,
@@ -560,10 +544,6 @@ fn copy_bytes(
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Rollup functions (algorithm-agnostic via FlexHasher)
-// ---------------------------------------------------------------------------
 
 fn compute_parent_checksum<'a>(
     mut hasher: FlexHasher,
@@ -616,10 +596,6 @@ pub(crate) fn compute_repo_checksum_for_ticks(mods: &[ProcessedMod], ticks: u64)
 
     hex::encode(hasher.finalize()).to_uppercase()
 }
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
 
 fn clean_addon_path(path: &str) -> String {
     path.chars()
@@ -885,18 +861,14 @@ mod tests {
         assert!(!cs1.is_empty());
     }
 
-    // ── FlexHasher ──────────────────────────────────────────────────────
-
     #[test]
     fn flex_hasher_md5_known_value() {
-        // MD5("") = D41D8CD98F00B204E9800998ECF8427E
         let h = FlexHasher::new_md5();
         assert_eq!(h.finalize_hex(), "D41D8CD98F00B204E9800998ECF8427E");
     }
 
     #[test]
     fn flex_hasher_blake3_known_value() {
-        // BLAKE3("") full 64-char hex
         let h = FlexHasher::new_blake3();
         let hex = h.finalize_hex();
         assert_eq!(hex.len(), 64);
@@ -909,8 +881,6 @@ mod tests {
         h.update(b"hello");
         assert_eq!(h.finalize_hex(), "5D41402ABC4B2A76B9719D911017C592");
     }
-
-    // ── clean_addon_path ────────────────────────────────────────────────
 
     #[test]
     fn clean_addon_path_strips_separators_and_uppercases() {
@@ -932,8 +902,6 @@ mod tests {
         assert_eq!(clean_addon_path(""), "");
     }
 
-    // ── normalize_checksum_path ─────────────────────────────────────────
-
     #[test]
     fn normalize_checksum_path_backslash_to_forward_preserves_case() {
         assert_eq!(
@@ -954,8 +922,6 @@ mod tests {
     fn normalize_checksum_path_empty() {
         assert_eq!(normalize_checksum_path(""), "");
     }
-
-    // ── assemble_checksums ──────────────────────────────────────────────
 
     #[test]
     fn assemble_checksums_swifty() {
@@ -980,8 +946,6 @@ mod tests {
         assert_eq!(cs.unwrap_blake3(), "B3");
     }
 
-    // ── buf_size_for_mode ───────────────────────────────────────────────
-
     #[test]
     fn buf_size_swifty_is_256k() {
         assert_eq!(buf_size_for_mode(GenerationMode::Swifty), 256 * 1024);
@@ -996,8 +960,6 @@ mod tests {
     fn buf_size_hybrid_is_1m() {
         assert_eq!(buf_size_for_mode(GenerationMode::Hybrid), 1024 * 1024);
     }
-
-    // ── compute_parent_checksum ─────────────────────────────────────────
 
     #[test]
     fn compute_parent_checksum_deterministic() {
@@ -1021,15 +983,13 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    // ── hash_file_sha1 ─────────────────────────────────────────────────
-
     #[test]
     fn hash_file_sha1_known_value() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.txt");
         std::fs::write(&file, b"hello").unwrap();
         let hash = hash_file_sha1(&file).unwrap();
-        // SHA-1("hello") = AAF4C61DDCC5E8A2DABEDE0F3B482CD9AEA9434D
+
         assert_eq!(hash, "AAF4C61DDCC5E8A2DABEDE0F3B482CD9AEA9434D");
     }
 
@@ -1039,7 +999,7 @@ mod tests {
         let file = dir.path().join("empty.txt");
         std::fs::File::create(&file).unwrap();
         let hash = hash_file_sha1(&file).unwrap();
-        // SHA-1("") = DA39A3EE5E6B4B0D3255BFEF95601890AFD80709
+
         assert_eq!(hash, "DA39A3EE5E6B4B0D3255BFEF95601890AFD80709");
     }
 
@@ -1049,12 +1009,10 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── current_utc_ticks ───────────────────────────────────────────────
-
     #[test]
     fn current_utc_ticks_is_reasonable() {
         let ticks = current_utc_ticks();
-        // Should be well past the .NET epoch and well past Unix epoch in ticks
+
         let min_2024_ticks: u64 = 638_400_000_000_000_000;
         assert!(
             ticks > min_2024_ticks,
@@ -1062,8 +1020,6 @@ mod tests {
             ticks
         );
     }
-
-    // ── compute_foxy_repo_checksum ──────────────────────────────────────
 
     #[test]
     fn foxy_repo_checksum_separates_required_optional() {
@@ -1103,7 +1059,7 @@ mod tests {
                 client_side: false,
             },
         ];
-        // Swapping required/optional should change the checksum
+
         assert_ne!(
             compute_foxy_repo_checksum(&mods_ab),
             compute_foxy_repo_checksum(&mods_ba)

@@ -1,8 +1,3 @@
-//! Render the curated measurement table from structured records, so the
-//! current block of `conventions/SPEED_OF_LIGHT_MEASUREMENTS.md` is generated
-//! from accepted baselines and the latest valid ledger rows rather than typed
-//! by hand.
-
 use crate::{
     collect::expect::dotted,
     ledger::{self, median, op_key, round},
@@ -12,8 +7,6 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// One line of the table: the latest valid lane of one case operation, with
-/// the accepted baseline it compares against when one exists.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeasurementRow {
     pub date: String,
@@ -51,9 +44,7 @@ fn metric_kind(row: &Value) -> String {
     }
 }
 
-/// The ratio for the operation's primary work. An unrated primary operation
-/// stays `n/a`; a rated child with narrower scope must not become the action's
-/// headline merely because it has a number.
+/// An unrated primary operation stays n/a; a narrower rated child cannot become its headline ratio.
 fn sol_pick(rows: &[&Value]) -> (Option<f64>, String) {
     let median_of = |path: &str| {
         median(
@@ -123,8 +114,6 @@ fn work_summary(row: &Value) -> String {
     }
 }
 
-/// The rows of one case: the latest run's valid steady-state rows per
-/// operation key, reduced to medians, plus the baseline verdict.
 pub fn rows_for_case(
     case_id: &str,
     rows: &[Value],
@@ -231,7 +220,6 @@ pub fn rows_for_case(
         .collect()
 }
 
-/// Markdown table with operation and SoL first, one line per case lane.
 pub fn markdown(rows: &[MeasurementRow]) -> String {
     let mut out = String::from(
         "| Date | Case | Operation | SoL (kind) | Lane | Elapsed | Baseline | Samples | Work | Outcome | Build | Run |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
@@ -264,7 +252,6 @@ pub fn markdown(rows: &[MeasurementRow]) -> String {
     out
 }
 
-/// Every case with a ledger under `ledger_dir`, newest run first per case.
 pub fn render(ledger_dir: &Path, filter: Option<&str>, as_json: bool) -> Result<String> {
     let mut rows = Vec::new();
     let mut entries: Vec<_> = std::fs::read_dir(ledger_dir)

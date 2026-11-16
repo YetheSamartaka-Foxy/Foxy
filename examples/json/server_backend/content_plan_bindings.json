@@ -1,0 +1,4 @@
+[
+  { "source_id": "RepoAlpha", "role": "required", "order": 0 },
+  { "source_id": "RepoBeta", "role": "server_only", "order": 1 }
+]

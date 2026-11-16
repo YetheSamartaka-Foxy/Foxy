@@ -1,7 +1,4 @@
-/// State-filter keywords recognized by the repository filters. These are
-/// matched against per-item state tags (see [`MultiEntryFilter::matches_with_tags`])
-/// in addition to the usual name/address substring matching. Kept lowercase so
-/// they can be compared directly against parsed (lowercased) filter entries.
+/// Recognize lowercase state keywords alongside name/address substrings; see `MultiEntryFilter::matches_with_tags`.
 pub const STATE_KEYWORD_INSTALLED: &str = "installed";
 pub const STATE_KEYWORD_NOT_INSTALLED: &str = "not installed";
 pub const STATE_KEYWORD_ATTACHED: &str = "attached";
@@ -44,11 +41,7 @@ impl MultiEntryFilter {
             })
     }
 
-    /// Like [`matches_any`](Self::matches_any), but an entry also matches when it
-    /// is exactly equal to one of the provided `state_tags` (for example
-    /// `"installed"` or `"attached"`). Tags must already be lowercase. This lets
-    /// the repository filters recognize state keywords alongside the usual
-    /// name/address substring matching.
+    /// State tags must already be lowercase and match exactly, preventing `installed` from matching `not installed`.
     pub fn matches_with_tags(&self, values: &[&str], state_tags: &[&str]) -> bool {
         self.matches_with_tag_constraints(
             |entry| {

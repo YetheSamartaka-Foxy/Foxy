@@ -3,8 +3,8 @@ name = "foxy-server-backend-cli"
 version = "1.2.2"
 edition = "2024"
 rust-version = "1.96"
-# Application crate under the Foxy Community Source License (see ../LICENSE),
-# not an open-source library; never published to a public registry.
+# Application crate under the Foxy Community Source License (see ../LICENSE);
+# not published to a public registry.
 publish = false
 license-file = "../LICENSE"
 

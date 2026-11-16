@@ -22,16 +22,7 @@ use crate::core::models::repository::{REPOSITORY_COLUMNS, repository_from_row};
 use crate::core::utils::fetch_json::fetch_json_fresh;
 
 const STARTUP_REMOTE_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
-/// Whole-stage budget for the startup remote probe.
-///
-/// A backstop for a probe that outlives its own per-request timeout, not a
-/// shorter deadline than it: cutting the stage before
-/// [`STARTUP_REMOTE_CHECK_TIMEOUT`] would abandon repositories whose server is
-/// merely slow, and a slow server that is about to answer "changed" is exactly
-/// the answer startup must not lose. Past this budget the outstanding
-/// repositories are reported as unknown remote freshness, which is what
-/// `conventions/SYNC_ALGO_CONVENTION.md` prescribes for a `repo.json` probe
-/// timeout: fall back to the local quick scan and say so in the logs.
+/// Let each request reach its own timeout, then bound the stage; unprobed repositories remain unknown.
 const STARTUP_REMOTE_PROBE_BUDGET: Duration =
     Duration::from_secs(STARTUP_REMOTE_CHECK_TIMEOUT.as_secs() + 2);
 
@@ -73,11 +64,10 @@ pub struct StartupQuickScanPlan {
     /// Probe got no answer. The local quick scan still runs when the repository
     /// is eligible; a later retry probes these again.
     pub remote_unknown_repositories: Vec<StartupRepositoryInstance>,
-    /// True when eligibility planning ran to completion.
+
     pub completed: bool,
 }
 
-/// What one later probe of repositories that did not answer at launch decided.
 #[derive(Debug, Default)]
 pub struct StartupProbeRetryPlan {
     pub remote_changed_repositories: Vec<StartupRepositoryInstance>,
@@ -284,7 +274,6 @@ pub async fn recalculate_hashes_for_addon_by_name(
     Ok(true)
 }
 
-/// Returns repository instances that already have a database row.
 pub fn filter_repo_instances_with_db_entry(
     repositories: Vec<StartupRepositoryInstance>,
 ) -> HashSet<StartupRepositoryInstance> {
@@ -486,12 +475,7 @@ pub fn plan_startup_quick_scan_repos(
     })
 }
 
-/// What one `repo.json` probe learned about a repository's remote freshness.
-///
-/// `Unknown` is not `Unchanged`. A server that is down, slow, or serving a
-/// checksum this repository cannot be compared against tells us nothing, and
-/// reporting that as "up to date" is how a real remote update goes unnoticed
-/// until the user rechecks by hand.
+/// Unknown freshness is not unchanged; missing or incomparable remote state cannot suppress an update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RemoteFreshness {
     Changed,
@@ -499,17 +483,7 @@ pub(crate) enum RemoteFreshness {
     Unknown,
 }
 
-/// Decide freshness from the remote `repo.json` checksum and what the database
-/// already knows about this repository instance.
-///
-/// The stored remote checksum is the authoritative comparison: it is the value
-/// this same field held the last time the repository was refreshed, so it is
-/// always the remote's own algorithm and a difference means the published
-/// repository moved. The local rollup is only a fallback for an instance that
-/// has never completed a refresh, and it is comparable only when both sides
-/// are the same width - a FoxyMode repository stores a BLAKE3 rollup locally
-/// while `repo.json` may publish a SHA-1, and comparing those can only ever
-/// produce a false "changed".
+/// Prefer the stored remote checksum; use local rollups only before the first refresh and when algorithms match.
 pub(crate) fn remote_freshness(
     remote_checksum: &str,
     stored_remote_checksum: &str,
@@ -674,8 +648,7 @@ async fn startup_remote_changed_repositories(
     let probed = join_set.len();
     let mut probe = empty();
     let mut answered = 0usize;
-    // When the first and the last branch answered: a slow host shows up as
-    // the gap between the two, not as a slow probe overall.
+
     let mut first_answer: Option<Duration> = None;
     let mut last_answer: Option<Duration> = None;
     let deadline = tokio::time::Instant::now() + STARTUP_REMOTE_PROBE_BUDGET;
@@ -837,9 +810,6 @@ async fn repositories_with_pending_updates(
     }
 }
 
-/// Probe repositories that did not answer at launch, and route the answers the
-/// same way startup does. Unchanged repositories with no saved pending update
-/// are left as the launch quick scan already decided them.
 pub fn plan_startup_probe_retry(
     repositories: Vec<StartupRepositoryInstance>,
 ) -> StartupProbeRetryPlan {
@@ -917,15 +887,10 @@ struct QuickScanWorkerRepoOutcome {
     stage: StageEntry,
 }
 
-/// Canonicalize a download folder so quick-scan instance identity matches the
-/// repository row, the pending-update key, and the UI's `repository.path`.
 fn normalize_instance_path(local_path: &str) -> String {
     crate::core::utils::content_hash::normalize_path(local_path)
 }
 
-/// Normalized download folders of every repository instance stored for `repo_url`.
-/// Two installs of the same URL (independent, or repository-space entries) each
-/// have their own row, so they are scanned independently.
 async fn load_repository_instance_paths(context: &FoxyContext, repo_url: &str) -> Vec<String> {
     match context
         .db()
@@ -963,9 +928,7 @@ async fn run_quick_scan_worker_repo(
     progress_result_tx: Option<StdSender<QuickScanProgressEvent>>,
 ) -> QuickScanWorkerRepoOutcome {
     let repo_started_at = Instant::now();
-    // Scope every DB lookup, tree load, eligibility check and pending-update
-    // write to this specific folder instance so two installs of the same URL do
-    // not bleed status into each other.
+    // Scope all state by `(remote_url, local_path)` so same-URL installs remain independent.
     let context = Arc::new(
         (*base_context)
             .clone()
@@ -1251,8 +1214,8 @@ pub fn spawn_quick_local_scan_instances(
         };
         rt.block_on(async move {
             ensure_logger();
-            // DATABASE_URL is set once at startup in main.rs to avoid unsafe env::set_var
-            // race conditions in multi-threaded context.
+
+
 
             if let Err(message) =
                 crate::core::tasks::db_schema_version::ensure_database_ready_for_updates().await
@@ -1331,9 +1294,9 @@ pub fn spawn_quick_local_scan_instances(
                 let force_fresh_addon_hash = force_fresh_addon_hash_repositories
                     .contains(&normalized_repository)
                     || force_fresh_addon_hash_repositories.contains(&url_wide_target);
-                // Expand the URL into every folder instance and scan each one
-                // independently. A URL with no DB row yet (never synced) still
-                // gets a single empty-folder pass so it reports a result.
+
+
+
                 let mut instance_paths = if normalized_repository.local_path.is_empty() {
                     load_repository_instance_paths(context.as_ref(), &normalized_repo_url).await
                 } else {

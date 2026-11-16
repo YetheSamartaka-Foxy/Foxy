@@ -5,30 +5,27 @@ use log::info;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Column list for selecting a [`DownloadTargetFile`] via [`DownloadTargetFile::from_row`].
 const DOWNLOAD_TARGET_COLUMNS: &str =
     "file_id, download_remote_url, download_local_path, size, download_total, download_cycle";
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct DownloadTargetFile {
-    /// File ID in a database if applicable
     pub(crate) file_id: u64,
-    /// Remote file source url
+
     pub(crate) download_remote_url: Arc<str>,
-    /// Local file target path
+
     pub(crate) download_local_path: Arc<str>,
-    /// File size
+
     pub(crate) size: usize,
-    /// Expected bytes transferred over network (can be lower than `size` for delta patching)
+
     pub(crate) expected_download_bytes: usize,
-    /// Total downloaded bytes
+
     pub(crate) download_total: Arc<AtomicUsize>,
-    /// Bytes downloaded per cycle (usually per second)
+
     pub(crate) download_cycle: Arc<AtomicUsize>,
 }
 
 impl DownloadTargetFile {
-    /// Materialize from a seam [`DbRow`] selected with [`DOWNLOAD_TARGET_COLUMNS`].
     pub(crate) fn from_row(row: &DbRow) -> Result<Self, DbErr> {
         let size = row.get_i64("size")? as usize;
         Ok(DownloadTargetFile {
@@ -54,16 +51,12 @@ pub(crate) struct DownloadTargetWithModName {
     pub download: DownloadTargetFile,
     pub mod_id: u64,
     pub mod_name: String,
-    /// Parts whose local state does not match the remote, for the update
-    /// summary; filled by [`attach_part_change_details`].
+
     pub changed_parts: usize,
-    /// The target has no local copy yet; filled by [`attach_part_change_details`].
+
     pub new_file: bool,
 }
 
-/// Fill each target's changed-part count and whether it is a new file, so an
-/// update summary built from download targets describes the same changes the
-/// quick scan reported rather than whole-file rows.
 pub(crate) async fn attach_part_change_details(
     context: Arc<FoxyContext>,
     targets: &mut [DownloadTargetWithModName],
@@ -164,8 +157,6 @@ pub(crate) async fn save_download_target_file(
         .await
 }
 
-/// Batch-update download progress for dirty files in a single transaction.
-/// More efficient than per-row upserts when only progress counters changed.
 pub(crate) async fn update_download_target_progress_batch(
     context: Arc<FoxyContext>,
     updates: &[DownloadProgressUpdate],
@@ -224,7 +215,6 @@ pub(crate) async fn update_download_target_progress_batch(
     })
 }
 
-/// Lightweight progress snapshot for batch persistence.
 #[derive(Clone)]
 pub(crate) struct DownloadProgressUpdate {
     pub(crate) file_id: u64,
@@ -278,7 +268,6 @@ pub(crate) async fn fetch_all_download_targets_with_mod(
 
     let mut result = Vec::with_capacity(downloads.len());
     for download in downloads {
-        // Files without a known addon stay in the queue with a sentinel mod id so they still download.
         let mod_id = file_to_mod
             .get(&(download.file_id as i64))
             .map(|m| *m as u64)
@@ -292,7 +281,6 @@ pub(crate) async fn fetch_all_download_targets_with_mod(
 pub(crate) async fn fetch_all_download_targets_with_mod_and_name(
     context: Arc<FoxyContext>,
 ) -> Result<Vec<DownloadTargetWithModName>, DbErr> {
-    // Single JOIN query replaces 3 sequential queries with unbounded IN clauses
     let rows = context
         .db()
         .query_all(
@@ -354,7 +342,7 @@ mod tests {
             batch_size,
             crate::core::tasks::init_database::bulk_write_chunk_rows()
         );
-        // A full chunk stays under the bind-variable budget (3 binds per row).
+
         assert!(batch_size * 3 < 32_766);
     }
 

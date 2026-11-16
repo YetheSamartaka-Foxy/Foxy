@@ -1,0 +1,21 @@
+[package]
+name = "foxy-supervisor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+license-file = "../LICENSE"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+dirs = "7.0.0"
+serde_json = "1.0.154"
+blake3 = "1.8.7"
+tempfile = "3.27.0"
+rand = "0.10.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.9", features = ["aclapi", "accctrl", "fileapi", "handleapi", "ioapiset", "jobapi2", "minwinbase", "namedpipeapi", "processthreadsapi", "securitybaseapi", "stringapiset", "synchapi", "winbase", "winerror", "winnt"] }

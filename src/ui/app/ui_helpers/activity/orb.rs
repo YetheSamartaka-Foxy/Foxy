@@ -8,19 +8,18 @@ use super::{BarMotion, Motion, bump, fade, noise, particle_life};
 const WAVE_SECONDS: f64 = 1.1;
 const SLOSH_SECONDS: f64 = 1.6;
 const ORB_BUBBLES: u32 = 2;
-/// Opacity of the orb's empty triangles, over whatever row it sits in.
+
 const EMPTY_OPACITY: f32 = 0.25;
-/// The mana's surface is lit, so the level reads at a glance.
+
 const SURFACE_LIGHT: f32 = 0.4;
-/// Mana level while the amount of work is unknown: it sloshes around here.
+
 const UNKNOWN_LEVEL: f32 = 0.55;
-/// Rows of triangles in an orb, at most.
+
 const ORB_ROWS: usize = 6;
-/// Triangles whose center lies within this share of the half-side make the orb.
+
 const ROUNDNESS: f32 = 0.95;
 
-/// A small round cluster of triangles that fills with mana, for places too
-/// tight for a bar such as the repository sidebar.
+/// Compact progress indicator for spaces too narrow for a bar.
 pub(crate) struct ProgressOrb {
     progress: Option<f32>,
     color: Color32,
@@ -28,8 +27,7 @@ pub(crate) struct ProgressOrb {
 }
 
 impl ProgressOrb {
-    /// `None` progress sloshes the mana around a half-full orb: work with no
-    /// known end.
+    /// Unknown progress animates around a half-full orb.
     pub(crate) fn new(progress: Option<f32>, color: Color32) -> Self {
         Self {
             progress,
@@ -124,7 +122,6 @@ impl ProgressOrb {
     }
 }
 
-/// Whether a triangle with these `corners` lies inside the round orb.
 fn in_orb(corners: [Pos2; 3], center: Pos2, radius: f32) -> bool {
     let centroid = pos2(
         (corners[0].x + corners[1].x + corners[2].x) / 3.0,

@@ -67,8 +67,6 @@ fn describe_machine(record: &mut BenchmarkRecord) {
     record.machine.power = crate::core::utils::power::sample();
 }
 
-/// Everything the save does off the UI thread: slice the log, describe the
-/// machine, write the folder, index the row.
 fn save_draft_blocking(mut draft: BenchmarkDraft) -> Result<BenchmarkRecord, String> {
     let start_wall = process_start_wall();
     let startup_from = start_wall.timestamp_millis();
@@ -122,9 +120,12 @@ fn save_draft_blocking(mut draft: BenchmarkDraft) -> Result<BenchmarkRecord, Str
 
 impl Foxy {
     pub(crate) fn spawn_benchmark_save(&mut self, draft: BenchmarkDraft) {
+        if self.capture_worker_scope().is_none() {
+            return;
+        }
         let tx = self.benchmark_channels.save_tx.clone();
         let repaint = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let result = match save_draft_blocking(draft) {
                 Ok(record) => BenchmarkWorkerResult::Saved(Box::new(record)),
                 Err(error) => BenchmarkWorkerResult::SaveFailed(error),
@@ -133,9 +134,13 @@ impl Foxy {
                 Self::request_background_repaint(repaint.as_ref());
             }
         });
+        self.benchmark_workers.push(handle);
     }
 
     pub(crate) fn poll_benchmark_save_results(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         while let Ok(result) = self.benchmark_channels.save_rx.try_recv() {
             match result {
                 BenchmarkWorkerResult::Saved(record) => {
@@ -165,12 +170,14 @@ impl Foxy {
         }
     }
 
-    /// Persist an edited record (flags, name, notes) and refresh its index row.
     pub(crate) fn persist_benchmark_record(&mut self, id: &str) {
+        if self.capture_worker_scope().is_none() {
+            return;
+        }
         let Some(record) = self.benchmarks_view.record(id).cloned() else {
             return;
         };
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             if let Err(err) = store::write_record(&record) {
                 warn!("Failed to write benchmark {}: {err:#}", record.id);
                 return;
@@ -179,12 +186,16 @@ impl Foxy {
                 warn!("Failed to index benchmark {}: {err}", record.id);
             }
         });
+        self.benchmark_workers.push(handle);
     }
 
     pub(crate) fn remove_benchmark(&mut self, id: &str) {
+        if self.capture_worker_scope().is_none() {
+            return;
+        }
         self.benchmarks_view.forget(id);
         let id = id.to_owned();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             if let Err(err) = store::delete_record(&id) {
                 warn!("Failed to remove benchmark {id}: {err:#}");
             }
@@ -193,6 +204,7 @@ impl Foxy {
             }
             info!("Benchmark removed: {id}");
         });
+        self.benchmark_workers.push(handle);
     }
 
     pub(crate) fn benchmark_log_text(&mut self, id: &str) -> Option<String> {

@@ -54,7 +54,6 @@ impl Foxy {
         12.0 + Self::adaptive_button_height(launch_join_font_size, 50.0) + 4.0
     }
 
-    /// Render the "Servers" section in the repository detail view (cards only, no launch buttons).
     pub(super) fn render_repository_servers_section(
         &mut self,
         ui: &mut Ui,
@@ -87,11 +86,6 @@ impl Foxy {
             || self.pending_join_preflight_query.is_some()
             || self.pending_join_status_query.is_some();
 
-        // Cache each server name's shaped galley: this list culls off-screen
-        // rows with `is_rect_visible`, so without a cache scrolling re-shapes
-        // every newly revealed name. Keyed on the server names (rebuilds when the
-        // list changes); the short, locale/player-dependent status badge stays a
-        // live `painter.text`.
         let name_font = TextStyle::Body.resolve(ui.style());
         let name_text_color = self.color_text_normal();
         let servers_generation = galley_cache::fingerprint((
@@ -301,7 +295,6 @@ impl Foxy {
         self.repository_selection = new_selection;
     }
 
-    /// Render the context-sensitive Launch/Join/Launch Editor buttons at the bottom.
     pub(super) fn render_launch_join_buttons(
         &mut self,
         ui: &mut Ui,
@@ -338,7 +331,6 @@ impl Foxy {
                         Self::adaptive_button_height(launch_join_font_size, 50.0),
                     );
 
-                    // Left button: "Launch" (always available)
                     let launch_button = Button::new(
                         RichText::new(tr("Launch"))
                             .size(launch_join_font_size)
@@ -371,7 +363,6 @@ impl Foxy {
                         return;
                     }
 
-                    // Right button: context-sensitive
                     let current_selection = self.repository_selection.clone();
                     match &current_selection {
                         Some(RepositorySelection::Server(idx)) => {
@@ -462,7 +453,6 @@ impl Foxy {
                         }
 
                         None => {
-                            // No selection - show greyed out "Join" button
                             let join_btn = ui.add_enabled(
                                 false,
                                 Button::new(

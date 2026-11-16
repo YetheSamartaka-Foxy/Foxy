@@ -1,9 +1,3 @@
-//! Settings -> Scheduling tab: list, create, edit, and run scheduled jobs.
-//!
-//! Jobs themselves execute in `src/ui/app/scheduling/`; this module is purely
-//! the editor and list UI. The cancellable post-action countdown is a global
-//! overlay rendered from the update loop, not here.
-
 use crate::ui::app::Foxy;
 use crate::ui::i18n::{tr, tr_fmt};
 use crate::ui::types::{
@@ -14,11 +8,8 @@ use chrono::Local;
 use eframe::egui::{self, Button, RichText, ScrollArea, Ui, Vec2};
 use log::info;
 
-/// Weekday bit labels in Monday..Sunday order to match the recurring bitset.
 const WEEKDAY_LABELS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-/// A deferred action collected while iterating the job list, applied afterwards
-/// so the list is not mutated mid-borrow.
 enum JobListAction {
     Edit(usize),
     Delete(usize),
@@ -52,8 +43,6 @@ impl Foxy {
         self.render_scheduling_change_prompt(ui.ctx());
     }
 
-    /// Status row shown while a scheduled job is executing, a post-action is
-    /// counting down, or a due job waits for other work.
     fn render_scheduling_active_status(&mut self, ui: &mut Ui, horizontal_padding: f32) {
         if let Some(run) = self.scheduler_active_run.as_ref() {
             let text = tr_fmt(
@@ -252,8 +241,7 @@ impl Foxy {
 
     fn new_scheduling_draft(&self) -> ScheduleJobDraft {
         let mut draft = ScheduleJobDraft::new_add(Local::now());
-        // Prefill a sensible target so a brand-new job is valid after picking a
-        // time: first space if any exist, else the first repository.
+        // Choose a valid initial target: first space if present, otherwise first repository.
         if let Some(space) = self.repository_spaces.first() {
             draft.target_kind = TargetKind::Space;
             draft.target_space_id = Some(space.id.clone());
@@ -295,7 +283,6 @@ impl Foxy {
             });
             ui.add_space(6.0);
 
-            // When section.
             ui.label(
                 RichText::new(tr("When"))
                     .strong()
@@ -346,7 +333,6 @@ impl Foxy {
             }
             ui.add_space(6.0);
 
-            // Targets section.
             ui.label(
                 RichText::new(tr("Targets"))
                     .strong()
@@ -376,7 +362,6 @@ impl Foxy {
             }
             ui.add_space(6.0);
 
-            // Stages section.
             ui.label(
                 RichText::new(tr("Actions"))
                     .strong()
@@ -477,8 +462,7 @@ impl Foxy {
             .iter_mut()
             .find(|existing| existing.id == job.id)
         {
-            // Preserve the enabled toggle across an edit; reset run history since
-            // the schedule may have changed.
+            // Keep the enabled toggle when editing, but clear run history after schedule changes.
             job.enabled = slot.enabled;
             info!("Updated scheduled job '{}'", job.name);
             *slot = job;

@@ -1,10 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// User preference for the hashing algorithm used when syncing a repository.
-///
-/// - `PreferFoxy` (default): Use BLAKE3 if the remote repository supports FoxyMode.
-/// - `PreferSwifty`: Force legacy MD5 hashing even when FoxyMode is available.
+/// Hashing preference: prefer BLAKE3 when FoxyMode is available, or force legacy MD5.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
 pub enum HashAlgorithmPreference {
     #[default]
@@ -12,12 +9,7 @@ pub enum HashAlgorithmPreference {
     PreferSwifty,
 }
 
-/// User preference for how aggressively local file hashing uses disk I/O.
-///
-/// - `Auto` (default): Benchmark initial hash work and choose the fastest profile.
-/// - `Conservative`: Low concurrency for constrained I/O workloads.
-/// - `Balanced`: Moderate concurrency for mixed systems.
-/// - `Aggressive`: Current high-concurrency behavior for fast workloads.
+/// Disk-I/O profile for local hashing: Auto benchmarks, Conservative limits concurrency, Balanced moderates it, and Aggressive uses high concurrency.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
 pub enum HashIoProfilePreference {
     #[default]
@@ -28,11 +20,7 @@ pub enum HashIoProfilePreference {
     Aggressive,
 }
 
-/// User preference for the egui renderer used by the desktop UI.
-///
-/// - `Auto` (default): Use WGPU unless a previous WGPU crash forces a fallback.
-/// - `Wgpu`: Force the WGPU renderer.
-/// - `Glow`: Force the OpenGL/Glow renderer.
+/// Renderer preference: Auto falls back after a WGPU crash; Wgpu and Glow force their respective renderers.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
 pub enum UiRendererPreference {
     #[default]
@@ -41,8 +29,7 @@ pub enum UiRendererPreference {
     Glow,
 }
 
-/// CPU priority of the threads that hash, scan, check, and download. The
-/// interface thread and launched programs always keep normal priority.
+/// Worker threads may use adjusted priority; the interface and launched programs stay normal.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
 pub enum WorkPriorityPreference {
     #[default]
@@ -71,12 +58,7 @@ pub enum MemoryPressurePreference {
     Severe,
 }
 
-/// How Foxy's HTTP requests reach the network.
-///
-/// - `System` (default): the Windows proxy settings and the `HTTP_PROXY` /
-///   `HTTPS_PROXY` environment variables.
-/// - `None`: connect directly and ignore any system proxy.
-/// - `Manual`: the proxy configured in Foxy's settings.
+/// HTTP proxy source: system settings/environment, direct connection, or Foxy's manual proxy.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
 pub enum ProxyMode {
     #[default]
@@ -85,10 +67,7 @@ pub enum ProxyMode {
     Manual,
 }
 
-/// Where to check for app updates.
-///
-/// - `Server` (default): Custom server manifest (`foxy-app-updater.json`).
-/// - `GitHub`: GitHub Releases API for a public repository.
+/// Update source is a custom server manifest by default, or GitHub Releases.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
 pub enum AppUpdateMode {
     #[default]
@@ -139,6 +118,7 @@ impl fmt::Display for UiRendererPreference {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum FoxyView {
     RepositoryList,
+    ServerInstances,
     Settings,
     RepositorySettings,
     RepositorySpaceSettings,
@@ -217,13 +197,7 @@ impl HelpTab {
     }
 }
 
-/// Tabs shown at the top of the About view.
-///
-/// - `About`: the embedded `README.md` overview (default).
-/// - `License`: the Foxy Community Source License text (`LICENSE`).
-/// - `Licensing`: the human-readable licensing overview (`LICENSING.md`).
-/// - `ThirdPartyLicenses`: the generated third-party notices
-///   (`THIRD-PARTY-LICENSES.txt`).
+/// About-view tabs for the overview, Foxy license, licensing guide, and generated third-party notices.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum AboutTab {
     About,

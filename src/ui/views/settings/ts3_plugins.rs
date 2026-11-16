@@ -6,18 +6,15 @@ use crate::ui::types::Ts3PluginStatusRecord;
 use eframe::egui::{self, Button, Frame, Label, Margin, RichText, ScrollArea, Ui, Vec2};
 use log::{info, warn};
 
-/// How a plugin is presented in the settings tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ts3PluginRowStatus {
     UpToDate,
     UpdateAvailable,
-    /// Opened for installation through Foxy, but TeamSpeak has not applied it yet.
+
     InstallPending,
     NotInstalled,
 }
 
-/// One rendered plugin entry, built either from the live scan or from the
-/// persisted state of the last verified check.
 #[derive(Debug, Clone)]
 struct Ts3PluginRow {
     addon_name: String,
@@ -25,7 +22,7 @@ struct Ts3PluginRow {
     plugin_path: std::path::PathBuf,
     file_hash: String,
     status: Ts3PluginRowStatus,
-    /// False when the row comes from persisted state rather than this session's scan.
+
     verified_now: bool,
 }
 
@@ -46,10 +43,7 @@ fn row_status(
 }
 
 impl Foxy {
-    /// Kick off a background thread that scans repositories for TS3 plugins,
-    /// verifies them against the TeamSpeak 3 client, and checks whether
-    /// TeamSpeak is running. Results arrive via channel and are polled every
-    /// frame, so no part of this runs on the UI thread.
+    /// Scan and verify TeamSpeak plugins on a worker; poll results on the UI thread without blocking frames.
     pub(crate) fn start_ts3_plugin_scan(&mut self, reason: &str, prompt_on_update: bool) {
         if self.ts3_plugin_scanning {
             self.ts3_plugin_scan_prompt_on_update |= prompt_on_update;
@@ -77,18 +71,32 @@ impl Foxy {
             self.settings_view_state.ts3_plugin_statuses.len(),
             prompt_on_update
         );
+        if self
+            .ts3_plugin_scan_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return;
+        }
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         self.ts3_plugin_scan_rx = Some(rx);
         self.ts3_plugin_scanning = true;
         self.ts3_plugin_scan_prompt_on_update = prompt_on_update;
         self.ts3_plugin_scan_requeued = false;
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
 
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let statuses = ts3_plugin::resolve_ts3_plugin_statuses(&repo_paths);
             let ts3_running = ts3_plugin::is_teamspeak_running();
             let plugin_count = statuses.len();
             if tx
                 .send(Ts3PluginScanResult {
+                    space_id,
+                    generation,
                     statuses,
                     ts3_running,
                     prompt_on_update,
@@ -101,11 +109,10 @@ impl Foxy {
                 );
             }
         });
+        self.ts3_plugin_scan_worker = Some(handle);
     }
 
-    /// Verify the persisted TS3 plugin state once per launch, in the background,
-    /// so the game space settings tab opens on a fresh status instead of an
-    /// empty list. Only Arma 3 spaces expose the tab.
+    /// Verify persisted plugin state once per launch in the background; only Arma 3 spaces expose this tab.
     pub(crate) fn start_startup_ts3_plugin_scan(&mut self) {
         let active = crate::core::game::spaces::active_game_space();
         if active.game_id != crate::core::game::arma3::ARMA3_GAME_ID {
@@ -117,13 +124,21 @@ impl Foxy {
         self.start_ts3_plugin_scan("startup verification", false);
     }
 
-    /// Poll the background scan channel. Safe to call every frame from anywhere.
     pub(crate) fn poll_ts3_plugin_scan(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         let Some(rx) = &self.ts3_plugin_scan_rx else {
             return;
         };
         match rx.try_recv() {
             Ok(result) => {
+                if !self.scoped_result_applies(&result.space_id, result.generation) {
+                    self.ts3_plugin_scan_rx = None;
+                    self.ts3_plugin_scanning = false;
+                    self.ts3_plugin_scan_prompt_on_update = false;
+                    return;
+                }
                 info!(
                     "Received TS3 plugin scan result: plugin_count={} ts3_running={} prompt_on_update={}",
                     result.statuses.len(),
@@ -135,8 +150,7 @@ impl Foxy {
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 warn!("TS3 plugin scan worker disconnected before sending results");
-                // Worker died without sending - keep the persisted state and
-                // stop showing the tab as busy.
+                // If the worker exits without a result, retain persisted state and clear the busy indicator.
                 self.ts3_plugin_scan_rx = None;
                 self.ts3_plugin_scanning = false;
                 self.ts3_plugin_scan_prompt_on_update = false;
@@ -149,6 +163,7 @@ impl Foxy {
             statuses,
             ts3_running,
             prompt_on_update,
+            ..
         } = result;
         let mut prompt: Option<Ts3PluginUpdatePrompt> = None;
         let mut records = Vec::with_capacity(statuses.len());
@@ -198,9 +213,7 @@ impl Foxy {
                 );
             }
 
-            // Only prompt when the plugin was previously installed through the
-            // app or detected in TeamSpeak, and the local package differs from
-            // that installed copy.
+            // Prompt only for a previously installed/detected plugin whose local package has changed.
             if prompt_on_update
                 && prompt.is_none()
                 && (had_installed_hash || status.is_installed)
@@ -243,10 +256,6 @@ impl Foxy {
         }
     }
 
-    /// Build the rows to render, preferring this session's verified scan and
-    /// falling back to the persisted state of the last check.
-    /// The plugins the settings tab would list, reduced to what the game space
-    /// overview shows: addon name, package path, and install state.
     pub(crate) fn ts3_plugin_overview_entries(
         &self,
     ) -> Vec<(String, std::path::PathBuf, Ts3PluginRowStatus)> {
@@ -305,8 +314,6 @@ impl Foxy {
     pub(crate) fn render_ts3_plugins_settings(&mut self, ui: &mut Ui) {
         let horizontal_padding = 15.0;
 
-        // Refresh once per tab entry, but never block on it: the rows below
-        // render from persisted state until the background result lands.
         if self.ts3_plugin_cache.is_none() && !self.ts3_plugin_scanning {
             self.start_ts3_plugin_scan("game space settings TS3 tab opened", false);
         }
@@ -315,7 +322,7 @@ impl Foxy {
         let ts3_running = self.ts3_running_cache.unwrap_or(false);
 
         ui.vertical(|ui| {
-            // Info banner + recheck button row
+
             ui.horizontal(|ui| {
                 ui.add_space(horizontal_padding);
                 let width = (ui.available_width() - horizontal_padding - 90.0).max(0.0);
@@ -359,7 +366,7 @@ impl Foxy {
                             .color(self.color_text_dim()),
                     );
                 });
-                // Request repaint so we pick up the result next frame.
+
                 ui.ctx().request_repaint();
             } else if !rows.is_empty() && rows.iter().all(|row| !row.verified_now) {
                 ui.horizontal(|ui| {
@@ -390,7 +397,7 @@ impl Foxy {
             }
 
             if rows.is_empty() {
-                // Nothing known yet only means "scanning" on a first-ever run.
+                // Unknown state means scanning only on the first run.
                 if !self.ts3_plugin_scanning {
                     ui.horizontal(|ui| {
                         ui.add_space(horizontal_padding);
@@ -530,9 +537,7 @@ impl Foxy {
                     ui.add_space(8.0);
                 }
 
-                // TeamSpeak applies the package through its own dialog, so the
-                // verified state only changes after the user finishes there.
-                // Keep the list as-is; Recheck or the next tab entry confirms it.
+                // TeamSpeak installs through its own dialog; confirm persisted state on recheck or next tab entry.
                 for (path_key, hash, plugin_path) in install_actions {
                     match ts3_plugin::open_ts3_plugin(&plugin_path) {
                         Ok(()) => {
@@ -562,8 +567,6 @@ impl Foxy {
         });
     }
 
-    /// Render a banner prompting the user to install/update a TS3 plugin.
-    /// Returns `true` if the banner was rendered.
     pub fn render_ts3_plugin_update_banner(&mut self, ui: &mut Ui) -> bool {
         let Some(prompt) = self.ts3_plugin_update_prompt.clone() else {
             return false;
@@ -663,11 +666,9 @@ mod tests {
 
     #[test]
     fn verified_teamspeak_state_wins_over_foxy_bookkeeping() {
-        // Installed and current in TeamSpeak, even when Foxy never recorded it
-        // (for example a plugin installed before Foxy, or on a fresh config).
+        // Show current TeamSpeak installs even if Foxy did not record them.
         assert_eq!(row_status(true, true, false), Ts3PluginRowStatus::UpToDate);
-        // Foxy thinks it installed the current package, but TeamSpeak has an
-        // older payload: the real state is what the user must act on.
+        // When TeamSpeak has an older payload, its actual state is what the user must address.
         assert_eq!(
             row_status(true, false, true),
             Ts3PluginRowStatus::UpdateAvailable

@@ -3,7 +3,6 @@ use egui::{Color32, Mesh, Pos2, Rect, Vec2, pos2};
 
 use super::{additive, bump, noise, particle_life};
 
-/// A square sprite of side `size` centered on `center`.
 pub(super) fn add_sprite(mesh: &mut Mesh, center: Pos2, size: f32, tint: Color32) {
     mesh.add_rect_with_uv(
         Rect::from_center_size(center, Vec2::splat(size)),
@@ -12,7 +11,6 @@ pub(super) fn add_sprite(mesh: &mut Mesh, center: Pos2, size: f32, tint: Color32
     );
 }
 
-/// Motes that drift up through `area`, twinkle and fade, endlessly.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn add_dust(
     mesh: &mut Mesh,

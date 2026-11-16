@@ -3,13 +3,10 @@ use std::path::Path;
 
 use crate::types::DiscoveredFile;
 
-/// Manifest this tool writes into a mod folder; skipped on discovery so a
-/// folder published in place (or a previous output reused as a source) does
-/// not hash its own manifest.
+/// Skip generated manifests during discovery so in-place publication never hashes its own output.
 const GENERATED_MOD_MANIFEST: &str = "foxy_addon.json";
 
-/// Recursively discover all files within a mod directory.
-/// Preserves traversal order so generated checksums align with legacy-style manifests.
+/// Preserve traversal order for legacy manifest checksums.
 pub fn discover_files(mod_source: &Path) -> Result<Vec<DiscoveredFile>> {
     discover_files_with_pruning(mod_source, false)
 }
@@ -114,7 +111,7 @@ mod tests {
         assert_eq!(files.len(), 2);
 
         let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
-        // Path separators depend on OS
+
         assert!(paths.iter().any(|p| p.contains("main.pbo")));
         assert!(paths.iter().any(|p| p.contains("mod.bikey")));
     }

@@ -74,8 +74,6 @@ impl Foxy {
         );
     }
 
-    /// Auto recheck, auto quick scan, auto backup, auto apply repo.json params, auto apply
-    /// repo.json DLC, and hashing algorithm preference.
     pub(super) fn render_repository_configuration_sync(
         &mut self,
         ui: &mut Ui,
@@ -102,8 +100,7 @@ impl Foxy {
             self.settings_view_state.check_steam_running_before_launch;
         let global_hide_repository_image = self.settings_view_state.hide_repository_image;
 
-        // Game-specific overrides exist only where the active game's settings
-        // schema has the matching global toggle; the rest are app-wide.
+        // Show game-specific overrides only when the active game's schema has the matching global toggle.
         let module = crate::core::game::registry().active();
         let schema = module.settings_schema();
         let game_toggle = |id: &str| schema.toggles.iter().any(|toggle| toggle.id == id);

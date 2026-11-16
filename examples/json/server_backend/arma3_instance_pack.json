@@ -1,0 +1,33 @@
+{
+  "format": "foxy-server-instance",
+  "schema_version": 1,
+  "display_name": "MainServer",
+  "definition": {
+    "game": "arma3",
+    "settings": {
+      "hostname": "MainServer",
+      "game_port": 2302,
+      "max_players": 64,
+      "persistent": false,
+      "auto_init": false,
+      "battleye": true,
+      "verify_signatures": "v2",
+      "mission_cycle": [
+        { "template": "Example.World", "difficulty": "regular" }
+      ],
+      "server": { "password_admin_ref": "secret_00000000000000000000000000000001" }
+    }
+  },
+  "configuration_import": {
+    "files": [
+      {
+        "role": "server",
+        "ownership": "operator",
+        "template": "// Preserve this operator policy\nhostname = \"MainServer\";\npasswordAdmin = \"foxy-secret:secret_00000000000000000000000000000001\";\nclass CustomPolicy { folder = \"R:/Mods/Shared missions\"; };\nclass Missions { class Example { template = \"Example.World\"; difficulty = \"Regular\"; }; };\n"
+      }
+    ],
+    "unresolved_paths": ["R:/Mods/Shared missions"],
+    "paths_reviewed": false
+  },
+  "installation_required": true
+}

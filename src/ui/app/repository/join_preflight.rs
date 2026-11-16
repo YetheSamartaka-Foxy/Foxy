@@ -435,12 +435,7 @@ impl Foxy {
         (to_enable, to_disable)
     }
 
-    /// Builds the launch repository for the "launch without suggested addons" path.
-    ///
-    /// This path enables no suggested/known-remote addons and always strips every
-    /// detected extra enabled addon, regardless of its tick state. The tick state
-    /// only governs the "launch with selected addons" path; choosing to launch
-    /// without the detected addons means none of them are loaded.
+    /// The no-suggested-addons path strips every extra enabled addon regardless of checkbox state; only the selected-addons path honors ticks.
     pub(crate) fn repository_without_join_preflight_suggestions(
         pending: &PendingJoinPreflightState,
     ) -> Repository {
@@ -451,11 +446,7 @@ impl Foxy {
         repository
     }
 
-    /// Enabled external addons that won't resolve at launch, for launch paths
-    /// that have no server requirement list (the plain launch and the editor
-    /// launch). Mirrors the `unavailable_enabled` set the join preflight builds;
-    /// with no requirements there is nothing to exclude, so every enabled
-    /// external addon with an unresolvable path is reported.
+    /// For launches without server requirements, report every enabled external addon whose configured path cannot resolve.
     pub(crate) fn unavailable_enabled_external_addons(
         effective: &Repository,
         configured_repositories: &[Repository],
@@ -820,9 +811,7 @@ fn collect_disabled_local_candidates(
     candidates
 }
 
-/// `client_side_addons` is the active game's capability: when a server activates
-/// exactly its own addon set on join, no local marking can excuse an addon the
-/// server did not report, so every such addon stays an extra.
+/// Games that activate only the server's set cannot treat unreported client addons as allowed extras.
 fn collect_extra_enabled_addons(
     effective: &Repository,
     configured_repositories: &[Repository],
@@ -897,16 +886,6 @@ fn collect_extra_enabled_addons(
     extras
 }
 
-/// Enabled external addons whose configured path cannot be resolved on disk.
-///
-/// The launcher (`resolve_launch_mod_paths`) silently skips these with only an
-/// error log the user never sees, so the preflight surfaces them as a warning.
-/// The availability check is the same one the launcher resolution relies on, so
-/// an addon flagged here is exactly an addon that would not be loaded.
-///
-/// Server-required addons are deliberately excluded: those are already routed
-/// through the suggestion/known-remote flow (e.g. offered from another repo),
-/// so reporting them here too would double-list the same addon.
 fn collect_unavailable_enabled_external_addons(
     effective: &Repository,
     configured_repositories: &[Repository],
@@ -1655,19 +1634,17 @@ mod tests {
                 !launch_repository.external_addons[0].1,
                 "extra addon must be stripped on the launch-without path (keep_loaded={keep_loaded})"
             );
-            // The original repository must remain untouched.
+
             assert!(pending.original_repository.external_addons[0].1);
         }
     }
 
     #[test]
     fn launch_with_selected_keeps_ticked_extra_and_strips_unticked_extra() {
-        // Ticked extra ("keep loaded") stays enabled.
         let kept = pending_with_single_extra_enabled(true);
         let kept_launch = Foxy::repository_with_join_preflight_selections(&kept);
         assert!(kept_launch.external_addons[0].1);
 
-        // Unticked extra is stripped on the launch-with-selected path.
         let stripped = pending_with_single_extra_enabled(false);
         let stripped_launch = Foxy::repository_with_join_preflight_selections(&stripped);
         assert!(!stripped_launch.external_addons[0].1);
@@ -2736,15 +2713,13 @@ mod tests {
             state.extra_enabled[0].addon_name,
             "@1mmers_better_inventory"
         );
-        // Extra enabled addons default to ticked ("keep loaded"), so the
-        // launch-with-selected path leaves them enabled until the user unticks.
+
         assert!(state.extra_enabled[0].selected);
 
         let launch_repository = Foxy::repository_with_join_preflight_selections(&state);
         assert!(launch_repository.external_addons[0].1);
         assert!(state.original_repository.external_addons[0].1);
 
-        // The launch-without path strips the extra regardless of tick state.
         let without_repository = Foxy::repository_without_join_preflight_suggestions(&state);
         assert!(!without_repository.external_addons[0].1);
     }
@@ -2991,7 +2966,6 @@ mod tests {
             ..Repository::default()
         };
 
-        // No server requirements: this is the pure-launch / editor-launch path.
         let unavailable = Foxy::unavailable_enabled_external_addons(&repo, &[]);
 
         assert_eq!(unavailable.len(), 1);
@@ -3144,7 +3118,7 @@ mod tests {
             &AddonDisplayNameSnapshot::new(),
         )
         .expect("extra enabled optional addon should create preflight");
-        // Unticking the addon means "do not keep it loaded".
+
         state.extra_enabled[0].selected = false;
 
         let launch_repository = Foxy::repository_with_join_preflight_selections(&state);

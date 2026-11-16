@@ -263,8 +263,6 @@ pub enum Command {
 }
 
 fn default_threads() -> usize {
-    // Default to a single worker thread so wildcard expansion and manifest
-    // emission produce deterministic output unless the user explicitly opts
-    // into higher parallelism.
+    // Default to one worker so discovery and manifest order are deterministic unless parallelism is explicit.
     1
 }

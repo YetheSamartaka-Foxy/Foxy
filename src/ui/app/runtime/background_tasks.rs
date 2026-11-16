@@ -106,8 +106,6 @@ impl Foxy {
             .store(u64::MAX, Ordering::Relaxed);
     }
 
-    /// Whether the open-ended suppression a running sync installed is still in
-    /// place, so the finishing sync knows to replace it with the short grace.
     pub(in crate::ui::app) fn fs_watch_suppressed_for_active_sync(&self) -> bool {
         self.fs_watch_suppressed_until_ms.load(Ordering::Relaxed) == u64::MAX
     }
@@ -120,7 +118,7 @@ impl Foxy {
     }
 
     pub fn queue_startup_rechecks(&mut self) {
-        if self.database_updates_blocked() {
+        if !self.client_db_admission.allows() || self.database_updates_blocked() {
             return;
         }
         self.startup_recheck_queue.clear();
@@ -197,7 +195,8 @@ impl Foxy {
     }
 
     pub(crate) fn maybe_queue_periodic_remote_checks(&mut self) {
-        if !self.settings_view_state.periodic_remote_check_enabled
+        if !self.client_db_admission.allows()
+            || !self.settings_view_state.periodic_remote_check_enabled
             || !self.startup_tasks_started
             || self.database_updates_blocked()
             || self.repository_sync_active()
@@ -255,6 +254,9 @@ impl Foxy {
         &mut self,
         repositories: Vec<api::StartupRepositoryInstance>,
     ) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         let mut queued = 0usize;
         for repository in repositories {
             let normalized_url = Self::normalize_repo_url(&repository.repo_url);
@@ -296,9 +298,10 @@ impl Foxy {
         self.note_startup_rechecks_queued(queued);
     }
 
-    /// Queue a remote data recheck of every configured repository, drained one
-    /// at a time by `process_startup_rechecks`.
     pub(in crate::ui::app) fn queue_recheck_all_repositories(&mut self) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         let mut queued = 0usize;
         for repo in &self.repository_view_state.repositories {
             if repo.address.trim().is_empty() || repo.path.trim().is_empty() {
@@ -322,16 +325,10 @@ impl Foxy {
         info!("Recheck of all repositories queued: {}", queued);
     }
 
-    /// Start the startup eligibility plan before the first frame.
-    ///
-    /// The plan is a database preflight plus one `repo.json` probe per
-    /// repository, and the probe is two round trips of pure network latency.
-    /// Running it only after first paint left that latency stacked on top of
-    /// renderer initialization instead of hidden underneath it
-    /// (`conventions/SPEED_OF_LIGHT.md` O8). It never touches the UI, and it is
-    /// skipped when the database must not be opened at all.
+    /// Start the database preflight and repository probes before first paint so network latency overlaps renderer initialization (O8); skip when the database must not be opened.
     pub(in crate::ui::app) fn start_startup_quick_scan_planning(&mut self) {
-        if self.settings_view_state.debug_mode
+        if !self.client_db_admission.allows()
+            || self.settings_view_state.debug_mode
             || !self.settings_view_state.auto_quick_scan_on_launch
             || self.db_lock_conflict.is_some()
             || self.pending_db_schema_wipe.is_some()
@@ -342,7 +339,7 @@ impl Foxy {
     }
 
     pub fn start_quick_local_scan(&mut self) {
-        if self.database_updates_blocked() {
+        if !self.client_db_admission.allows() || self.database_updates_blocked() {
             return;
         }
         let mut requested_repositories = Vec::new();
@@ -366,6 +363,9 @@ impl Foxy {
         &mut self,
         requested_repositories: Vec<api::StartupRepositoryInstance>,
     ) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         let mut normalized_requested_repositories = Vec::new();
         let mut seen = HashSet::new();
         for repository in requested_repositories {
@@ -382,11 +382,15 @@ impl Foxy {
         }
 
         let requested = normalized_requested_repositories.len();
-        self.startup_quick_scan_requested = requested;
         if requested == 0 {
+            self.startup_quick_scan_requested = 0;
             info!("Scheduling startup quick scan for 0 of 0 repositories");
             return;
         }
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
+        self.startup_quick_scan_requested = requested;
 
         if self.startup_quick_scan_filter_worker.is_some() {
             info!(
@@ -407,14 +411,30 @@ impl Foxy {
         let (tx, rx) = std::sync::mpsc::channel::<StartupQuickScanFilterResult>();
         self.startup_quick_scan_filter_rx = Some(rx);
         let repaint_ctx = self.repaint_ctx.clone();
+        let admission = self.client_db_admission.clone();
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
         info!(
             "Starting startup quick scan eligibility worker for {} repositories",
             requested
         );
         self.startup_quick_scan_filter_worker = Some(std::thread::spawn(move || {
+            if !crate::ui::app::admit_database_section(&admission) {
+                let _ = tx.send(StartupQuickScanFilterResult {
+                    space_id,
+                    generation,
+                    requested_repositories: requested,
+                    eligible_repositories: normalized_requested_repositories,
+                    prevalidated_repositories: Vec::new(),
+                    remote_changed_repositories: Vec::new(),
+                    pending_update_repositories: Vec::new(),
+                    remote_unknown_repositories: Vec::new(),
+                });
+                return;
+            }
             let requested_repositories = normalized_requested_repositories;
             let mut plan = api::plan_startup_quick_scan_repos(requested_repositories.clone());
-            // Fall back only when eligibility planning did not run.
+
             if requested > 0
                 && !plan.completed
                 && plan.eligible_repositories.is_empty()
@@ -438,6 +458,8 @@ impl Foxy {
             }
             if tx
                 .send(StartupQuickScanFilterResult {
+                    space_id,
+                    generation,
                     requested_repositories: requested,
                     eligible_repositories: plan.eligible_repositories,
                     prevalidated_repositories: plan.prevalidated_repositories,
@@ -464,7 +486,15 @@ impl Foxy {
         }
 
         if let Some(payload) = result {
-            if self.database_updates_blocked() {
+            let active_space = crate::core::game::spaces::active_game_space().space_id;
+            if self.database_updates_blocked()
+                || !crate::ui::app::current_worker_result(
+                    &self.server_query_generation,
+                    &active_space,
+                    &payload.space_id,
+                    payload.generation,
+                )
+            {
                 self.startup_quick_scan_filter_rx = None;
                 return;
             }
@@ -514,6 +544,7 @@ impl Foxy {
                 && self.quick_scan_worker.is_none()
                 && !self.retained_files_cleanup_in_flight
                 && self.pending_retained_file_removal.is_none()
+                && self.client_db_admission.allows()
             {
                 self.mark_quick_scan_instances_active(eligible_repositories.iter().cloned());
                 self.quick_scan_worker = Some(api::spawn_quick_local_scan_instances(
@@ -541,14 +572,10 @@ impl Foxy {
             self.startup_quick_scan_filter_rx = None;
         }
 
-        let finished = self
-            .startup_quick_scan_filter_worker
-            .as_ref()
-            .map(|worker| worker.is_finished())
-            .unwrap_or(false);
-        if finished {
-            self.startup_quick_scan_filter_worker = None;
-        }
+        crate::ui::app::runtime::client_workers::reap_worker(
+            &mut self.startup_quick_scan_filter_worker,
+            "Startup quick scan eligibility worker failed.",
+        );
     }
 
     pub fn queue_quick_scan_for_urls(&mut self, repo_urls: Vec<String>) {
@@ -556,6 +583,9 @@ impl Foxy {
     }
 
     pub fn queue_quick_scan_for_urls_from_fs(&mut self, repo_urls: Vec<String>) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         self.fs_watch_scan_urls.extend(
             repo_urls
                 .iter()
@@ -570,6 +600,9 @@ impl Foxy {
         prevalidated: bool,
         force_fresh_addon_hash: bool,
     ) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         if self.block_database_update_request() {
             return;
         }
@@ -615,6 +648,10 @@ impl Foxy {
                     newly_added
                 );
             }
+            return;
+        }
+
+        if !self.client_db_admission.allows() {
             return;
         }
 
@@ -735,9 +772,7 @@ impl Foxy {
             };
             let repo_path = self.repository_view_state.repositories[idx].path.clone();
 
-            // When the scan was skipped (e.g. fresh DB, metadata not ready,
-            // or local path mismatch), keep the repo in Unknown state rather
-            // than marking it Synced.
+            // If a scan is skipped or cannot match its path, keep the repository Unknown rather than Synced.
             if result.skipped {
                 info!(
                     "Quick scan skipped for repo {} (status remains unknown)",
@@ -809,18 +844,21 @@ impl Foxy {
         };
         if quick_scan_finished {
             info!("Quick scan worker finished");
-            self.quick_scan_worker = None;
+            crate::ui::app::runtime::client_workers::reap_worker(
+                &mut self.quick_scan_worker,
+                "Quick scan worker failed.",
+            );
             if !self.active_quick_scan_instance_keys.is_empty() {
                 self.active_quick_scan_instance_keys.clear();
                 self.quick_scan_progress_by_instance.clear();
                 self.needs_repaint = true;
             }
             if !self.database_updates_blocked()
+                && self.client_db_admission.allows()
                 && self.syncing_repository.is_none()
                 && !self.pending_quick_scan_urls.is_empty()
             {
-                // A scan racing a purge of the same repository would write its
-                // verdict and hashes back over the rows being wiped.
+                // Discard scan results that race a purge; they would restore rows being wiped.
                 let (repo_urls, held_urls): (Vec<String>, Vec<String>) =
                     self.pending_quick_scan_urls.drain().partition(|url| {
                         !self
@@ -861,8 +899,6 @@ impl Foxy {
         }
     }
 
-    /// Distinct repository download folders, ordered, as the watcher registers
-    /// them.
     pub(crate) fn fs_watch_paths_from_repositories(repositories: &[Repository]) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut paths = Vec::new();
@@ -888,7 +924,10 @@ impl Foxy {
     }
 
     pub fn start_fs_watcher(&mut self) {
-        if self.database_updates_blocked() {
+        if !self.client_db_admission.allows()
+            || self.pending_game_space_switch.is_some()
+            || self.database_updates_blocked()
+        {
             return;
         }
         if self.fs_watch_worker.is_some() {
@@ -926,10 +965,7 @@ impl Foxy {
         ));
     }
 
-    /// Whether an exited watcher worker should be respawned now. A worker that
-    /// found nothing to watch is retried only once its index was marked dirty,
-    /// the repositories changed, or the retry interval elapsed; respawning it
-    /// on every frame built a runtime and database probe per repaint.
+    /// Retry an idle watcher only after its index/repository state changes or the retry interval, avoiding a runtime and database probe on every frame.
     fn fs_watcher_respawn_after_exit(
         idle_exit: bool,
         index_dirty: bool,
@@ -939,22 +975,18 @@ impl Foxy {
         !idle_exit || index_dirty || repositories_changed || retry_due
     }
 
-    /// Mark the watcher's repository/addon index stale. The index is built once
-    /// when the worker starts, so a repository added or synced afterwards stays
-    /// invisible to it until it is respawned.
     pub(in crate::ui::app) fn mark_fs_watch_index_dirty(&mut self) {
         self.fs_watch_index_dirty = true;
         self.reset_fs_watch_clean_backoff();
     }
 
-    /// Respawn the watcher when the repositories it was started for no longer
-    /// match the configured ones, when its index went stale, or when the worker
-    /// exited early (it does that when no watchable path or index existed yet).
-    ///
-    /// Deferred while a sync is running or queued so a bulk repository-space run
-    /// respawns once at the end instead of after every repository.
+    /// Respawn once after queued or active sync work ends, rather than once per repository in a bulk run.
     pub(in crate::ui::app) fn refresh_fs_watcher_if_stale(&mut self) {
-        if self.settings_view_state.debug_mode || self.database_updates_blocked() {
+        if !self.client_db_admission.allows()
+            || self.pending_game_space_switch.is_some()
+            || self.settings_view_state.debug_mode
+            || self.database_updates_blocked()
+        {
             return;
         }
         let worker_exited = self
@@ -1001,9 +1033,7 @@ impl Foxy {
         self.start_fs_watcher();
     }
 
-    /// Signal the filesystem watcher to exit and forget its handle so a
-    /// later [`Self::start_fs_watcher`] starts a fresh one (used when the
-    /// active game space switches and the watched folders change).
+    /// Stop and forget the watcher so a space switch can start one for the new folders.
     pub fn stop_fs_watcher(&mut self) {
         if let Some(stop) = self.fs_watch_stop.take() {
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1013,15 +1043,7 @@ impl Foxy {
         }
     }
 
-    /// Keep only the filesystem-watch repository URLs whose auto quick-scan
-    /// setting is enabled, honoring the per-repository override and the global
-    /// default via [`Self::repo_auto_quick_scan_on_launch`].
-    ///
-    /// The watcher observes every configured repository folder regardless of
-    /// settings, so this is the authoritative gate that keeps a disabled
-    /// auto quick-scan from being re-triggered by on-disk changes. Without it
-    /// the setting only governed the one-shot scan at startup and the watcher
-    /// kept scanning anyway.
+    /// Watch configured repository folders, but gate automatic quick scans on the global setting and per-repository override.
     fn fs_watch_repo_urls_with_quick_scan_enabled(&self, repo_urls: Vec<String>) -> Vec<String> {
         repo_urls
             .into_iter()
@@ -1036,10 +1058,7 @@ impl Foxy {
             .collect()
     }
 
-    /// How long to hold watcher-triggered scans after `clean_streak`
-    /// consecutive clean ones: nothing after the first, then 5 s doubling to
-    /// a minute. Events that arrive inside the window are scanned when it
-    /// closes, so a real change is delayed, never dropped.
+    /// After clean watcher scans, back off from 5 seconds up to one minute; changes are delayed until the window closes, never dropped.
     pub(crate) fn fs_watch_clean_backoff(clean_streak: u32) -> Option<Duration> {
         let doublings = clean_streak.checked_sub(2)?;
         Some(
@@ -1065,8 +1084,7 @@ impl Foxy {
         }
     }
 
-    /// Something other than the watcher changed the repository set or its
-    /// files, so the next watcher event is expected to be genuine.
+    /// Known external changes are not watcher-originated changes; wait for a later event.
     pub(in crate::ui::app) fn reset_fs_watch_clean_backoff(&mut self) {
         self.fs_watch_clean_scan_streak = 0;
         self.fs_watch_backoff_until = None;
@@ -1133,25 +1151,13 @@ impl Foxy {
                     .map(|repo_url| Self::normalize_repo_url(repo_url)),
             );
 
-            // The watcher reports changes for every configured repository, but
-            // automatic quick scans must respect the auto quick-scan setting
-            // (global default and per-repository override). Drop repositories
-            // whose quick scan is disabled before scheduling any work, so the
-            // setting holds for change-triggered scans and not just the
-            // one-shot scan at startup.
+            // Filter watcher events by the automatic quick-scan setting before scheduling scans.
             let repo_urls = self.fs_watch_repo_urls_with_quick_scan_enabled(event.repo_urls);
             if repo_urls.is_empty() {
                 continue;
             }
 
-            // Drop repositories whose purge / forced-redownload is still running.
-            // The purge deletes local files on a background runtime while holding a
-            // large DB write transaction - and those very deletions are what
-            // tripped this watcher event. Starting a quick scan now races the
-            // purge's transaction against the same database from a second runtime,
-            // which can wedge it indefinitely. The forced download is kicked off
-            // explicitly once the purge result is consumed, so skipping here loses
-            // nothing.
+            // Skip repositories being purged or force-redownloaded: their file deletions trigger watcher events, and a concurrent scan can race the purge transaction.
             let repo_urls: Vec<String> = repo_urls
                 .into_iter()
                 .filter(|repo_url| {
@@ -1192,7 +1198,8 @@ impl Foxy {
     }
 
     pub fn process_startup_rechecks(&mut self) {
-        if self.database_updates_blocked()
+        if !self.client_db_admission.allows()
+            || self.database_updates_blocked()
             || self.hash_evidence_retry_in_flight
             || self.has_pending_hash_save()
             || self.syncing_repository.is_some()
@@ -1218,9 +1225,7 @@ impl Foxy {
             {
                 continue;
             }
-            // A download that just completed already fully synced this repo;
-            // starting a recheck now would also wipe the finished-download
-            // summary still shown in the update modal.
+            // Skip the redundant recheck after a download because it would erase the visible summary.
             if self.download_finished && self.download_finished_repo == Some(idx) {
                 info!(
                     "Skipping startup {:?} for repository {}: download just completed",
@@ -1241,8 +1246,7 @@ impl Foxy {
         }
     }
 
-    /// Drop a repository from the unanswered startup-probe set once the user
-    /// rechecks it, updates it, or removes it.
+    /// Remove repositories from the unanswered startup-probe set after the user rechecks, updates, or removes them.
     pub(in crate::ui::app) fn forget_startup_probe_unknown(
         &mut self,
         repo_url: &str,
@@ -1275,9 +1279,10 @@ impl Foxy {
             .collect()
     }
 
-    /// Probe repositories that did not answer at launch, once the startup checks
-    /// have settled and nothing else is using the sync slot.
     pub(in crate::ui::app) fn service_startup_probe_retry(&mut self, ctx: &egui::Context) {
+        if self.pending_game_space_switch.is_some() {
+            return;
+        }
         let mut result = None;
         let mut disconnected = false;
         if let Some(rx) = self.startup_probe_retry_rx.as_ref() {
@@ -1330,7 +1335,10 @@ impl Foxy {
             self.startup_probe_retry_worker = None;
         }
 
-        if self.startup_probe_unknown.is_empty() || self.startup_probe_retry_worker.is_some() {
+        if !self.client_db_admission.allows()
+            || self.startup_probe_unknown.is_empty()
+            || self.startup_probe_retry_worker.is_some()
+        {
             return;
         }
         if !self.startup_tasks_started || !self.startup_sync_settled() {
@@ -1367,7 +1375,11 @@ impl Foxy {
         let (tx, rx) = std::sync::mpsc::channel();
         self.startup_probe_retry_rx = Some(rx);
         let repaint_ctx = self.repaint_ctx.clone();
+        let admission = self.client_db_admission.clone();
         self.startup_probe_retry_worker = Some(std::thread::spawn(move || {
+            if !crate::ui::app::admit_database_section(&admission) {
+                return;
+            }
             let plan = api::plan_startup_probe_retry(candidates);
             if tx.send(plan).is_ok() {
                 Self::request_background_repaint(repaint_ctx.as_ref());

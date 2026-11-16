@@ -17,9 +17,7 @@ pub const ARMA3_GAME_ID: &str = "arma3";
 
 pub struct Arma3Module;
 
-/// Key of the Arma 3 half of the module-owned `Profile::launch` blob: the
-/// full `RepositoryProfile` (DLC flags, launch flags, params, addon
-/// selection detail), so a pack round-trip is lossless.
+/// Retain the full Arma RepositoryProfile in the module-owned blob so pack round trips remain lossless.
 const ARMA3_PROFILE_LAUNCH_KEY: &str = "arma3_repository_profile";
 
 impl GameModule for Arma3Module {
@@ -49,6 +47,16 @@ impl GameModule for Arma3Module {
 
     fn content_formats(&self) -> &'static [&'static str] {
         &[foxy_formats::PBO_FORMAT_ID]
+    }
+
+    fn dedicated_server_support(&self) -> super::DedicatedServerSupport {
+        super::DedicatedServerSupport::WorkInProgress
+    }
+
+    fn server_capabilities(&self) -> crate::core::server::ServerCapabilities {
+        crate::core::server::ServerCapabilities::drafts(
+            crate::core::server::ServerDefinitionKind::Arma3,
+        )
     }
 
     fn repository_launch_flags(&self) -> Vec<RepositoryLaunchFlag> {

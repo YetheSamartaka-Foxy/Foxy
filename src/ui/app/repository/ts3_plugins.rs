@@ -3,10 +3,7 @@ use crate::ui::app::Foxy;
 use log::info;
 
 impl Foxy {
-    /// After a download completes for a repository, request a background scan
-    /// for TS3 plugins whose package differs from the installed version. The
-    /// scan result sets `ts3_plugin_update_prompt` so the UI can offer
-    /// installation, and refreshes the persisted plugin state.
+    /// After downloads, scan in the background for changed TS3 plugins and refresh persisted plugin state.
     pub(in crate::ui::app) fn check_ts3_plugin_updates_for_repo(&mut self, repo_index: usize) {
         let Some(repo) = self.repository_view_state.repositories.get(repo_index) else {
             info!(
@@ -24,7 +21,7 @@ impl Foxy {
             return;
         }
 
-        // Stale scan results would describe the pre-download files.
+        // Ignore scan results from before the download completed.
         self.ts3_plugin_cache = None;
         self.start_ts3_plugin_scan("repository download finished", true);
     }

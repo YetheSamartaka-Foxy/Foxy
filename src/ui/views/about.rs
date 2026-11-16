@@ -22,7 +22,6 @@ struct AboutInline {
     strong: bool,
 }
 
-/// Pre-parsed element from the embedded about markdown.
 #[derive(Clone)]
 enum AboutElement {
     Heading1(String),
@@ -69,9 +68,6 @@ fn parse_about_markdown(markdown: &str) -> Vec<AboutElement> {
     for line in markdown.lines() {
         let trimmed = line.trim_start();
 
-        // Fenced code blocks: drop the ``` delimiters and render the inner
-        // lines verbatim as monospace so embedded shell/TOML snippets stay
-        // legible in the License/Licensing tabs.
         if trimmed.starts_with("```") {
             in_code = !in_code;
             continue;
@@ -109,19 +105,16 @@ fn parse_about_markdown(markdown: &str) -> Vec<AboutElement> {
     elements
 }
 
-/// Lazily-parsed markdown for each text-based tab, parsed once on first view.
 static PARSED_ABOUT: std::sync::LazyLock<Vec<AboutElement>> =
     std::sync::LazyLock::new(|| parse_about_markdown(EMBEDDED_ABOUT));
 static PARSED_LICENSE: std::sync::LazyLock<Vec<AboutElement>> =
     std::sync::LazyLock::new(|| parse_about_markdown(EMBEDDED_LICENSE));
 static PARSED_LICENSING: std::sync::LazyLock<Vec<AboutElement>> =
     std::sync::LazyLock::new(|| parse_about_markdown(EMBEDDED_LICENSING));
-/// The third-party notices file is large (hundreds of KB), so it is rendered as
-/// virtualized monospace rows rather than parsed markdown.
+
 static THIRD_PARTY_LINES: std::sync::LazyLock<Vec<&'static str>> =
     std::sync::LazyLock::new(|| EMBEDDED_THIRD_PARTY.lines().collect());
-/// Widest line (in characters) in the third-party notices, used to pin a stable
-/// horizontal content width so scrolling does not relayout every frame.
+
 static THIRD_PARTY_MAX_CHARS: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
     THIRD_PARTY_LINES
         .iter()
@@ -355,14 +348,6 @@ impl Foxy {
             });
     }
 
-    /// Render the (large) third-party notices file as virtualized monospace
-    /// rows so only the visible lines are shaped each frame. Long lines extend
-    /// horizontally rather than wrapping, with both scrollbars available.
-    ///
-    /// The horizontal content width is pinned to the widest line up front. If it
-    /// were derived from the currently visible rows instead, it would change as
-    /// you scroll, toggling the horizontal scrollbar and forcing egui into a
-    /// per-frame relayout ("changed id between passes" multi-pass).
     fn render_about_third_party(&self, ui: &mut Ui, font_size: f32) {
         let font_id = FontId::monospace(font_size);
         let (row_height, glyph_width) =
@@ -378,8 +363,7 @@ impl Foxy {
                 ui.set_width(content_width);
                 for row in row_range {
                     let line = lines[row];
-                    // Empty lines must still occupy a full row so the
-                    // virtualized layout stays aligned with the scrollbar.
+                    // Keep blank lines as rows so virtualized text stays aligned with the scrollbar.
                     let text = if line.is_empty() { " " } else { line };
                     ui.add(
                         Label::new(RichText::new(text).monospace().size(font_size).color(color))
@@ -425,7 +409,7 @@ mod tests {
     #[test]
     fn fenced_code_blocks_drop_delimiters_and_keep_content() {
         let parsed = parse_about_markdown("intro\n```text\ncargo build\n```\noutro");
-        // The ``` fence lines are dropped; the inner line is a Code element.
+        // Drop Markdown fence lines and render the inner line as code.
         let code: Vec<&str> = parsed
             .iter()
             .filter_map(|element| match element {

@@ -173,8 +173,6 @@ impl Foxy {
                 .filtered_indices
                 .extend(0..self.repository_view_state.repositories.len());
         } else {
-            // Gather matches without holding a mutable borrow of the cache, so we
-            // can call `&self` state lookups (installed/attached tags) per repo.
             let mut matched: Vec<usize> = Vec::new();
             for (repo_idx, repo) in self.repository_view_state.repositories.iter().enumerate() {
                 let repo_name_lower = self
@@ -310,8 +308,7 @@ impl Foxy {
             .show(ui, |ui| {
                 self.render_game_space_header(ui);
 
-                // Games without repository sync get no repository controls at
-                // all rather than buttons that lead nowhere.
+                // Hide repository controls for games without repository sync.
                 if !crate::core::game::registry()
                     .active()
                     .capabilities()
@@ -497,7 +494,7 @@ impl Foxy {
                     },
                 );
 
-                // Handle drag-and-drop completion
+
                 if self.drag_source_repo_index.is_some()
                     && !ui.ctx().input(|i| i.pointer.any_down())
                 {

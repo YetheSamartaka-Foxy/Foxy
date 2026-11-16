@@ -51,6 +51,7 @@ file is the working contract.
     workshop.json        reforger_addons.json
     database.db (+ sidecars, db_meta.json)   images\  extra_files\  workshop\
     verified_hashes.json   manifest_cache\
+    server\servers.json
 ```
 
 Rules:
@@ -73,6 +74,16 @@ Rules:
 `SettingsViewState` stays a single in-memory type. `GAME_SPACE_SETTINGS_KEYS`
 (`spaces/settings_split.rs`) partitions it into `app_settings.json` and
 `game_settings.json` by serde field name.
+
+Application mode is app-global: `core::app_mode::AppMode` defaults to Client and serializes as `client` or `server` in `app_settings.json`. Keep `app_mode` out of `GAME_SPACE_SETTINGS_KEYS`. `Foxy::launch_mode_override` is session-only and survives space switching; effective mode must never be copied into persisted settings. The bootstrap reads only the saved mode before claiming the database. Client mode owns its DB locally. Server bootstrap closes/suspends the client seam before starting or authenticating the separate foreground metadata owner; Server UI never claims/opens Turso. Mode transitions drain persistence and all retained client work, retain old ownership on failure and explicitly claim/resume before client reload. `GameModule::dedicated_server_support` reports WIP targets separately from existing client capabilities and grants no executable server operations.
+
+`GameModule::server_capabilities` separately advertises typed definitions, installation adoption, deployment preflight and configuration preview/snapshot/rollback operations for Arma 3 and Reforger. Broad acquisition/runtime-deployment/lifecycle flags remain false. Use the module's typed `definition_kind`, never an ID branch in shared orchestration. Unsupported modules hide controls. `core::server::ServerStore` pins a captured context and writes the ordered v2 catalog atomically in `server/servers.json`; strict v1 migration preserves an exact backup only on a successful owned catalog save. All read/plan operations are write-free. Mutations pin the captured space's process claim. Installation roots are canonical external paths; adopted roots never become cleanup/update authority. Preflight uses shared runtime/profile/config/content/log proposals plus Arma mission/key/BattlEye or Reforger addon-temp/storage proposals, all still requiring native engine proof. Configuration snapshots and selection resolve under `server/instances/<id>/configuration/`, separate from proposed runtime destinations and the disposable DB. Do not cache stores or results across switches without captured identity.
+
+Foreground ownership primitives live in `foxy-supervisor/`. Installation coordination uses physical directory identity in a stable same-user OS local-data namespace, not the active space or configurable root. This limited coordination exception stores persistent locks and strict consumer registrations; definitions and runtime artifacts remain space-scoped. Shared preflight/capability reports describe tested Windows/Linux primitives, the persistent-registration recovery barrier and unimplemented orphan recovery/deployment gates without claiming locks or enabling lifecycle. Session event identity includes owner generation, space, instance, operation and run generation. D03 worker admission/retention, watcher shutdown, engine close and foreground metadata-owner handoff are separate from these process events; none enables accepted dedicated-engine lifecycle.
+
+Client server-query dispatch captures space ID and a checked monotonic query generation. A space reset advances the generation before accepting more results, clears current pending/cache state and retains unfinished handles for nonblocking joining. Reject stale results before changing even an identical current endpoint's pending flag. Returning to the same space does not revive old results. Exhausted generation disables further dispatch. This query-specific protection does not establish complete worker shutdown or DB/IPC handoff.
+
+Desktop draft state lives in `ui/app/server/` and resets as one space-scoped field. Workers retain a JoinHandle and captured root/space/game/request identity, use explicit ServerContext selection and never resolve mutable active paths after spawning. The root comes from the Client GUI's held absolute claim or the Server GUI's authenticated captured owner context. Server workers retain a serialized metadata permit through result cleanup and bind result delivery to owner identity/generation as well as space/game/request. Keep work busy through result consumption, reject dispatch once a space switch/close is pending, and wait for completion before handoff. Dirty drafts block space and mode switching and remain available to save or discard; close requires explicit discard. Client/Server navigation has independent current/last pairs; reset both on space changes so repository indices from another space cannot be restored. Mode handoff preserves saved Server view state within the same space.
 
 - A setting is game-scoped when it names a game install, a game-specific folder,
   or anything keyed by that space's repositories (scheduled jobs and cleanup
@@ -192,15 +203,31 @@ Switching happens in-process (`src/ui/app/runtime/game_space_switch.rs`):
    Per-space artifacts outside the space folder (delta-patch plans) live in a
    folder keyed by the space directory.
 2. Drain the persistence queue so queued writes land in the space they belong to.
-3. Prepare the destination on a worker while the outgoing workspace stays active:
+3. Signal the filesystem watcher and wait across frames until its worker has
+   finished; do not start or respawn it while a switch is pending. Close client
+   worker admission and join retained workers while retaining the outgoing claim.
+4. Prepare the destination on a worker while the outgoing workspace stays active:
    reserve its database claim, recover configuration/launch journals, and validate
-   its settings, repositories, spaces and folders. Failure offers Retry or Cancel.
-4. Release the outgoing database handle (`close_active_database_sync`), promote the
-   reservation, activate the target, honor a pending wipe marker and stop the watcher.
-5. Reset every space-scoped `Foxy` field, then reload the space the way startup
-   would.
+   its settings, repositories, spaces and folders. Failure offers Retry or Cancel
+   and resumes outgoing worker admission.
+5. Release outgoing hash-recovery evidence and close its database with
+   `close_active_database_sync`; failure aborts before
+   activation. The close invalidates the shared context, drains that DB's idle
+   pool and refuses while handles/connections or seam operations remain.
+   Promote the target reservation and activate the target. On activation failure,
+   release the unused target claim and reclaim/resume the outgoing
+   space before normal work continues.
+6. Reset every space-scoped `Foxy` field, then reload the space the way startup
+   would: explicitly claim it and resume DB admission before loading settings
+   or honoring a pending wipe marker.
 
 Consequences for new code:
+
+- `core::server::ServerContext::capture` is a read-only inspection seam: capture
+  an absolute root and validated existing space/game identity once, then derive
+  paths from that value. It never uses the creating/fallback active-space helpers,
+  repairs a registry, or changes remembered selection. Capturing alone grants no
+  database or server-operation authority.
 
 - Nothing space-derived may live in a process-wide `OnceLock`. Key it by database
   path (`DB_SLOT`, per-database maintenance) or by space id, and re-resolve after a
@@ -210,6 +237,25 @@ Consequences for new code:
   `every_foxy_field_is_either_space_scoped_and_reset_or_listed_app_global` fails
   otherwise. A space-scoped field left out of the reset leaks the previous space's
   data into the next one.
+- A switch closes client-worker admission and joins retained server-query,
+  join-preflight, mission-scan, image, startup pending-restore, startup
+  quick-scan eligibility, cached-update, quick-scan, and repository-sync workers
+  before releasing the database.
+  Those handles stay app-global so the reset cannot detach a running thread.
+  Image fetches write only into the directory captured at dispatch. Database
+  reads skip their section after admission closes; a read that already started
+  is joined before release. Worker results carry the captured space and
+  generation, and a stale preflight or cached-update result does not take a
+  newer request. A quick scan can still be inside its database section after its
+  activity keys are cleared, so the switch joins that handle instead of treating
+  an empty key set as proof the thread has finished. Addon delete, repository wipe,
+  force-redownload probes, addon hash recalculation, metadata refresh, space
+  freshness, addon-size reads, direct download, Workshop actions, and database
+  wipes are joined the same way, and a stale result is not applied. Addon backup,
+  pending-update clears, overview stats, TeamSpeak scans, repository-space
+  imports, and benchmark index writes are joined too. A game or editor launch
+  does not start while admission is closed. Two instance ids keep disjoint
+  proposed role directories, which is not engine isolation.
 
 ### Accepted game-space and queued-work contracts
 

@@ -109,8 +109,7 @@ impl Foxy {
             warn!("Sync request ignored: another repository sync is already in progress");
             return;
         }
-        // A cancelled worker whose repository was deleted still owns the
-        // progress channel until it reports; starting now would orphan it.
+        // Keep a deleted repository's cancelled worker progress channel until the worker reports, or a replacement could orphan it.
         if self.current_sync_mode.is_some() {
             warn!("Sync request ignored: the previous sync worker is still winding down");
             return;
@@ -163,9 +162,10 @@ impl Foxy {
                 );
                 return;
             }
-            // Probed only for downloads, and only at start: a repository folder
-            // the account cannot write to used to fail file by file deep inside
-            // the transfer, with nothing but a log line to show for it.
+            if !self.client_db_admission.allows() {
+                return;
+            }
+            // Probe download-folder write access before transfer so permission failures are reported before file-by-file work begins.
             if mode == SyncMode::Download {
                 let local_path = sanitize_user_path(&repo.path);
                 if !crate::core::utils::fs_safety::destination_is_writable(Path::new(&local_path)) {
@@ -204,8 +204,7 @@ impl Foxy {
             {
                 self.empty_publication_status = None;
             }
-            // Only a run that rebuilds the queue consumes the watcher's "folder
-            // changed" mark; a plain recheck leaves it for the next Download.
+            // Only queue-building runs consume the watcher change mark; a plain recheck leaves it for the next download.
             let discard_prepared_queue = (mode == SyncMode::Download || prepare_download_plan)
                 && self.fs_changed_since_prepare.remove(&normalized_repo_url);
             let (tx, rx) = broadcast::channel(4096);
@@ -226,10 +225,7 @@ impl Foxy {
             self.hash_stall_acknowledged.clear();
             self.clear_quick_scan_instance_active(&repo.address, &repo.path);
             self.clear_queued_quick_scan_for_url(&repo.address);
-            // A background sync (e.g. a startup recheck of a *different*
-            // repository) must not wipe the just-finished download summary that
-            // the update modal is still showing. Preserve that display state
-            // unless this sync is a new download or targets the same repo.
+            // Keep another repository's completed-download summary visible unless this sync is a new download or targets that repository.
             let preserve_completed_download = mode != SyncMode::Download
                 && self.download_finished
                 && self.download_finished_repo.is_some()
@@ -382,8 +378,7 @@ impl Foxy {
             };
             let rollback_temp_directory = (mode == SyncMode::Download)
                 .then(|| sanitize_user_path(&self.effective_temp_directory()));
-            // The stored selection always comes from the profile, never from a
-            // transient override such as a standalone addon download.
+            // Use the profile's selection, not a transient override such as standalone addon download.
             let persisted_addon_selection = Self::resolve_selected_mod_states(&repo, None);
             let selected_mod_states =
                 Self::resolve_selected_mod_states(&repo, selected_mod_states_override);
@@ -532,12 +527,6 @@ impl Foxy {
         }
     }
 
-    /// Manual remote recheck that also builds the final download plan (queue +
-    /// exact patch-byte estimate) while it refreshes remote metadata. Preparing
-    /// the plan here lets a later "Update ready" click open the confirmation
-    /// modal instantly and lets the download reuse the prepared queue, instead
-    /// of running a second redundant recheck. Does not auto-open the modal - it
-    /// only refreshes status and leaves the queue ready for review.
     pub(crate) fn start_remote_recheck_with_plan(&mut self, repo_idx: usize) {
         self.open_update_after_sync = false;
         self.start_core_sync_internal(
@@ -681,8 +670,7 @@ impl Foxy {
         self.current_sync_mode = None;
         self.update_ready_repo = None;
         self.clear_pending_update_cache_for_url(&repo.address, &repo.path);
-        // Clear any stale update summary notice - the repo was just purged
-        // and will be re-downloaded from scratch.
+        // Clear the update notice because purged repository contents will be downloaded again.
         self.acknowledge_update_summary_for_repo(repo_idx);
         self.repository_view_state.selected_repository = Some(repo_idx);
         self.clear_completed_repository_check_banner_for_repo_change(Some(repo_idx));
@@ -755,9 +743,7 @@ impl Foxy {
             return false;
         }
 
-        // Defer until any blocking work ahead of this addon finishes: an active
-        // sync, a direct download, or a recalculation already in flight. The
-        // queue is drained by `process_addon_hash_recalc_queue`.
+        // Wait for blocking sync, direct-download, or hash-recalculation work before recalculating addon hashes.
         if self.repository_sync_active()
             || self.is_direct_download_running()
             || self.addon_hash_recalc_in_flight
@@ -766,10 +752,7 @@ impl Foxy {
             return true;
         }
 
-        // Hashing reads and digests every file in the addon, which can take
-        // seconds for large addons; run it on a background thread so the UI
-        // never blocks. The result is applied by `poll_addon_hash_recalc_results`,
-        // which then starts the recheck sync.
+        // Hash addons off the UI thread; apply results before starting the follow-up recheck.
         info!(
             "Starting background addon hash recalculation for {} in {}",
             addon_name, repo.name
@@ -781,19 +764,31 @@ impl Foxy {
         let worker_repo_name = repo.name.clone();
         self.addon_hash_recalc_in_flight = true;
         self.needs_repaint = true;
-        std::thread::spawn(move || {
-            crate::core::utils::work_priority::apply_to_current_thread();
-            let outcome = match crate::core::utils::work_priority::work_runtime_builder().build() {
-                Ok(rt) => rt
-                    .block_on(api::recalculate_hashes_for_addon_by_name(
-                        &worker_url,
-                        &worker_addon,
-                    ))
-                    .map_err(|err| err.to_string()),
-                Err(err) => Err(err.to_string()),
+        let Some(scope) = self.capture_worker_scope() else {
+            self.addon_hash_recalc_in_flight = false;
+            return false;
+        };
+        let admission = self.client_db_admission.clone();
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
+        let handle = std::thread::spawn(move || {
+            let outcome = if !crate::ui::app::admit_database_section(&admission) {
+                Err("Database admission is closed".to_string())
+            } else {
+                match Runtime::new() {
+                    Ok(rt) => rt
+                        .block_on(api::recalculate_hashes_for_addon_by_name(
+                            &worker_url,
+                            &worker_addon,
+                        ))
+                        .map_err(|err| err.to_string()),
+                    Err(err) => Err(err.to_string()),
+                }
             };
             if tx
                 .send(AddonHashRecalcResult {
+                    space_id,
+                    generation,
                     repo_url: worker_url,
                     addon_name: worker_addon,
                     repo_name: worker_repo_name,
@@ -804,12 +799,15 @@ impl Foxy {
                 Self::request_background_repaint(repaint_ctx.as_ref());
             }
         });
+        crate::ui::app::runtime::client_workers::reap_worker(
+            &mut self.addon_hash_recalc_worker,
+            "Addon hash recalculation worker failed.",
+        );
+        self.addon_hash_recalc_worker = Some(handle);
         true
     }
 
-    /// Queue an addon hash recalculation to run once the work ahead of it
-    /// finishes, de-duplicating against entries already queued for the same
-    /// addon in the same repository.
+    /// Queue one hash recalculation per addon and repository after current work finishes.
     fn queue_addon_hash_recalc(
         &mut self,
         normalized_url: String,
@@ -838,16 +836,21 @@ impl Foxy {
         self.needs_repaint = true;
     }
 
-    /// Drain completed background addon hash recalculations and apply them on
-    /// the UI thread. On success a recheck sync is started for the repository.
     pub(in crate::ui::app) fn poll_addon_hash_recalc_results(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         while let Ok(result) = self.addon_hash_recalc_result_rx.try_recv() {
+            if !self.scoped_result_applies(&result.space_id, result.generation) {
+                continue;
+            }
             self.addon_hash_recalc_in_flight = false;
             let AddonHashRecalcResult {
                 repo_url,
                 addon_name,
                 repo_name,
                 outcome,
+                ..
             } = result;
             match outcome {
                 Ok(true) => {
@@ -855,8 +858,7 @@ impl Foxy {
                         "Addon hash recalculation complete for {} in {}",
                         addon_name, repo_name
                     );
-                    // The list may have changed while the worker ran; re-resolve
-                    // the index by URL before kicking off the recheck sync.
+                    // Re-resolve the repository index by URL because the list may change while the worker runs.
                     match self.repo_index_by_normalized_url(&repo_url) {
                         Some(repo_idx) => {
                             self.open_update_after_sync = false;
@@ -883,11 +885,7 @@ impl Foxy {
         }
     }
 
-    /// Force redownload of one addon. The local folder is removed only after a
-    /// background probe confirms the repository can serve `repo.json`; the
-    /// removal and the follow-up recheck happen in
-    /// [`Self::poll_addon_force_redownload_results`]. Returns `false` when the
-    /// request was rejected up front.
+    /// Remove the local folder only after the background probe confirms `repo.json` is reachable; then recheck the repository.
     pub fn force_redownload_addon(
         &mut self,
         repo_idx: usize,
@@ -982,6 +980,9 @@ impl Foxy {
         }
 
         let pending_key = Self::normalize_path_for_addon_match(&target_path.to_string_lossy());
+        let Some(scope) = self.capture_worker_scope() else {
+            return false;
+        };
         if !self.pending_addon_force_redownloads.insert(pending_key) {
             warn!(
                 "Addon force redownload ignored: already checking the repository connection for {} in {}",
@@ -999,6 +1000,8 @@ impl Foxy {
         let tx = self.addon_force_redownload_result_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
         let result = AddonForceRedownloadProbeResult {
+            space_id: scope.space_id().to_string(),
+            generation: scope.generation(),
             repo_address: repo.address.clone(),
             repo_path: repo.path.clone(),
             repo_name: repo.name.clone(),
@@ -1006,7 +1009,7 @@ impl Foxy {
             target_path,
             outcome: Ok(()),
         };
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let outcome = match Runtime::new() {
                 Ok(rt) => rt.block_on(async {
                     let client = create_web_client().await;
@@ -1023,11 +1026,10 @@ impl Foxy {
                 warn!("Failed to report addon force redownload probe completion");
             }
         });
+        self.force_redownload_workers.push(handle);
         true
     }
 
-    /// True while a force redownload of any addon under `repo_path` is still
-    /// waiting on its remote reachability probe.
     pub fn is_addon_force_redownload_pending_for_repo(&self, repo_path: &str) -> bool {
         if self.pending_addon_force_redownloads.is_empty() || repo_path.trim().is_empty() {
             return false;
@@ -1042,7 +1044,13 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn poll_addon_force_redownload_results(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         while let Ok(result) = self.addon_force_redownload_result_rx.try_recv() {
+            if !self.scoped_result_applies(&result.space_id, result.generation) {
+                continue;
+            }
             let pending_key =
                 Self::normalize_path_for_addon_match(&result.target_path.to_string_lossy());
             self.pending_addon_force_redownloads.remove(&pending_key);
@@ -1062,6 +1070,7 @@ impl Foxy {
             addon_name,
             target_path,
             outcome,
+            ..
         } = result;
 
         if let Err(err) = outcome {
@@ -1091,8 +1100,7 @@ impl Foxy {
             return;
         };
 
-        // A pending wipe of the repository refuses the download that has to
-        // follow, so deleting the folder now would leave the addon missing.
+        // Do not remove the folder if a pending wipe will refuse the follow-up download.
         if self.repository_sync_active()
             || self.is_direct_download_running()
             || self.is_repository_db_wipe_pending(&repo_address)

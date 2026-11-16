@@ -1,19 +1,4 @@
-//! Opt-in whole-operation profiler for the test kit and extended diagnostics.
-//!
-//! Off unless `FOXY_PROFILE` is set to something other than `0` or the
-//! extended diagnostics setting turned it on at runtime. When off every hook
-//! below is two atomic loads and a branch, so the shipping binary pays nothing. When on, the process accumulates one report per operation covering
-//! four things the existing instrumentation does not:
-//!
-//! - a gap-free phase timeline, including the time no phase claims
-//! - every statement through the database seam, split read/write and attributed
-//!   to the phase that issued it
-//! - filesystem calls on the download, hash, patch and purge paths
-//! - the same numbers grouped per phase, so a slow phase names its own cause
-//!
-//! The report is emitted as `PROFILE ...` log lines that the kit parses. Nothing
-//! here changes behaviour; a profiled run is still a valid correctness run, but
-//! it is not comparable with an unprofiled one for timing.
+//! Profiling preserves correctness but changes timings; profiled and unprofiled runs are not comparable.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,17 +7,14 @@ use std::time::{Duration, Instant};
 
 pub(crate) mod fs;
 
-/// Phase name used for work that runs outside any declared phase.
 const UNATTRIBUTED: &str = "unattributed";
-/// Single calls at or above these get their own debug line, since the report
-/// only carries the per-label maximum.
+
 const SLOW_DB_CALL: Duration = Duration::from_millis(100);
 const SLOW_FS_CALL: Duration = Duration::from_millis(250);
 
 static ENV_ENABLED: OnceLock<bool> = OnceLock::new();
 static RUNTIME_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Whether deep profiling is on for this process.
 pub(crate) fn enabled() -> bool {
     RUNTIME_ENABLED.load(Ordering::Relaxed)
         || *ENV_ENABLED.get_or_init(|| {
@@ -43,8 +25,6 @@ pub(crate) fn enabled() -> bool {
         })
 }
 
-/// Turn profiling on or off without the environment variable. Turning it off
-/// mid-operation drops the partial report rather than emitting a torn one.
 pub(crate) fn set_runtime_enabled(enabled: bool) {
     RUNTIME_ENABLED.store(enabled, Ordering::Relaxed);
     if !self::enabled() {
@@ -84,12 +64,12 @@ impl Stat {
 #[derive(Default)]
 struct State {
     started: Option<Instant>,
-    /// Completed phase totals in first-seen order; a repeated phase accumulates.
+
     phases: Vec<(String, Duration)>,
     current: Option<(String, Instant)>,
-    /// (phase, kind, statement label) -> stat. `kind` is `read` or `write`.
+
     db: BTreeMap<(String, &'static str, String), Stat>,
-    /// (phase, op) -> stat.
+
     fs: BTreeMap<(String, &'static str), Stat>,
 }
 
@@ -137,7 +117,6 @@ pub(crate) fn phase(name: &str) {
     });
 }
 
-/// Record one statement through the database seam. `kind` is `read` or `write`.
 pub(crate) fn record_db(kind: &'static str, sql: &str, elapsed: Duration, rows: u64) {
     with_state(|state| {
         let key = (state.phase_name(), kind, statement_label(sql));
@@ -155,8 +134,6 @@ pub(crate) fn record_db(kind: &'static str, sql: &str, elapsed: Duration, rows: 
     });
 }
 
-/// Record one filesystem call. `units` is bytes for byte-moving ops and entries
-/// for directory scans, so it is reported as `units` rather than as bytes.
 pub(crate) fn record_fs(op: &'static str, units: u64, elapsed: Duration) {
     with_state(|state| {
         let key = (state.phase_name(), op);
@@ -173,7 +150,6 @@ pub(crate) fn record_fs(op: &'static str, units: u64, elapsed: Duration) {
     });
 }
 
-/// Timer for a filesystem call. Costs one branch when profiling is off.
 pub(crate) struct FsTimer(Option<Instant>);
 
 impl FsTimer {
@@ -187,7 +163,6 @@ impl FsTimer {
         }
     }
 
-    /// Close the timer against the database seam rather than the filesystem.
     pub(crate) fn stop_db(self, kind: &'static str, sql: &str, rows: u64) {
         if let Some(started) = self.0 {
             record_db(kind, sql, started.elapsed(), rows);
@@ -195,8 +170,6 @@ impl FsTimer {
     }
 }
 
-/// A statement's aggregation key: the verb plus the first table it names, so
-/// call sites need no labels of their own and every seam statement is covered.
 fn statement_label(sql: &str) -> String {
     let verb = statement_verb(sql);
     if matches!(verb, "BEGIN" | "COMMIT" | "ROLLBACK") {
@@ -216,9 +189,6 @@ pub(crate) fn statement_verb(sql: &str) -> &'static str {
     first_keyword(sql, &VERBS).unwrap_or("other")
 }
 
-/// The first of `keywords` appearing as a whole word, scanning left to right.
-/// A leading CTE carries no keywords of its own, so `WITH ... UPDATE x` resolves
-/// to `UPDATE` rather than to `WITH`.
 fn first_keyword<'a>(sql: &str, keywords: &[&'a str]) -> Option<&'a str> {
     let mut best: Option<(usize, &str)> = None;
     for word in keywords {
@@ -231,8 +201,6 @@ fn first_keyword<'a>(sql: &str, keywords: &[&'a str]) -> Option<&'a str> {
     best.map(|(_, word)| word)
 }
 
-/// The identifier after the first `FROM`, `INTO` or `UPDATE`, which for every
-/// statement shape in this codebase is the table the statement is about.
 fn first_table(sql: &str) -> Option<String> {
     let mut best: Option<usize> = None;
     for keyword in ["FROM", "INTO", "UPDATE"] {
@@ -252,7 +220,6 @@ fn first_table(sql: &str) -> Option<String> {
     (!table.is_empty()).then_some(table)
 }
 
-/// Byte offset of `word` in `sql` as a whole ASCII word, case-insensitively.
 fn find_word(sql: &str, word: &str) -> Option<usize> {
     let bytes = sql.as_bytes();
     let needle = word.as_bytes();
@@ -275,8 +242,6 @@ fn find_word(sql: &str, word: &str) -> Option<usize> {
     None
 }
 
-/// Emit the report and reset, so a process that runs several operations reports
-/// each one separately.
 pub(crate) fn report(context: &str) {
     if !enabled() {
         return;
@@ -446,8 +411,6 @@ mod tests {
 
     #[test]
     fn hooks_are_inert_when_profiling_is_off() {
-        // The suite runs without `FOXY_PROFILE`, so every hook has to no-op
-        // rather than allocate a report nobody asked for.
         assert!(!enabled());
         phase("never-recorded");
         record_db("read", "SELECT 1 FROM files", Duration::from_millis(1), 1);

@@ -2,7 +2,6 @@ use egui::{Color32, ColorImage, Context, Id, TextureHandle, TextureId, TextureOp
 
 const SPRITE_TEXELS: usize = 32;
 
-/// The sprites the activity visuals tint and scatter.
 #[derive(Clone)]
 pub(super) struct ActivityTextures {
     glow: TextureHandle,
@@ -30,12 +29,10 @@ impl ActivityTextures {
         textures
     }
 
-    /// A soft round light.
     pub(super) fn glow(&self) -> TextureId {
         self.glow.id()
     }
 
-    /// A four-pointed twinkle.
     pub(super) fn sparkle(&self) -> TextureId {
         self.sparkle.id()
     }

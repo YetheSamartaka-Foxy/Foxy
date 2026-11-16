@@ -1,6 +1,3 @@
-//! Manifest writers shared by `create` (one repository) and `create-space`
-//! (every repository of a space in one pass).
-
 use anyhow::Result;
 use std::path::Path;
 
@@ -25,8 +22,6 @@ pub fn uses_foxy(mode: GenerationMode) -> bool {
     matches!(mode, GenerationMode::Foxy | GenerationMode::Hybrid)
 }
 
-/// Write the per-mod manifests (`mod.srf` and/or `foxy_addon.json`) into
-/// `<dir>/<mod>/` for every mod.
 pub fn write_mod_manifests(mods: &[ProcessedMod], dir: &Path, mode: GenerationMode) -> Result<()> {
     if uses_swifty(mode) {
         for m in mods {
@@ -41,8 +36,6 @@ pub fn write_mod_manifests(mods: &[ProcessedMod], dir: &Path, mode: GenerationMo
     Ok(())
 }
 
-/// Write the repository-level manifests (`foxy_addons.json` and `repo.json`)
-/// into `dir` and return the repository checksum published in `repo.json`.
 pub fn write_repo_manifests(
     config: &RepoConfig,
     mods: &[ProcessedMod],
@@ -73,7 +66,6 @@ pub fn write_repo_manifests(
     Ok(repo_checksum)
 }
 
-/// Human-readable list of the artifact sets a mode produces, for summaries.
 pub fn artifact_lines(mode: GenerationMode) -> Vec<&'static str> {
     let mut lines = Vec::new();
     if uses_foxy(mode) {

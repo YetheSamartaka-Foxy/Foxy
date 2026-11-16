@@ -1,10 +1,4 @@
-//! Drop the OS page cache for a payload so a case measures the disk.
-//!
-//! "Cold" in the ledger only means the first iteration; nothing evicts the
-//! files a `setup_once` download just wrote, so an HDD row would otherwise
-//! hash at memory speed. Opening a file non-cached makes the Windows cache
-//! manager flush and purge its cached pages when no cached handle remains,
-//! which is the state a user's first check after a reboot sees.
+//! A first iteration can still read setup-warmed pages; explicitly evict them before claiming a device-speed reference.
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};

@@ -5,8 +5,6 @@ use crate::ui::types::{has_launch_param_token, set_launch_param_token};
 use eframe::egui::{Button, Color32, TextEdit, Ui, Vec2};
 use log::{info, warn};
 
-/// The launch fields being edited: the selected profile's, or the
-/// repository's own when no profile is selected.
 struct LaunchParamTarget<'a> {
     csla: &'a mut bool,
     ef: &'a mut bool,
@@ -41,10 +39,7 @@ impl LaunchParamTarget<'_> {
 }
 
 impl Foxy {
-    /// Creator DLC checkboxes, basic launch parameters, and additional
-    /// parameters. Which checkboxes exist comes from the active game module
-    /// (`GameCapabilities::creator_dlc`, `GameModule::repository_launch_flags`),
-    /// so a game never shows another game's flags.
+    /// Show launch options from the active module's capabilities so games never inherit another game's flags.
     pub(super) fn render_repository_configuration_profiles(
         &mut self,
         ui: &mut Ui,
@@ -179,7 +174,6 @@ impl Foxy {
             ui.separator();
         }
 
-        // Additional Parameters
         ui.horizontal(|ui| {
             ui.label(tr("Additional Parameters"));
             if launch_params_managed {
@@ -201,7 +195,6 @@ impl Foxy {
         ui.separator();
     }
 
-    /// Action buttons (recalculate hashes, force redownload, wipe DB entries, delete repository).
     #[expect(clippy::too_many_arguments)]
     pub(super) fn render_repository_configuration_actions(
         &mut self,

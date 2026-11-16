@@ -10,15 +10,12 @@ const INSTALLER_MAX_RETRIES: u32 = 3;
 const INSTALLER_BASE_DELAY_MS: u64 = 1000;
 const INSTALLER_CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Download an installer to a temp directory with progress reporting.
-/// Returns the path to the downloaded file. Supports retry with resume
-/// via HTTP Range headers on transient failures.
+/// Download with resumable range requests so transient failures can continue.
 pub async fn download_installer(
     base_url: &str,
     platform_entry: &PlatformEntry,
     progress_tx: &std_mpsc::Sender<AppUpdateEvent>,
 ) -> Result<PathBuf> {
-    // GitHub mode stores full URLs in installer_path; server mode uses relative paths.
     let url = if platform_entry.installer_path.starts_with("http://")
         || platform_entry.installer_path.starts_with("https://")
     {
@@ -31,7 +28,6 @@ pub async fn download_installer(
         )
     };
 
-    // Determine filename from the path - split on both separators and sanitize
     let file_name =
         crate::core::utils::fs_safety::sanitize_installer_filename(&platform_entry.installer_path)
             .unwrap_or_else(|| "foxy-installer".to_string());
@@ -97,7 +93,6 @@ pub async fn download_installer(
             total_size = response.content_length().unwrap_or(total_size);
         }
 
-        // On first attempt create; on resume open in append mode
         use tokio::io::AsyncWriteExt;
         let mut file = if downloaded == 0 {
             tokio::fs::File::create(&dest_path)
@@ -132,7 +127,7 @@ pub async fn download_installer(
                     stream_failed = true;
                     break;
                 }
-                Ok(None) => break, // stream complete
+                Ok(None) => break,
                 Err(_) => {
                     log::warn!(
                         "Installer download chunk timed out after {:?}",
@@ -169,7 +164,6 @@ pub async fn download_installer(
     )
 }
 
-/// Verify the hash of a downloaded installer file using streaming.
 pub fn verify_installer(path: &Path, expected_hash: &str, algorithm: &str) -> Result<bool> {
     log::info!("Verifying installer hash: {}", sanitize_log_path(path));
 
@@ -238,9 +232,6 @@ fn windows_installer_args(silent: bool) -> Vec<&'static str> {
     args
 }
 
-/// Launch the installer and exit the app.
-/// On Windows, runs the installer with /VERYSILENT flags.
-/// On Linux, runs the shell installer with --silent.
 pub fn launch_installer(path: &Path, silent: bool) -> Result<()> {
     log::info!("Launching installer: {}", sanitize_log_path(path));
 
@@ -248,11 +239,7 @@ pub fn launch_installer(path: &Path, silent: bool) -> Result<()> {
     {
         let args = windows_installer_args(silent);
 
-        // A per-user install updates in place, but an older install under
-        // Program Files cannot be overwritten by an unelevated Foxy. Setup
-        // would ask for elevation itself, yet a declined prompt reaches us as a
-        // successful spawn: the update would just never happen, with nothing to
-        // show the user. Requesting it here turns a refusal into an error.
+        // A declined UAC prompt can look like a successful spawn; request elevation here so refusal surfaces as an error.
         if windows_install_dir_needs_elevation() {
             log::info!("Installer needs elevation to replace the current install; requesting it");
             windows_launch_elevated(path, &args)?;
@@ -317,18 +304,15 @@ pub fn launch_installer(path: &Path, silent: bool) -> Result<()> {
         anyhow::bail!("Installer launch not supported on this platform");
     }
 
-    // Give the installer script time to start before we exit
     #[cfg(target_os = "linux")]
     {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
-    // Exit the app so the installer can replace the binary
     log::info!("Exiting app for installer to proceed.");
     std::process::exit(0);
 }
 
-/// Whether replacing the running Foxy requires elevation this process lacks.
 #[cfg(target_os = "windows")]
 fn windows_install_dir_needs_elevation() -> bool {
     if crate::core::utils::deelevate::is_process_elevated() == Some(true) {

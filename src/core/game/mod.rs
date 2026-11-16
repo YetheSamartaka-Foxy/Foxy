@@ -27,36 +27,33 @@ pub struct GameDetectCtx<'a> {
     pub steam_directory: &'a str,
 }
 
-/// What a game module exposes. Every UI and CLI surface that can be absent for
-/// some game gates on a flag here rather than on the module id, so a game that
-/// lacks a feature never renders a dead control and adding a module never means
-/// editing a shared `id() == "arma3"` check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DedicatedServerSupport {
+    Unsupported,
+    WorkInProgress,
+}
+
+/// Game-specific capabilities used to gate UI and CLI features without module-id checks.
 #[derive(Clone, Copy, Debug)]
 pub struct GameCapabilities {
-    /// File-sync repositories (URL + local path, tree hash, delta patch).
     pub repository_sync: bool,
-    /// Launching the game from a repository's addon selection. Distinct from
-    /// `repository_sync`: a game can sync repository file trees without the
-    /// Arma-shaped `-mod=` launch plan being meaningful for it.
+    /// Repository sync does not imply support for the repository's game-specific addon launch plan.
     pub repository_launch: bool,
     pub steam_workshop: bool,
-    /// Addons a player may load without the server having them. Arma 3 servers
-    /// report their addon list and tolerate extra client-only mods; Reforger
-    /// activates exactly the server's mod set on join, so there is nothing for a
-    /// client-side marking to mean and no surface should offer it.
+    /// Whether clients may enable addons absent from the server; Reforger activates
+    /// exactly the server's mod set and does not support this capability.
     pub client_side_addons: bool,
     pub direct_download: bool,
     pub extra_files: bool,
     pub profiles: bool,
     pub foxy_config_export: bool,
-    /// TeamSpeak 3 plugin discovery/installation and the join-time TS3 gate.
+
     pub teamspeak3_plugins: bool,
     /// Creator DLC selection on a repository (the `-mod=` codes the game
     /// resolves from its own install) and the `dlcContent` manifest key.
     pub creator_dlc: bool,
-    /// Querying a server's addon list over the Steam rules protocol before a
-    /// join, so disabled local addons can be offered for enabling. Only Arma 3
-    /// servers publish that list.
+    /// Only Arma 3 publishes addon lists over Steam rules for join-time enablement.
     pub join_addon_preflight: bool,
 }
 
@@ -113,9 +110,7 @@ pub struct ToggleSetting {
     pub help: &'static str,
 }
 
-/// A free-text game setting. Used by games Foxy cannot describe statically,
-/// where the player supplies the executable name, Steam app id, or launch
-/// argument template themselves.
+/// Custom games supply settings the module cannot know statically, including executables, app IDs and argument templates.
 pub struct TextSetting {
     pub id: &'static str,
     pub label: &'static str,
@@ -123,10 +118,7 @@ pub struct TextSetting {
     pub placeholder: &'static str,
 }
 
-/// Which `Repository` value a repository launch checkbox toggles. Arma 3's
-/// historical flags have dedicated fields; every other game stores its flags
-/// as tokens in `additional_params`, which is also where a repository's
-/// `clientParameters` string lands.
+/// Arma flags use dedicated Repository fields; other games share additional_params with clientParameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchFlagField {
     SkipIntro,
@@ -139,7 +131,6 @@ pub enum LaunchFlagField {
     AdditionalParamToken,
 }
 
-/// A boolean startup flag the repository settings screen offers as a checkbox.
 pub struct RepositoryLaunchFlag {
     /// The exact token the game accepts, also used as the checkbox label.
     pub flag: &'static str,
@@ -151,6 +142,12 @@ pub trait GameModule: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &str;
     fn capabilities(&self) -> GameCapabilities;
+    fn dedicated_server_support(&self) -> DedicatedServerSupport {
+        DedicatedServerSupport::Unsupported
+    }
+    fn server_capabilities(&self) -> crate::core::server::ServerCapabilities {
+        crate::core::server::ServerCapabilities::default()
+    }
     fn detect_install_dir(&self, ctx: &GameDetectCtx) -> Option<PathBuf>;
     fn validate_install_dir(&self, path: &Path) -> bool;
     fn is_addon_directory(&self, path: &Path) -> bool {
@@ -176,17 +173,12 @@ pub trait GameModule: Send + Sync {
     }
     fn settings_schema(&self) -> GameSettingsSchema;
 
-    /// Container formats this game's repositories ship, as `foxy_formats`
-    /// ids. Hashing trusts a single entry without probing the file head;
-    /// an empty list means detect the format from the manifest markers and
-    /// the local file.
+    /// A single format ID is trusted without probing; an empty list requires manifest/local-format detection.
     fn content_formats(&self) -> &'static [&'static str] {
         &[]
     }
 
-    /// Turn a repository's enabled addon selection into a launch plan for this
-    /// game. Only meaningful for a module that declares `repository_launch`;
-    /// the default refuses so a module never inherits another game's plan shape.
+    /// Require repository_launch and refuse by default so a new module cannot inherit another game's argument shape.
     fn build_repository_launch_plan(
         &self,
         _settings: &SettingsViewState,
@@ -196,15 +188,11 @@ pub trait GameModule: Send + Sync {
         Err(LaunchError::RepositoryLaunchUnsupported)
     }
 
-    /// Boolean startup flags offered as checkboxes in a repository's launch
-    /// settings. Only meaningful for a module that declares `repository_launch`.
     fn repository_launch_flags(&self) -> Vec<RepositoryLaunchFlag> {
         Vec::new()
     }
 
-    /// UDP port answering Steam A2S_INFO for a server listed in a repository.
-    /// The Source convention (game port + 1) is the default; a game whose
-    /// query port is independent of the game port overrides it.
+    /// A2S defaults to game port + 1; games with an independent query port must override this.
     fn server_query_port(&self, game_port: u16) -> Option<u16> {
         game_port.checked_add(1)
     }
@@ -217,9 +205,7 @@ pub trait GameModule: Send + Sync {
         None
     }
 
-    /// The Steam app id to use for this space's Workshop store. Games whose id
-    /// is fixed at compile time inherit `steam_app_id`; a user-configured game
-    /// reads it from its own settings.
+    /// Fixed games inherit steam_app_id; custom games resolve their Workshop app from current space settings.
     fn steam_app_id_from_settings(&self, _settings: &SettingsViewState) -> Option<u32> {
         self.steam_app_id()
     }

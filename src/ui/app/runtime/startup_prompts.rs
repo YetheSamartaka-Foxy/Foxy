@@ -15,8 +15,7 @@ impl Foxy {
             return;
         };
 
-        // A wipe must not race an in-flight sync (it drops the tables the sync
-        // is writing). Mirror the settings wipe dialog's guard.
+        // Do not wipe tables while a sync may still be writing them.
         let sync_active = self.repository_sync_active();
         let mut wipe_clicked = false;
         let mut dismiss_clicked = false;
@@ -114,36 +113,57 @@ impl Foxy {
         }
 
         if wipe_clicked {
+            if !self.client_db_admission.allows() {
+                return;
+            }
             warn!(
                 "Database schema wipe confirmed (stored={} target={} recheck_all={})",
                 prompt.stored_version, prompt.target_version, self.db_schema_wipe_recheck_all
             );
             self.database_wipe_in_flight = true;
             self.recheck_all_after_database_wipe = self.db_schema_wipe_recheck_all;
-            // Wipe on a background thread so the UI draw loop is never blocked.
+
             let database_wipe_tx = self.database_wipe_tx.clone();
-            std::thread::spawn(move || {
-                let result = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => {
-                        match rt.block_on(crate::core::tasks::init_database::wipe_database_live()) {
-                            Ok(()) => {
-                                info!("Database schema wipe completed");
-                                Ok(())
-                            }
-                            Err(e) => {
-                                error!("Failed to wipe database for schema upgrade: {}", e);
-                                Err(e)
+            let Some(scope) = self.capture_worker_scope() else {
+                self.database_wipe_in_flight = false;
+                return;
+            };
+            let space_id = scope.space_id().to_string();
+            let generation = scope.generation();
+            let admission = self.client_db_admission.clone();
+            let handle = std::thread::spawn(move || {
+                let outcome = if !crate::ui::app::admit_database_section(&admission) {
+                    Err("Database admission is closed".to_string())
+                } else {
+                    match tokio::runtime::Runtime::new() {
+                        Ok(rt) => {
+                            match rt
+                                .block_on(crate::core::tasks::init_database::wipe_database_live())
+                            {
+                                Ok(()) => {
+                                    info!("Database schema wipe completed");
+                                    Ok(())
+                                }
+                                Err(e) => {
+                                    error!("Failed to wipe database for schema upgrade: {}", e);
+                                    Err(e)
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        error!("Failed to create runtime for schema wipe: {}", e);
-                        Err(e.to_string())
+                        Err(e) => {
+                            error!("Failed to create runtime for schema wipe: {}", e);
+                            Err(e.to_string())
+                        }
                     }
                 };
-                let _ = database_wipe_tx.send(result);
+                let _ = database_wipe_tx.send(crate::ui::app::DatabaseWipeDelivery {
+                    space_id,
+                    generation,
+                    outcome,
+                });
             });
-            // Clear in-memory caches that mirror the now-empty database.
+            self.database_wipe_worker = Some(handle);
+
             self.clear_mod_diff_cache();
             self.repo_states.clear();
             self.update_ready_repo = None;
@@ -156,9 +176,7 @@ impl Foxy {
         }
     }
 
-    /// Startup prompt shown when the launch update check found a newer Foxy
-    /// release. Dismissal is deliberately session-only, so the prompt returns on
-    /// every launch until the update is installed.
+    /// Dismissal lasts only for this session, so the update prompt returns on the next launch.
     pub(super) fn render_app_update_prompt(&mut self, ctx: &egui::Context) {
         if !self.pending_app_update_prompt {
             return;

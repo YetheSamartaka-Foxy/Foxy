@@ -160,8 +160,6 @@ struct LaunchSpec {
     requires_existing_executable: bool,
 }
 
-/// Build the launch command through the active game module so the CLI and the
-/// GUI share one plan per game instead of a second Arma-shaped copy here.
 fn build_launch_spec(
     module: &dyn GameModule,
     settings: &SettingsViewState,

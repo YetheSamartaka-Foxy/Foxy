@@ -1,57 +1,36 @@
-//! Filesystem compatibility rules for the paths Foxy reads and writes.
-//!
-//! Foxy stages multi-gigabyte addon files beside their targets (`.foxy.part`,
-//! `.foxy.bak` sidecars), preallocates full-length part files, and keeps a
-//! Turso database plus WAL under the game space. Each of those has a known
-//! failure mode on some filesystem: FAT cannot hold a file of 4 GiB or more,
-//! FAT/exFAT are not journaled, a database on a network share has no reliable
-//! locking, and Windows applications that are not long-path aware cannot open
-//! paths of 260 characters or more. The rules here turn a probed volume plus a
-//! path role into a list of issues; callers decide how to surface them.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::core::utils::format::sanitize_log_path;
 
-/// Largest file FAT12/16/32 can store (4 GiB minus one byte).
 pub const FAT_MAX_FILE_BYTES: u64 = 0xFFFF_FFFF;
 
-/// `MAX_PATH` on Windows, including the terminating NUL: a usable path is at
-/// most 259 characters for applications without the long-path manifest flag.
 pub const WINDOWS_MAX_PATH_CHARS: usize = 260;
 
-/// Longest sidecar suffix Foxy appends next to a target file while it is being
-/// downloaded or replaced (`<file>.foxy.part.meta.tmp`). A target path that is
-/// legal on its own can still fail once the sidecar name is added.
 pub const SIDECAR_SUFFIX_RESERVE: usize = ".foxy.part.meta.tmp".len();
 
-/// Longest single path component accepted by every filesystem Foxy targets
-/// (NTFS/exFAT count UTF-16 units, ext4/XFS/Btrfs count bytes; both are 255).
 pub const MAX_NAME_CHARS: usize = 255;
 
-/// Filesystem family, classified from the name the operating system reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FilesystemFamily {
     Ntfs,
     ReFs,
-    /// FAT12, FAT16 and FAT32 (`FAT32`, `vfat`, `msdos`).
+
     Fat,
     ExFat,
     Apfs,
     HfsPlus,
-    /// ext2, ext3 and ext4.
+
     Ext,
     Xfs,
     Btrfs,
     Zfs,
     F2fs,
-    /// SMB/CIFS, NFS, AFP, WebDAV and hypervisor shared folders.
+
     Network,
-    /// tmpfs, ramfs and RAM disks: contents do not survive a reboot.
+
     Volatile,
-    /// An opaque FUSE mount (`fuseblk` is how Linux reports ntfs-3g and
-    /// exfat-fuse volumes).
+
     Fuse,
     Unknown,
 }
@@ -78,8 +57,6 @@ impl FilesystemFamily {
     }
 }
 
-/// Classify a filesystem name as reported by `GetVolumeInformationW`,
-/// `/proc/mounts`, or `statfs`.
 pub fn classify_filesystem_name(name: &str) -> FilesystemFamily {
     let name = name.trim().to_ascii_lowercase();
     match name.as_str() {
@@ -105,18 +82,14 @@ pub fn classify_filesystem_name(name: &str) -> FilesystemFamily {
     }
 }
 
-/// What the operating system reports about the volume behind a path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VolumeInfo {
-    /// Mount point or drive root the path resolves to.
     pub root: PathBuf,
-    /// Filesystem name exactly as reported.
+
     pub filesystem: String,
     pub family: FilesystemFamily,
     pub removable: bool,
-    /// A network drive or UNC path. Windows reports the *remote* filesystem
-    /// name for mapped shares (an SMB share on an NTFS server reads "NTFS"), so
-    /// this flag is what identifies a share, not `family`.
+    /// Windows mapped shares report the remote filesystem name; use the network flag, not filesystem family, to identify shares.
     pub remote: bool,
     pub read_only: bool,
 }
@@ -213,8 +186,6 @@ pub fn validate_volume_identity(path: &Path, approved: &VolumeIdentity) -> Resul
 }
 
 impl VolumeInfo {
-    /// Largest single file the filesystem can hold, when it has a limit that a
-    /// repository file could realistically hit.
     pub fn max_file_bytes(&self) -> Option<u64> {
         match self.family {
             FilesystemFamily::Fat => Some(FAT_MAX_FILE_BYTES),
@@ -230,10 +201,6 @@ impl VolumeInfo {
         self.remote || self.family == FilesystemFamily::Network
     }
 
-    /// Whether two names differing only by letter case resolve to the same
-    /// file. Windows treats every volume that way (per-directory case
-    /// sensitivity is opt-in and rare); elsewhere FAT/exFAT always do and
-    /// Apple filesystems do by default.
     pub fn case_insensitive_lookup(&self) -> bool {
         if cfg!(windows) {
             return true;
@@ -246,14 +213,12 @@ impl VolumeInfo {
     }
 }
 
-/// How Foxy uses a storage path, derived from the startup storage role names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageRoleKind {
-    /// Foxy's own state: database, settings, logs, temp staging, backups.
     State,
-    /// Download destinations Foxy writes addon content into.
+
     Content,
-    /// Game installs and folders Foxy only reads or lightly touches.
+
     GameInstall,
     Other,
 }
@@ -270,25 +235,20 @@ pub fn storage_role_kind(role: &str) -> StorageRoleKind {
     }
 }
 
-/// Roles whose files are Foxy's local state and cannot be recovered by a
-/// redownload.
 fn role_holds_database(role: &str) -> bool {
     matches!(role, "database" | "game_space" | "app_data")
 }
 
-/// Roles that receive multi-gigabyte files (addon content, patch staging,
-/// addon backups) and therefore care about a per-file size ceiling.
 fn role_writes_large_files(role: &str) -> bool {
     storage_role_kind(role) == StorageRoleKind::Content || matches!(role, "temp" | "backups")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StorageIssueSeverity {
-    /// Logged only; useful for support, not worth interrupting the user.
     Advisory,
-    /// Works, but with a real risk the user should know about.
+
     Warning,
-    /// Foxy cannot do its job safely on this path.
+
     Blocking,
 }
 
@@ -313,14 +273,13 @@ pub enum StorageIssueCode {
     RemovableStateDrive,
     CopyOnWriteDatabase,
     CaseSensitiveContent,
-    /// A repository file is larger than the destination filesystem allows.
+
     FileExceedsFilesystemLimit,
-    /// A repository path (plus sidecar) reaches the Windows `MAX_PATH` limit.
+
     PathTooLongForWindows,
-    /// A repository file name cannot be created on Windows.
+
     InvalidWindowsName,
-    /// Two repository files differ only by letter case on a case-insensitive
-    /// volume, so one overwrites the other.
+
     CaseCollision,
 }
 
@@ -344,25 +303,22 @@ impl StorageIssueCode {
     }
 }
 
-/// One compatibility finding for one path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageIssue {
     pub code: StorageIssueCode,
     pub severity: StorageIssueSeverity,
     pub role: String,
     pub path: PathBuf,
-    /// Mount point or drive root of the volume behind `path`, so several
-    /// paths on one drive can be collapsed into one finding.
+
     pub volume_root: PathBuf,
     pub filesystem: String,
-    /// Files affected by a limit-type issue (over the size ceiling, too long,
-    /// invalid name); zero for volume-level issues.
+
     pub affected_files: usize,
-    /// Largest offending file in bytes for [`StorageIssueCode::FileExceedsFilesystemLimit`].
+
     pub largest_file_bytes: u64,
-    /// Longest offending path in characters for [`StorageIssueCode::PathTooLongForWindows`].
+
     pub longest_path_chars: usize,
-    /// One offending name or path pair, for the user to recognize the file.
+
     pub example: String,
 }
 
@@ -388,8 +344,6 @@ impl StorageIssue {
         }
     }
 
-    /// Whether the finding describes the volume as a whole (one finding per
-    /// drive is enough) rather than the files of one folder.
     pub fn is_volume_level(&self) -> bool {
         !matches!(
             self.code,
@@ -400,11 +354,6 @@ impl StorageIssue {
         )
     }
 
-    /// Stable identity of the finding for collapsing duplicates and for
-    /// "do not show again" bookkeeping: the code, the drive (or the folder for
-    /// per-file findings) and the filesystem. Adding a second repository on an
-    /// already-acknowledged FAT32 drive raises nothing new; moving the drive
-    /// to another filesystem or adding a new drive does.
     pub fn fingerprint_component(&self) -> String {
         let anchor = if self.is_volume_level() {
             &self.volume_root
@@ -447,13 +396,10 @@ impl StorageIssue {
     }
 }
 
-/// Separator- and case-insensitive form of a path, for comparing two spellings
-/// of the same file.
 fn fold_path(path: &str) -> String {
     path.replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
-/// Volume-level findings for a path used in `role`.
 pub fn evaluate_volume(role: &str, path: &Path, volume: &VolumeInfo) -> Vec<StorageIssue> {
     let kind = storage_role_kind(role);
     if matches!(kind, StorageRoleKind::Other | StorageRoleKind::GameInstall) {
@@ -537,20 +483,15 @@ pub fn evaluate_volume(role: &str, path: &Path, volume: &VolumeInfo) -> Vec<Stor
     issues
 }
 
-/// Why a path component cannot be created on a Windows volume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameProblem {
-    /// `CON`, `PRN`, `AUX`, `NUL`, `COM1`..`COM9`, `LPT1`..`LPT9` (any extension).
     ReservedName,
     InvalidCharacter(char),
-    /// Windows strips trailing dots and spaces, so the file lands under a
-    /// different name than the manifest expects.
+
     TrailingDotOrSpace,
     TooLong,
 }
 
-/// Validate one path component against the rules every Windows filesystem
-/// enforces. Length is checked everywhere since the 255 ceiling is universal.
 pub fn name_problem(component: &str) -> Option<NameProblem> {
     if component.is_empty() {
         return None;
@@ -590,19 +531,14 @@ fn is_windows_reserved_stem(stem: &str) -> bool {
     }
 }
 
-/// Number of characters the full path would occupy once Foxy appends its
-/// longest sidecar suffix.
 pub fn path_chars_with_sidecar(path_chars: usize) -> usize {
     path_chars + SIDECAR_SUFFIX_RESERVE
 }
 
-/// Whether a path of `path_chars` characters (before any sidecar suffix) can
-/// break a Windows application that is not long-path aware.
 pub fn windows_path_too_long(path_chars: usize) -> bool {
     path_chars_with_sidecar(path_chars) >= WINDOWS_MAX_PATH_CHARS
 }
 
-/// Aggregate limits over a set of files bound for one volume.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PathLimitReport {
     pub file_count: usize,
@@ -612,12 +548,11 @@ pub struct PathLimitReport {
     pub paths_too_long: usize,
     pub invalid_names: usize,
     pub invalid_name_example: String,
-    /// Two paths that collide once letter case is ignored.
+
     pub case_collision: Option<(String, String)>,
 }
 
 impl PathLimitReport {
-    /// Scan `(path, size)` pairs. Pure string work: no filesystem access.
     pub fn from_files<'a>(
         files: impl IntoIterator<Item = (&'a str, u64)>,
         volume: &VolumeInfo,
@@ -670,7 +605,6 @@ impl PathLimitReport {
         report
     }
 
-    /// Build the per-file findings for a destination in `role`.
     pub fn issues(&self, role: &str, path: &Path, volume: &VolumeInfo) -> Vec<StorageIssue> {
         let mut issues = Vec::new();
         let base = |code, severity| StorageIssue::volume(code, severity, role, path, volume);
@@ -715,8 +649,6 @@ impl PathLimitReport {
     }
 }
 
-/// Resolves the volume behind a path. On Windows every probe is a pair of
-/// Win32 calls; elsewhere the mount table is read once per prober.
 pub struct VolumeProber {
     #[cfg(not(windows))]
     disks: sysinfo::Disks,
@@ -736,8 +668,6 @@ impl VolumeProber {
         }
     }
 
-    /// Volume of `path`, probed on the nearest ancestor that exists so a
-    /// destination folder that has not been created yet still resolves.
     pub fn probe(&self, path: &Path) -> Option<VolumeInfo> {
         let absolute = absolute_path(path);
         let anchor = absolute
@@ -1040,7 +970,7 @@ mod tests {
         let content = evaluate_volume("repository", Path::new("X:\\mods"), &vol);
         assert_eq!(codes(&content), vec![StorageIssueCode::FatFileSizeLimit]);
         assert_eq!(content[0].severity, StorageIssueSeverity::Warning);
-        // Temp holds patch staging of full addon size, so it shares the ceiling.
+
         let temp = evaluate_volume("temp", Path::new("X:\\tmp"), &vol);
         assert_eq!(codes(&temp), vec![StorageIssueCode::FatFileSizeLimit]);
         let logs = evaluate_volume("logs", Path::new("X:\\logs"), &vol);
@@ -1083,7 +1013,7 @@ mod tests {
             );
             assert_eq!(issues[0].severity, StorageIssueSeverity::Warning);
         }
-        // A cifs mount on Linux is a share even without the drive-type flag.
+
         let cifs = volume(FilesystemFamily::Network);
         let issues = evaluate_volume("database", Path::new("/mnt/nas"), &cifs);
         assert_eq!(
@@ -1120,7 +1050,7 @@ mod tests {
         vol.removable = true;
         let db = evaluate_volume("database", Path::new("E:\\Foxy"), &vol);
         assert_eq!(codes(&db), vec![StorageIssueCode::RemovableStateDrive]);
-        // External drives full of mods are a normal setup.
+
         assert!(evaluate_volume("repository", Path::new("E:\\mods"), &vol).is_empty());
     }
 
@@ -1244,7 +1174,6 @@ mod tests {
         assert_eq!(size.affected_files, 2);
         assert_eq!(size.largest_file_bytes, 6 * 1024 * 1024 * 1024);
 
-        // The same files on NTFS raise nothing.
         let ntfs = volume(FilesystemFamily::Ntfs);
         let report = PathLimitReport::from_files(files.iter().copied(), &ntfs);
         assert_eq!(report.files_over_size_limit, 0);
@@ -1371,7 +1300,7 @@ mod tests {
         if let Some(info) = info {
             assert!(!info.filesystem.is_empty());
             assert!(!info.root.as_os_str().is_empty());
-            // A folder that does not exist yet resolves through its parent.
+
             let unborn = std::env::temp_dir().join("foxy-storage-compat-nonexistent");
             let nested = prober.probe(&unborn.join("deeper")).expect("nested probe");
             assert_eq!(nested.root, info.root);

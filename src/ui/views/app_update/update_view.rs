@@ -67,10 +67,6 @@ impl Foxy {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Shared: view header (heading + close button + separator)
-    // -----------------------------------------------------------------------
-
     pub(super) fn render_reference_view_header(&mut self, ui: &mut Ui, title: &str) {
         ui.horizontal(|ui| {
             ui.heading(title);
@@ -92,10 +88,6 @@ impl Foxy {
         });
         ui.separator();
     }
-
-    // -----------------------------------------------------------------------
-    // App Update View (notification modal for upgrades)
-    // -----------------------------------------------------------------------
 
     pub fn render_app_update_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let margin = Margin {
@@ -224,8 +216,4 @@ impl Foxy {
             }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Version Browser View (all versions, with downgrade support)
-    // -----------------------------------------------------------------------
 }

@@ -1,4 +1,3 @@
-// State model extracted from app facade.
 mod backup;
 mod core;
 mod diagnostics;

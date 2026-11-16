@@ -73,6 +73,8 @@ pub enum CliCommand {
     },
     /// Print the current Foxy version.
     Version,
+    #[command(hide = true)]
+    ContentAcquisitionWorker,
     /// Inspect or modify global settings.
     Settings {
         #[command(subcommand)]
@@ -135,6 +137,12 @@ pub enum CliCommand {
 pub struct UiArgs {
     #[arg(
         long,
+        value_enum,
+        help = "Select client or server mode for this UI session without saving it"
+    )]
+    pub mode: Option<AppModeArg>,
+    #[arg(
+        long,
         help = "Enable debug mode for this UI session (not persisted to settings)"
     )]
     pub debug_mode: bool,
@@ -158,6 +166,21 @@ pub struct UiArgs {
         help = "Force a startup modal open with placeholder data for inspection (repeatable). Its real actions stay disabled."
     )]
     pub debug_modals: Vec<crate::ui::app::debug_modals::DebugModal>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AppModeArg {
+    Client,
+    Server,
+}
+
+impl From<AppModeArg> for crate::core::app_mode::AppMode {
+    fn from(value: AppModeArg) -> Self {
+        match value {
+            AppModeArg::Client => Self::Client,
+            AppModeArg::Server => Self::Server,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -1097,6 +1120,12 @@ pub enum SettingsCommand {
 
 #[derive(Args, Debug)]
 pub struct SettingsSetArgs {
+    #[arg(
+        long,
+        value_enum,
+        help = "Save the default UI mode (server management is work in progress)"
+    )]
+    pub app_mode: Option<AppModeArg>,
     #[arg(long, help = "Show or hide debug windows (true/false)")]
     pub show_debug_windows: Option<bool>,
     #[arg(long, help = "Show or hide footer activity log toggle (true/false)")]
@@ -2120,8 +2149,861 @@ pub enum SpaceSyncMode {
 
 #[derive(Subcommand, Debug)]
 pub enum ServerCommand {
+    /// Review and acquire an exact Reforger addon set in isolated native engine roots.
+    ReforgerAddons {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerReforgerAddonsCommand,
+    },
+    /// Prepare and verify protected native Steam sessions without opening the game database.
+    Steam {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerSteamCommand,
+    },
+    #[command(hide = true)]
+    ConsoleSignal { handle: u64 },
+    #[command(hide = true)]
+    CleanupWitness {
+        owner: u64,
+        tree: u64,
+        receipt: u64,
+        ready: u64,
+    },
+    /// Host one foreground metadata owner for a captured game space until Ctrl+C.
+    Supervise(ServerSuperviseArgs),
+    /// Authenticate and inspect the current foreground owner without opening Turso.
+    Owner(ServerOwnerArgs),
+    /// Inspect a captured game-space context without creating files or opening its database.
+    Context(ServerContextArgs),
+    /// Report implemented server operations for an existing game space.
+    Capabilities(ServerContextArgs),
+    /// Inspect and edit saved server drafts without installing or launching a server.
+    Instance {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerInstanceCommand,
+    },
+    /// Define, review and start Arma headless clients for a server draft.
+    Headless {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerHeadlessCommand,
+    },
+    /// Define scheduled maintenance jobs, run or cancel them, and review their occurrences.
+    Maintenance {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerMaintenanceCommand,
+    },
+    /// Review, acquire and verify Arma Workshop items as pinned server content.
+    Workshop {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerWorkshopCommand,
+    },
+    /// Inspect existing native installations without running or modifying them.
+    Installation {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerInstallationCommand,
+    },
+    /// Review, save and verify configuration-only snapshots without a game process.
+    Configuration {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerConfigurationCommand,
+    },
+    /// Collect and explicitly review public signing-key trust for a server draft.
+    Keys {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerKeyCommand,
+    },
+    /// Import and review a private mission library and ordered instance cycles.
+    Mission {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerMissionCommand,
+    },
     /// Query public server addon metadata through Steam server rules.
     InspectAddons(ServerInspectAddonsArgs),
+    /// Set addon folders and repository profiles without opening the sync database.
+    Content {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerContentCommand,
+    },
+    /// Review verified configuration and content without selecting or activating a deployment.
+    Deploy {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerDeployCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerHeadlessCommand {
+    /// List the draft's headless client definitions in start order.
+    List(ServerInstanceSelector),
+    /// Add a headless client definition to the draft.
+    Add(ServerHeadlessAddArgs),
+    /// Replace one headless client definition, keeping its id; omitted options reset to defaults.
+    Set(ServerHeadlessSetArgs),
+    /// Remove one headless client definition from the draft; requires --yes.
+    Remove(ServerHeadlessRemoveArgs),
+    /// Review the committed runtime's headless launch plans without starting anything.
+    Plan(ServerInstanceSelector),
+    /// Show each headless client of the running server as the owner observes it.
+    Status(ServerInstanceSelector),
+    /// Start the headless clients, or one with --client, of a running, query-ready server.
+    Start(ServerHeadlessStartArgs),
+    /// Stop the headless clients, or one with --client; they stay stopped until started again.
+    Stop(ServerHeadlessStopArgs),
+    /// Stop and start again the headless clients, or one with --client, with a fresh restart budget.
+    Restart(ServerHeadlessRestartArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerHeadlessDefinitionArgs {
+    /// Unique profile name, 1-24 letters, digits, underscores or hyphens.
+    #[arg(long)]
+    pub name: String,
+    /// Start order; ties start in id order.
+    #[arg(long, default_value_t = 0)]
+    pub order: u32,
+    /// Keep the definition but leave it out of committed runtimes.
+    #[arg(long)]
+    pub disabled: bool,
+    /// Do not inherit the server's required addons.
+    #[arg(long)]
+    pub no_inherit_required: bool,
+    /// Also load this bound required or server-only content source. Repeatable.
+    #[arg(long = "include")]
+    pub include: Vec<String>,
+    /// Skip this inherited required content source. Repeatable.
+    #[arg(long = "exclude")]
+    pub exclude: Vec<String>,
+    /// Engine -cpuCount, 1-256.
+    #[arg(long)]
+    pub cpu_count: Option<u16>,
+    /// Engine -exThreads: 0, 1, 3, 5 or 7.
+    #[arg(long)]
+    pub ex_threads: Option<u8>,
+    /// Engine -maxMem in megabytes, 256-262144.
+    #[arg(long)]
+    pub max_mem: Option<u32>,
+    /// Engine -limitFPS, 5-1000.
+    #[arg(long)]
+    pub limit_fps: Option<u16>,
+    /// Do not start this client automatically once the server is query-ready.
+    #[arg(long)]
+    pub manual_start: bool,
+    /// Seconds to wait after the server first answers its query port, 0-600.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=600))]
+    pub start_delay: u16,
+    /// Seconds after start before missing join evidence is reported, 15-900.
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u16).range(15..=900))]
+    pub join_timeout: u16,
+    /// Automatic restarts after unexpected exits within 10 minutes, 0-10; 0 disables them.
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=10))]
+    pub max_restarts: u8,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerHeadlessAddArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+    #[command(flatten)]
+    pub definition: ServerHeadlessDefinitionArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerHeadlessSetArgs {
+    pub id: String,
+    pub client_id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+    #[command(flatten)]
+    pub definition: ServerHeadlessDefinitionArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerHeadlessRemoveArgs {
+    pub id: String,
+    pub client_id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerHeadlessStartArgs {
+    pub id: String,
+    /// Run generation from server instance status.
+    #[arg(long)]
+    pub expected_run_generation: u64,
+    /// Only this headless client id.
+    #[arg(long)]
+    pub client: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerHeadlessStopArgs {
+    pub id: String,
+    /// Run generation from server instance status.
+    #[arg(long)]
+    pub expected_run_generation: u64,
+    /// Only this headless client id.
+    #[arg(long)]
+    pub client: Option<String>,
+    /// Terminate the client process trees without a graceful stop.
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long, default_value_t = 30_000, value_parser = clap::value_parser!(u32).range(1..=120_000))]
+    pub timeout_ms: u32,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerMaintenanceCommand {
+    /// List the instance's jobs with next run, last result and blocker.
+    List(ServerInstanceSelector),
+    /// Add a maintenance job.
+    Add(ServerMaintenanceAddArgs),
+    /// Replace one job definition, keeping its id; a real change advances its policy revision.
+    Set(ServerMaintenanceSetArgs),
+    /// Remove one job; its recorded occurrences stay in history. Requires --yes.
+    Remove(ServerMaintenanceRemoveArgs),
+    /// Run one job now through the running owner. Requires --yes.
+    Run(ServerMaintenanceRunArgs),
+    /// Cancel an open occurrence. Requires --yes.
+    Cancel(ServerMaintenanceCancelArgs),
+    /// Show recorded occurrences, newest first.
+    History(ServerInstanceSelector),
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ServerMaintenanceActionArg {
+    Restart,
+    Update,
+    Backup,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerMaintenanceDefinitionArgs {
+    /// Job name, 1-48 characters.
+    #[arg(long)]
+    pub name: String,
+    #[arg(long, value_enum)]
+    pub action: ServerMaintenanceActionArg,
+    /// One-time run: RFC 3339 with offset, or YYYY-MM-DDTHH:MM in the job clock.
+    #[arg(long, conflicts_with_all = ["weekly", "time"])]
+    pub at: Option<String>,
+    /// Weekly run on these days: daily, or a comma list such as mon,wed,fri.
+    #[arg(long, requires = "time")]
+    pub weekly: Option<String>,
+    /// Time of day HH:MM for a weekly run.
+    #[arg(long, requires = "weekly")]
+    pub time: Option<String>,
+    /// Interpret the schedule in UTC instead of this computer's local time.
+    #[arg(long)]
+    pub utc: bool,
+    /// Save the job without scheduling it.
+    #[arg(long)]
+    pub disabled: bool,
+    /// Minutes a missed time may still run late, 0-1440.
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u16).range(0..=1440))]
+    pub grace_minutes: u16,
+    /// Run only when the server reports no connected players.
+    #[arg(long)]
+    pub require_empty: bool,
+    /// Minutes to wait for the job's conditions before skipping, 0-720.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(0..=720))]
+    pub max_defer_minutes: u16,
+    /// Attempts per occurrence, 1-5.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=5))]
+    pub max_attempts: u8,
+    /// Seconds between attempts, 10-3600.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u16).range(10..=3600))]
+    pub retry_delay_seconds: u16,
+    /// Graceful stop timeout for a restart, 5-120 seconds.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u16).range(5..=120))]
+    pub stop_timeout_seconds: u16,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerMaintenanceAddArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+    #[command(flatten)]
+    pub definition: ServerMaintenanceDefinitionArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerMaintenanceSetArgs {
+    pub id: String,
+    pub job_id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+    #[command(flatten)]
+    pub definition: ServerMaintenanceDefinitionArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerMaintenanceRemoveArgs {
+    pub id: String,
+    pub job_id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerMaintenanceRunArgs {
+    pub id: String,
+    pub job_id: String,
+    /// The job's current policy revision from list.
+    #[arg(long)]
+    pub expected_policy_revision: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerMaintenanceCancelArgs {
+    pub id: String,
+    pub occurrence_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerHeadlessRestartArgs {
+    pub id: String,
+    /// Run generation from server instance status.
+    #[arg(long)]
+    pub expected_run_generation: u64,
+    /// Only this headless client id.
+    #[arg(long)]
+    pub client: Option<String>,
+    #[arg(long, default_value_t = 30_000, value_parser = clap::value_parser!(u32).range(1..=120_000))]
+    pub timeout_ms: u32,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerReforgerAddonsCommand {
+    List(ServerInstanceSelector),
+    Plan(ServerReforgerAddonPlanArgs),
+    Acquire(ServerReforgerAddonAcquireArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerReforgerAddonPlanArgs {
+    pub id: String,
+    #[arg(long, value_enum, default_value_t = ServerReforgerAddonChannel::Stable)]
+    pub channel: ServerReforgerAddonChannel,
+    #[arg(long)]
+    pub scenario_provider: Option<String>,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum ServerReforgerAddonChannel {
+    Stable,
+    Experimental,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerReforgerAddonAcquireArgs {
+    #[command(flatten)]
+    pub inputs: ServerReforgerAddonPlanArgs,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerOwnerArgs {
+    #[command(flatten)]
+    pub context: ServerContextArgs,
+    /// Replay bounded events after this owner-generation sequence.
+    #[arg(long)]
+    pub events_after: Option<u64>,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerSuperviseArgs {
+    #[command(flatten)]
+    pub context: ServerContextArgs,
+    #[arg(long, hide = true)]
+    pub parent_bound: bool,
+    /// Keep one authenticated background owner running after this command exits (requires --yes).
+    #[arg(long, conflicts_with_all = ["parent_bound", "shutdown", "launch_id"])]
+    pub detach: bool,
+    /// Shut down the authenticated owner after every session and operation has stopped (requires --yes).
+    #[arg(long, conflicts_with_all = ["parent_bound", "detach", "launch_id"])]
+    pub shutdown: bool,
+    #[arg(long, hide = true, requires = "parent_bound")]
+    pub launch_id: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerSteamCommand {
+    Status(ServerSteamAccountArgs),
+    Resume(ServerSteamAccountArgs),
+    Anonymous,
+    Forget(ServerSteamAccountArgs),
+    Login {
+        #[command(flatten)]
+        account: ServerSteamAccountArgs,
+        #[arg(long, conflicts_with = "credentials_stdin")]
+        credentials_file: Option<PathBuf>,
+        #[arg(long)]
+        credentials_stdin: bool,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ServerSteamAccountArgs {
+    #[arg(
+        long,
+        default_value = "default",
+        help = "Local session alias, not the Steam account name"
+    )]
+    pub account: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerKeyCommand {
+    #[command(alias = "collect")]
+    Audit {
+        id: String,
+        #[arg(long)]
+        stage_id: Option<String>,
+        #[arg(long = "operator-key")]
+        operator_files: Vec<std::path::PathBuf>,
+        #[arg(long)]
+        expected_revision: Option<u64>,
+        #[arg(long = "trust")]
+        selected: Vec<String>,
+        #[arg(long)]
+        fingerprint: Option<String>,
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerMissionCommand {
+    List,
+    Import {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        apply: bool,
+    },
+    Refresh {
+        mission_id: String,
+        #[arg(long)]
+        apply: bool,
+    },
+    Acquire {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        template: String,
+        #[arg(long)]
+        expected_blake3: String,
+        #[arg(long)]
+        apply: bool,
+    },
+    Cycle {
+        id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerDeployCommand {
+    /// Review, activate and recover exact native runtime generations without starting a server.
+    Activation {
+        #[command(subcommand)]
+        command: ServerDeploymentActivationCommand,
+    },
+    /// Prepare, build and inspect immutable unactivated copies of the selected record.
+    Runtime {
+        #[command(subcommand)]
+        command: ServerDeploymentRuntimeCommand,
+    },
+    /// Review the selected configuration and an explicitly chosen retained content stage.
+    Plan(ServerDeploymentPlanArgs),
+    /// Prepare an immutable record of verified archives and an offline saved selection.
+    Prepare(ServerDeploymentRecordArgs),
+    /// Save the exact reviewed deployment record and its offline selection.
+    Commit(ServerDeploymentRecordCommitArgs),
+    /// List saved deployment record identifiers without verifying integrity.
+    List(ServerInstanceSelector),
+    /// Verify a retained record and both referenced archives without current source files.
+    Verify(ServerDeploymentRecordVerifyArgs),
+    /// Review selecting an indexed retained record without changing current draft or archives.
+    SelectPlan(ServerDeploymentRecordSelectionArgs),
+    /// Confirm the reviewed offline selection; requires --yes except for dry-run.
+    Select(ServerDeploymentRecordSelectArgs),
+    /// List deployment records pinned against reconciliation.
+    Pins(ServerInstanceSelector),
+    /// Pin one indexed deployment record; requires --yes except for dry-run.
+    Pin(ServerDeploymentPinArgs),
+    /// Remove one pin without deleting anything; requires --yes except for dry-run.
+    Unpin(ServerDeploymentPinArgs),
+    /// Review and explicitly reclaim unreferenced instance-owned stages, preparations and runtimes.
+    Reconcile {
+        #[command(subcommand)]
+        command: ServerDeploymentReconcileCommand,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentPinArgs {
+    pub id: String,
+    pub record_id: String,
+    #[arg(
+        long,
+        help = "Require this pin document generation (0 before the first pin)"
+    )]
+    pub expected_pin_generation: u64,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerDeploymentReconcileCommand {
+    /// Review retained and reclaimable artifacts without writing.
+    Plan(ServerInstanceSelector),
+    /// Remove exactly the reviewed candidates; requires --yes except for dry-run.
+    Apply(ServerDeploymentReconcileApplyArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentReconcileApplyArgs {
+    pub id: String,
+    #[arg(long, help = "Exact fingerprint returned by deploy reconcile plan")]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerDeploymentRuntimeCommand {
+    /// Review the selected record and exact unactivated generation copy.
+    Plan(ServerDeploymentRuntimePlanArgs),
+    /// Build the exact reviewed generation without activating runtime files.
+    Build(ServerDeploymentRuntimeBuildArgs),
+    /// List preparation IDs without claiming integrity.
+    List(ServerInstanceSelector),
+    /// Verify a prepared generation independently of its original archives.
+    Verify(ServerDeploymentRuntimeVerifyArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerDeploymentActivationCommand {
+    Plan(ServerNativeActivationArgs),
+    Apply(ServerNativeActivationApplyArgs),
+    Status(ServerInstanceSelector),
+    RecoveryPlan(ServerInstanceSelector),
+    Resolve(ServerNativeResolveArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerNativeActivationArgs {
+    pub id: String,
+    pub preparation_id: String,
+    #[arg(long)]
+    pub expected_deployment_generation: u64,
+    #[arg(long)]
+    pub expected_activation_generation: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerNativeActivationApplyArgs {
+    #[command(flatten)]
+    pub inputs: ServerNativeActivationArgs,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerNativeResolveArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentRuntimePlanArgs {
+    pub id: String,
+    #[arg(long, help = "Require this selected offline record generation")]
+    pub expected_deployment_generation: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentRuntimeBuildArgs {
+    #[command(flatten)]
+    pub inputs: ServerDeploymentRuntimePlanArgs,
+    #[arg(
+        long,
+        help = "Exact review fingerprint returned by deploy runtime plan"
+    )]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentRuntimeVerifyArgs {
+    pub id: String,
+    pub preparation_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentRecordSelectionArgs {
+    pub id: String,
+    pub record_id: String,
+    #[arg(long, help = "Require this saved deployment selection generation")]
+    pub expected_deployment_generation: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentRecordSelectArgs {
+    #[command(flatten)]
+    pub inputs: ServerDeploymentRecordSelectionArgs,
+    #[arg(long, help = "Exact fingerprint returned by deploy select-plan")]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentRecordArgs {
+    #[command(flatten)]
+    pub inputs: ServerDeploymentPlanArgs,
+    #[arg(long, help = "Require this deployment record selection generation")]
+    pub expected_deployment_generation: Option<u64>,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentRecordCommitArgs {
+    #[command(flatten)]
+    pub inputs: ServerDeploymentRecordArgs,
+    #[arg(long, help = "Exact fingerprint returned by deploy prepare")]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentRecordVerifyArgs {
+    pub id: String,
+    pub record_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerDeploymentPlanArgs {
+    pub id: String,
+    #[arg(
+        long,
+        help = "Exact retained stage ID; omission reports missing content without choosing a stage"
+    )]
+    pub stage: Option<String>,
+    #[arg(long, help = "Require this saved instance revision")]
+    pub expected_revision: Option<u64>,
+    #[arg(long, help = "Require this configuration selection generation")]
+    pub expected_configuration_generation: Option<u64>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerContentCommand {
+    /// Review or acquire repository content into an inactive retained server stage.
+    Acquire {
+        #[command(subcommand)]
+        command: ServerContentAcquisitionCommand,
+    },
+    /// List addon folders and repository profiles.
+    List,
+    /// Record an absolute folder that holds addon directories.
+    AddFolder(ServerContentFolderArgs),
+    /// Bind one repository to a folder as a download or an already-present copy.
+    AddProfile(ServerContentProfileArgs),
+    /// Preview ordered source bindings for a saved server instance without downloading or copying.
+    Plan(ServerContentPlanArgs),
+    /// Inspect, review and save instance-owned content selection without acquiring files.
+    Bindings {
+        #[command(subcommand)]
+        command: ServerContentBindingsCommand,
+    },
+    /// Verify local bytes and retain unselected content stages without activation.
+    Stage {
+        #[command(subcommand)]
+        command: ServerContentStageCommand,
+    },
+    /// Report which server instances, client repositories and other spaces use each source.
+    Consumers,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerContentAcquisitionCommand {
+    Plan(ServerContentAcquisitionPlanArgs),
+    Apply(ServerContentAcquisitionApplyArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentAcquisitionPlanArgs {
+    pub id: String,
+    #[arg(
+        long,
+        help = "Exact verified retained stage to copy as a private patch seed"
+    )]
+    pub seed_stage: Option<String>,
+    #[arg(long)]
+    pub expected_bindings_fingerprint: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentAcquisitionApplyArgs {
+    #[command(flatten)]
+    pub inputs: ServerContentAcquisitionPlanArgs,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerContentStageCommand {
+    /// Hash current saved already-present content without writing files.
+    Plan(ServerContentStagePlanArgs),
+    /// Copy exactly the reviewed local content into a new immutable stage.
+    Apply(ServerContentStageApplyArgs),
+    /// Verify the exact manifest and file bytes of a retained stage.
+    Verify(ServerContentStageVerifyArgs),
+    /// List stage identifiers without claiming integrity.
+    List(ServerContentBindingsShowArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentStagePlanArgs {
+    pub id: String,
+    #[arg(
+        long,
+        help = "Require this saved content binding fingerprint before verification"
+    )]
+    pub expected_bindings_fingerprint: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentStageApplyArgs {
+    #[command(flatten)]
+    pub inputs: ServerContentStagePlanArgs,
+    #[arg(
+        long,
+        help = "Fingerprint from content stage plan for these exact bytes and bindings"
+    )]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentStageVerifyArgs {
+    pub id: String,
+    pub stage_id: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerContentBindingsCommand {
+    /// Inspect saved selections and whether their reviewed inputs are still current.
+    Show(ServerContentBindingsShowArgs),
+    /// Review a replacement selection and obtain its save fingerprint without writes.
+    Plan(ServerContentPlanArgs),
+    /// Save exactly the reviewed selection under the exclusive game-space claim.
+    Save(ServerContentBindingsSaveArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentBindingsShowArgs {
+    pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentBindingsSaveArgs {
+    #[command(flatten)]
+    pub inputs: ServerContentPlanArgs,
+    #[arg(
+        long,
+        help = "Fingerprint returned by content bindings plan for these exact inputs"
+    )]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentPlanArgs {
+    pub id: String,
+    #[arg(
+        long,
+        help = "JSON array of profile source_id, role and order bindings"
+    )]
+    pub bindings: std::path::PathBuf,
+    #[arg(
+        long,
+        help = "Require this saved instance revision before generating the preview"
+    )]
+    pub expected_revision: Option<u64>,
+    #[arg(
+        long,
+        help = "Require this source-registry fingerprint from content list"
+    )]
+    pub expected_sources_fingerprint: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentFolderArgs {
+    #[arg(long, help = "Short folder id, such as hosted or incoming")]
+    pub id: String,
+    #[arg(long, help = "Absolute folder that contains addon directories")]
+    pub path: std::path::PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContentProfileArgs {
+    #[arg(long, help = "Profile name")]
+    pub name: String,
+    #[arg(long, help = "Folder id from add-folder")]
+    pub folder: String,
+    #[arg(
+        long,
+        default_value = "",
+        help = "Repository URL; omit only for already-present local content"
+    )]
+    pub url: String,
+    #[arg(
+        long,
+        help = "Repository local path. Same path as the folder means the server already hosts it"
+    )]
+    pub local_path: std::path::PathBuf,
+    #[arg(long, value_parser = ["download", "already-present"], help = "download acquires the repository later; already-present does not")]
+    pub supply: String,
+    #[arg(
+        long,
+        help = "Addon directory name inside the folder. Repeat for more than one. Omit to use the whole folder"
+    )]
+    pub addon: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerContextArgs {
+    #[arg(
+        long,
+        conflicts_with = "wipe_db",
+        global = true,
+        help = "Select an existing game space without changing the remembered selection"
+    )]
+    pub game_space: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -2132,6 +3014,453 @@ pub struct ServerInspectAddonsArgs {
     pub port: u16,
     #[arg(long, help = "Include all returned Steam server rules in the output")]
     pub include_rules: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerInstanceCommand {
+    /// Render saved typed configuration without writing files or starting a server.
+    Render(ServerInstanceSelector),
+    /// Inspect the saved instance's proposed layout and outstanding deployment blockers.
+    Preflight(ServerInstanceSelector),
+    /// Adopt an existing installation and bind it to this draft; no game files are changed.
+    Adopt(ServerInstanceAdoptArgs),
+    /// Bind or unbind a previously adopted installation in this game space.
+    Bind(ServerInstanceBindArgs),
+    /// List saved drafts in catalog order.
+    List,
+    /// Show a typed draft. In structured output, data.instance can be edited for replace.
+    Show(ServerInstanceSelector),
+    /// Create a draft with explicit safe initial policy for the selected game.
+    Add(ServerInstanceNameArgs),
+    /// Copy a draft under a new stable id and name; no runtime data is copied.
+    Clone(ServerInstanceEditArgs),
+    /// Change only the display name, preserving game configuration.
+    Rename(ServerInstanceEditArgs),
+    /// Replace a draft from its typed JSON document, requiring a matching revision.
+    Replace(ServerInstanceFileArgs),
+    /// Validate a typed draft JSON document without writing or claiming a database.
+    Validate(ServerInstanceValidateArgs),
+    /// Remove only a draft from the catalog; requires --yes and a matching revision.
+    Remove(ServerInstanceRemoveArgs),
+    /// Print the dedicated launch arguments without starting a process.
+    LaunchPlan(ServerInstanceSelector),
+    /// Review the exact committed native runtime without starting an owner or process.
+    StartPlan(ServerInstanceSelector),
+    /// Review exact consumer records and native crash cleanup receipts without writing.
+    RecoveryPlan(ServerInstanceSelector),
+    /// Retire only exit-proven old-owner records from an exact reviewed recovery plan.
+    Recover(ServerInstanceRecoverArgs),
+    /// Start a reviewed runtime through an existing foreground owner.
+    Start(ServerInstanceStartArgs),
+    /// Inspect the retained session through its authenticated foreground owner.
+    Status(ServerInstanceSelector),
+    /// Read cached process, query, resource, and bounded log observations.
+    Monitor(ServerInstanceMonitorArgs),
+    /// Read and filter the bounded log snapshot cached for the current run.
+    Logs(ServerInstanceLogsArgs),
+    /// Request native shutdown and wait; force escalation requires --force and --yes.
+    Stop(ServerInstanceStopArgs),
+    /// Stop the exact owned run, then start the reviewed committed runtime.
+    Restart(ServerInstanceRestartArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceRecoverArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceMonitorArgs {
+    pub id: String,
+    /// Follow monitoring snapshots until Ctrl+C. Requires --stream-json.
+    #[arg(long)]
+    pub follow: bool,
+    /// Poll interval for --follow, from 250 through 30000 milliseconds.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(250..=30_000))]
+    pub interval_ms: Option<u32>,
+    /// Emit framed newline-delimited JSON. Only valid with --follow.
+    #[arg(long)]
+    pub stream_json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceLogsArgs {
+    pub id: String,
+    /// Keep lines containing this case-insensitive text.
+    #[arg(long)]
+    pub contains: Option<String>,
+    /// Keep lines with a sequence greater than this value.
+    #[arg(long)]
+    pub after_sequence: Option<u64>,
+    /// Maximum returned lines, from 1 through 128.
+    #[arg(long, default_value_t = 128)]
+    pub limit: usize,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceStartArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_activation_generation: Option<u64>,
+    #[arg(long)]
+    pub expected_plan_fingerprint: Option<String>,
+    /// Establish or attach to a durable background owner before starting (requires --yes).
+    #[arg(long)]
+    pub detach: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceStopArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_run_generation: u64,
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long, default_value_t = 30_000, value_parser = clap::value_parser!(u32).range(1..=120_000))]
+    pub timeout_ms: u32,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceRestartArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_run_generation: u64,
+    #[arg(long)]
+    pub expected_activation_generation: u64,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+    #[arg(long)]
+    pub force: bool,
+    #[arg(long, default_value_t = 30_000, value_parser = clap::value_parser!(u32).range(1..=120_000))]
+    pub timeout_ms: u32,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceSelector {
+    pub id: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerInstallationCommand {
+    /// List recorded installations; recorded evidence may be stale.
+    List,
+    /// Inspect the expected native dedicated executable without executing it.
+    Inspect(ServerInstallationInspectArgs),
+    /// Inspect registered consumers without acquiring installation leases.
+    Consumers(ServerInstallationConsumersArgs),
+    /// Review or install a managed dedicated server from native Steam depots.
+    Install {
+        #[command(subcommand)]
+        command: ServerNativeInstallCommand,
+    },
+    /// Compare the managed installation with its Steam branch without downloading.
+    Check(ServerNativeCheckArgs),
+    /// Re-hash the complete installed inventory offline; writes nothing.
+    Validate(ServerInstanceSelector),
+    /// Review and publish a successor build, retaining the previous installation.
+    Update {
+        #[command(subcommand)]
+        command: ServerNativeInstallCommand,
+    },
+    /// Reacquire a reviewed complete build into a new folder and switch this instance.
+    Repair {
+        #[command(subcommand)]
+        command: ServerNativeInstallCommand,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ServerNativeCheckArgs {
+    pub id: String,
+    #[arg(long, default_value = "default", conflicts_with = "anonymous")]
+    pub account: String,
+    #[arg(long)]
+    pub anonymous: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerWorkshopCommand {
+    /// List tracked Workshop items and their pinned revisions.
+    List,
+    /// Read-only Steam review of items to acquire, update or repair; writes nothing.
+    Plan(ServerWorkshopArgs),
+    /// Download, verify and pin the reviewed items as already-present content profiles.
+    Acquire(ServerWorkshopAcquireArgs),
+    /// Re-hash the pinned revision of a tracked item without writing.
+    Verify(ServerWorkshopItemArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerWorkshopArgs {
+    /// Workshop item ids or URLs.
+    #[arg(required = true)]
+    pub items: Vec<String>,
+    /// Prepared native Steam session alias from `server steam login`.
+    #[arg(long, default_value = "default", conflicts_with = "anonymous")]
+    pub account: String,
+    /// Use an anonymous Steam connection; Arma Workshop downloads still need ownership.
+    #[arg(long)]
+    pub anonymous: bool,
+    /// Download the pinned revision of tracked items again and replace a damaged copy.
+    #[arg(long)]
+    pub repair: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerWorkshopAcquireArgs {
+    #[command(flatten)]
+    pub inputs: ServerWorkshopArgs,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerWorkshopItemArgs {
+    pub item: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerNativeInstallCommand {
+    /// Read-only Steam review of the exact build, depots and disk need; writes nothing.
+    Plan(ServerNativeInstallArgs),
+    /// Download, verify and publish the reviewed build into a new folder, then bind it.
+    Apply(ServerNativeInstallApplyArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerNativeInstallArgs {
+    /// Instance that receives the managed installation.
+    pub id: String,
+    /// New installation folder outside the Foxy data directory; it must not exist yet.
+    #[arg(long)]
+    pub directory: PathBuf,
+    #[arg(long, default_value = "public")]
+    pub branch: String,
+    /// Dedicated server content channel; omitted maintenance requests keep the installed channel.
+    #[arg(long, value_enum)]
+    pub channel: Option<ServerNativeInstallChannel>,
+    /// Prepared native Steam session alias from `server steam login`.
+    #[arg(long, default_value = "default", conflicts_with = "anonymous")]
+    pub account: String,
+    /// Use an anonymous Steam connection instead of a prepared session.
+    #[arg(long)]
+    pub anonymous: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ServerNativeInstallChannel {
+    Stable,
+    Experimental,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerNativeInstallApplyArgs {
+    #[command(flatten)]
+    pub install: ServerNativeInstallArgs,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerConfigurationCommand {
+    /// Review a vendor configuration import; --apply --yes saves the reviewed draft.
+    Import(ServerConfigurationImportArgs),
+    /// Export a redacted portable instance pack to a new file.
+    ExportPack(ServerConfigurationPackExportArgs),
+    /// Review a portable pack as a new unbound instance; --apply --yes saves it.
+    ImportPack(ServerConfigurationPackImportArgs),
+    /// Review a Reforger server.json file. --apply --yes replaces the saved draft.
+    ImportReforger(ServerReforgerImportArgs),
+    /// Write the saved Reforger draft as redacted server.json without overwriting a file.
+    ExportReforger(ServerReforgerExportArgs),
+    /// Parse or store a Reforger engine scenario listing without changing the selected scenario.
+    #[command(subcommand)]
+    Scenario(ServerScenarioCommand),
+    Plan(ServerInstanceSelector),
+    List(ServerInstanceSelector),
+    Commit(ServerConfigurationCommitArgs),
+    Verify(ServerConfigurationRevisionArgs),
+    Rollback(ServerConfigurationRollbackArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerConfigurationImportArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+    #[arg(long)]
+    pub server: Option<PathBuf>,
+    #[arg(long)]
+    pub basic: Option<PathBuf>,
+    #[arg(long)]
+    pub profile: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Explicitly convert supported fields to managed output; unknown directives are omitted after review"
+    )]
+    pub managed: bool,
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(
+        long,
+        help = "Acknowledge unresolved operator paths without opening or copying them"
+    )]
+    pub review_paths: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerConfigurationPackExportArgs {
+    pub id: String,
+    #[arg(long)]
+    pub file: PathBuf,
+    #[arg(
+        long,
+        help = "Remove operator text and policy identifiers; record every omission in an incomplete pack"
+    )]
+    pub sanitized: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerConfigurationPackImportArgs {
+    #[arg(long)]
+    pub file: PathBuf,
+    #[arg(long, default_value = "")]
+    pub name: String,
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(long)]
+    pub review_paths: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerReforgerImportArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+    #[arg(long)]
+    pub file: PathBuf,
+    #[arg(long)]
+    pub apply: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerReforgerExportArgs {
+    pub id: String,
+    #[arg(long)]
+    pub file: PathBuf,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerScenarioCommand {
+    /// Parse an engine log and report the official scenario listing. No files are written.
+    ParseLog {
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Store a complete listing beside the instance. A failed log does not replace a stored listing or the selected scenario.
+    ImportLog {
+        id: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Show the stored listing and whether it contains the selected scenario.
+    List { id: String },
+}
+
+#[derive(Args, Debug)]
+pub struct ServerConfigurationCommitArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+    #[arg(long)]
+    pub expected_generation: u64,
+    #[arg(long)]
+    pub expected_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerConfigurationRevisionArgs {
+    pub id: String,
+    #[arg(long)]
+    pub revision: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerConfigurationRollbackArgs {
+    pub id: String,
+    #[arg(long)]
+    pub revision: String,
+    #[arg(long)]
+    pub expected_generation: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstallationInspectArgs {
+    #[arg(long)]
+    pub directory: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstallationConsumersArgs {
+    pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceAdoptArgs {
+    pub id: String,
+    #[arg(long)]
+    pub directory: PathBuf,
+    #[arg(long)]
+    pub expected_revision: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceBindArgs {
+    pub id: String,
+    #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
+    pub installation: Option<String>,
+    #[arg(long)]
+    pub clear: bool,
+    #[arg(long)]
+    pub expected_revision: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceNameArgs {
+    #[arg(long)]
+    pub name: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceEditArgs {
+    pub id: String,
+    #[arg(long)]
+    pub name: String,
+    #[arg(long, help = "Current draft revision, from instance show")]
+    pub expected_revision: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceFileArgs {
+    #[arg(long, help = "Typed Foxy instance JSON, not a vendor server config")]
+    pub file: PathBuf,
+    #[arg(long)]
+    pub expected_revision: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceValidateArgs {
+    #[arg(long, help = "Typed Foxy instance JSON, not a vendor server config")]
+    pub file: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerInstanceRemoveArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
 }
 
 #[derive(Args, Debug)]
@@ -2191,6 +3520,72 @@ pub struct LaunchArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instance_monitor_parser_keeps_snapshot_and_stream_modes_explicit() {
+        let parsed = CliArgs::try_parse_from([
+            "foxy",
+            "server",
+            "instance",
+            "--game-space",
+            "alpha",
+            "monitor",
+            "server_a",
+        ])
+        .unwrap();
+        let Some(CliCommand::Server {
+            command:
+                ServerCommand::Instance {
+                    command: ServerInstanceCommand::Monitor(args),
+                    ..
+                },
+        }) = parsed.command
+        else {
+            panic!("unexpected command");
+        };
+        assert!(!args.follow);
+        assert!(!args.stream_json);
+        assert_eq!(args.interval_ms, None);
+
+        let parsed = CliArgs::try_parse_from([
+            "foxy",
+            "server",
+            "instance",
+            "monitor",
+            "server_a",
+            "--follow",
+            "--stream-json",
+            "--interval-ms",
+            "250",
+        ])
+        .unwrap();
+        let Some(CliCommand::Server {
+            command:
+                ServerCommand::Instance {
+                    command: ServerInstanceCommand::Monitor(args),
+                    ..
+                },
+        }) = parsed.command
+        else {
+            panic!("unexpected command");
+        };
+        assert!(args.follow && args.stream_json);
+        assert_eq!(args.interval_ms, Some(250));
+        assert!(
+            CliArgs::try_parse_from([
+                "foxy",
+                "server",
+                "instance",
+                "monitor",
+                "server_a",
+                "--follow",
+                "--stream-json",
+                "--interval-ms",
+                "249",
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn extra_file_order_can_change_without_changing_enablement() {

@@ -9,26 +9,17 @@ fn now_ts() -> i64 {
     Utc::now().timestamp()
 }
 
-/// Upsert keyed on the `(repository_url, local_path)` pending-update identity.
-/// Shared with the startup schema probe (`db_schema_check`) so a database whose
-/// `pending_updates` predates the composite key is caught before it silently
-/// swallows every pending-update write.
+/// Share the composite-identity upsert with the live schema probe so incompatible schemas fail before pending writes.
 pub(crate) const PENDING_UPDATE_UPSERT_SQL: &str = "INSERT INTO pending_updates (repository_url, local_path, diff_json, updated_at) \
      VALUES (?, ?, ?, ?) \
      ON CONFLICT (repository_url, local_path) DO UPDATE SET \
      diff_json = excluded.diff_json, updated_at = excluded.updated_at";
 
-/// Canonicalize a download folder so the pending-update key matches regardless of
-/// separator style, trailing slash, or (on Windows) case. The UI looks the row up
-/// by `repository.path`; the core writes it from `context.target_local_path`.
-/// Both go through this function so the two sides agree.
+/// UI repository paths and worker target paths must use the same normalization for pending-update identity.
 fn normalize_pending_update_local_path(local_path: &str) -> String {
     crate::core::utils::content_hash::normalize_path(local_path)
 }
 
-/// The local-path identity a pending update is stored under for a given context.
-/// An unset target folder yields an empty key, matching single-instance repos
-/// that have not been scoped to a specific folder.
 fn context_pending_update_local_path(context: &FoxyContext) -> String {
     context
         .target_local_path
@@ -106,9 +97,6 @@ pub(crate) async fn clear_pending_update_for_context(
     delete_payload(&context.db(), repository_url, &local_path).await
 }
 
-/// Load the cached pending-update payload for the repository instance scoped by
-/// `context.target_local_path`, matching how [`save_pending_update_for_context`]
-/// writes it.
 pub(crate) async fn fetch_pending_update_for_context(
     context: Arc<FoxyContext>,
     repository_url: &str,
@@ -117,7 +105,6 @@ pub(crate) async fn fetch_pending_update_for_context(
     fetch_payload(&context.db(), repository_url, &local_path).await
 }
 
-/// Load the cached pending-update payload for a specific repository instance.
 pub async fn load_pending_update_payload_for_path(
     repository_url: &str,
     local_path: &str,
@@ -131,7 +118,6 @@ pub async fn load_pending_update_payload_for_path(
     fetch_payload(&db, repository_url, &local_path).await
 }
 
-/// Clear the cached pending-update payload for a specific repository instance.
 pub async fn clear_pending_update_payload_for_path(
     repository_url: &str,
     local_path: &str,

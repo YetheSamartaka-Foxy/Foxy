@@ -20,10 +20,7 @@ use reqwest::blocking::get;
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
-/// Normalize a local download folder for identity comparison, mirroring the GUI
-/// `Foxy::normalize_repo_path_identity`: ignore separator style, trailing
-/// slashes and (on Windows) case. A blank folder has no download location yet
-/// and never collides.
+/// Folder identity ignores separators/trailing slashes and Windows case; an empty folder has no install identity.
 fn normalize_folder_identity(path: &str) -> String {
     let mut normalized = path.trim().replace('\\', "/");
     while normalized.ends_with('/') {
@@ -81,12 +78,7 @@ fn cmd_repo_add(cli: &CliArgs, args: RepoAddArgs) -> Result<CommandSuccess, Comm
     }
     sanitize_repository_paths(&mut repo);
 
-    // Sharing of core database / pending-update state is bound to the local
-    // download folder, not the remote URL: the same URL added to a different
-    // folder is an independent install. Only reject an add that would collide
-    // with an existing repository on both URL *and* folder (a blank folder has
-    // no download location yet and never collides). CLI adds are standalone, so
-    // there is no repository space to compare.
+    // Only (URL, local folder) identifies an install; the same URL in another folder owns independent state.
     let folder_key = normalize_folder_identity(&repo.path);
     if !folder_key.is_empty()
         && state.repositories.iter().any(|existing| {
@@ -330,8 +322,7 @@ fn default_repository_name_from_address(address: &str) -> String {
     }
 }
 
-/// `foxy launch` starts a custom game from the build `repo.json` names, so a
-/// sync picks up a `gameBuild` the server added or changed since `repo add`.
+/// Refresh gameBuild during sync so launch uses server-side build changes made after repo add.
 fn refresh_game_build(idx: usize) -> Result<(), CommandError> {
     let mut state = AppState::load()?;
     let Some(repo) = state.repositories.get_mut(idx) else {

@@ -59,7 +59,6 @@ where
         "persist_part_checksums requires real subfiles rowids; synthetic buffer ids are not writable"
     );
 
-    // Use one chunked set-based update; callers pre-sort by PK for sequential B-tree walks.
     let params_per_row = 4usize;
     let update_batch_size = bulk_write_rows_for(params_per_row);
 
@@ -99,7 +98,6 @@ where
         };
         begin_elapsed += begin_started.elapsed();
 
-        // Per-attempt accumulators; only the committed attempt's figures are logged.
         update_elapsed = std::time::Duration::ZERO;
         update_batch_max_elapsed = std::time::Duration::ZERO;
         update_batches = 0;
@@ -147,7 +145,7 @@ where
 
         if let Some(e) = update_err {
             if attempt < MAX_RETRIES && sqlite_is_locked_error(&e.to_string()) {
-                drop(txn); // implicit rollback
+                drop(txn);
                 sqlite_sleep_for_lock_retry(attempt).await;
                 attempt += 1;
                 continue;
@@ -162,7 +160,7 @@ where
             Ok(_) => {
                 commit_elapsed += commit_started.elapsed();
                 committed = true;
-                // Flush any rows not yet sent to the progress callback.
+
                 let remaining = part_updates.len() - last_reported;
                 if remaining > 0 {
                     on_chunk_persisted(remaining);
@@ -653,9 +651,6 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// Seeds enough subfiles to span several chunked `UPDATE FROM VALUES`
-    /// statements, then verifies every part's local columns are written and the
-    /// progress callback reports the full count.
     #[tokio::test]
     async fn bulk_persist_updates_every_part_via_cte() {
         use crate::core::tasks::db_turso::build_test_database;

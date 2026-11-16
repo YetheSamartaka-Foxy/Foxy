@@ -632,10 +632,6 @@ impl Foxy {
             egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), row_height));
         ui.advance_cursor_after_rect(row_rect);
 
-        // Sense clicks so the expanded file rows carry their own right-click menu:
-        // when scrolling deep inside a long expanded structure the addon header is
-        // off-screen, so a per-file "Collapse addon structure" entry lets the user
-        // collapse without scrolling back up to the header.
         let response = ui.interact(
             row_rect,
             ui.make_persistent_id(("external_addon_file_row", entry_index, file_index)),
@@ -733,8 +729,7 @@ impl Foxy {
             ),
             Vec2::splat(EXTERNAL_ADDON_ICON_BUTTON_SIZE),
         );
-        // A game whose servers activate their own addon set has no client-side
-        // concept, so that button is not drawn and the star takes its slot.
+        // Games whose servers choose the full addon set have no client-side marking control.
         let client_side_supported = Self::client_side_addons_supported();
         let client_side_button_rect = client_side_supported.then(|| {
             egui::Rect::from_min_size(
@@ -787,10 +782,6 @@ impl Foxy {
             row_style.color_text_dim
         };
 
-        // Key the row by the stable addon index, not the visible-slot position
-        // (`row_slot`): a position-based id changes for a given addon as the
-        // scroll range shifts, which makes egui re-run extra layout passes
-        // ("changed id between passes") and multiplies the per-frame scroll cost.
         let row_id = ui.make_persistent_id((
             "repository_external_addon_row_cached",
             group_by_origin,
@@ -832,10 +823,7 @@ impl Foxy {
                 || name_text.expect("missing external addon name galley text"),
             )
         };
-        // `text_area_width` is computed once outside the ScrollArea and passed
-        // in, so the prewarm and render choose the same row text widths. Re-
-        // computing from the scrollbar-adjusted inner width would diverge from
-        // prewarm and force a re-shape on every reveal.
+
         let (path_width, origin_width) = external_metadata_lane_widths(
             text_area_width,
             name_galley.size().x,
@@ -843,9 +831,7 @@ impl Foxy {
             !group_by_origin,
             wrap_name,
         );
-        // The normal row is split into path | centered name | origin. When that
-        // leaves too little side space, the row grows and the name uses a second
-        // line while path/origin share the top line.
+
         let mut path_rect = metadata_rect;
         path_rect.set_width(path_width.min(metadata_rect.width()));
         let path_text = {
@@ -1144,9 +1130,9 @@ impl Foxy {
                     '\u{2139}',
                     tr("Enable or disable external addons for this repository - mods found on disk that are not part of this repo's own addons.\nThey come from your other repositories, additional folders, and Steam Workshop. Steam Workshop mods appear only when \"Include Steam Addons\" is enabled.")
                 );
-                // Reserve the action buttons on the right first, then let the info
-                // text fill the remaining width and wrap to as many lines as it
-                // needs - that keeps the buttons fully visible on narrow windows.
+
+
+
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_space(50.0);
                     let refresh_icon_size = self
@@ -1214,10 +1200,10 @@ impl Foxy {
                 .origin_options
                 .clone();
 
-            // Filter field + trailing controls share one wrapping row. On wide
-            // windows the filter expands so the controls sit toward the right
-            // edge; when the window is too narrow the controls collapse onto their
-            // own line(s) below instead of being clipped off the edge.
+
+
+
+
             ui.horizontal_wrapped(|ui| {
                 ui.label(tr("Filter:"));
                 self.filter_help_icon(ui, &tr("addon_filter_help"));
@@ -1252,11 +1238,11 @@ impl Foxy {
                     + client_side_filter_width
                     + super::filter_controls_text_width(ui, &tr("State:"))
                     + super::filter_controls_combo_width(ui, &state_selected)
-                    // The explicit add_space() gaps (seven 16 px group gaps and the
-                    // two 6 px label→combo gaps) plus the item spacing egui inserts
-                    // between each of the ~18 items in this region. Counting them
-                    // in full keeps the filter from being sized too wide, which
-                    // would otherwise shove the trailing controls off the edge.
+
+
+
+
+
                     + group_gap * 6.0
                     + 12.0
                     + item_spacing * 18.0;
@@ -1577,12 +1563,12 @@ impl Foxy {
                                         row_slot,
                                         entry_index,
                                     } => {
-                                        // Scope every widget id in the row under the
-                                        // stable addon index so the icon buttons and
-                                        // checkbox keep the same ids across egui layout
-                                        // passes (otherwise their auto-ids shift with the
-                                        // visible range and trigger "changed id between
-                                        // passes" + extra passes while scrolling).
+
+
+
+
+
+
                                         ui.push_id(entry_index, |ui| {
                                             self.render_repository_external_addon_row_cached(
                                                 ui,
@@ -1678,7 +1664,6 @@ impl Foxy {
         if repo_data_changed {
             self.persist_repository_external_addon_row_state_cached(repo_index);
         } else if ui_state_changed {
-            // UI-only filter controls should not persist repository data.
         }
 
         if let Some((addon_name, addon_directory_path, action)) = external_addon_context_action {

@@ -9,12 +9,11 @@ use crate::ui::palette::ON_STRONG_FILL;
 
 const BEAM_SECONDS: f64 = 3.6;
 const BEAM_SEGMENTS: usize = 28;
-/// Share of the frame's border the light's tail covers.
+
 const BEAM_TAIL: f32 = 0.2;
 const FLARE_SPARKS: u32 = 14;
 
-/// A single light that runs around a rounded frame while its work
-/// runs. Under reduced motion the frame keeps its own still border.
+/// A running light around a rounded frame; reduced motion leaves a still border.
 pub(crate) fn paint_border_beam(ui: &Ui, rect: Rect, radius: f32, color: Color32) {
     let motion = Motion::of(ui);
     if !motion.animates() || !ui.is_rect_visible(rect) {
@@ -42,9 +41,7 @@ pub(crate) fn paint_border_beam(ui: &Ui, rect: Rect, radius: f32, color: Color32
     motion.keep_alive(ui, rect);
 }
 
-/// A band `width` wide along `points`, colored per point, its long edges
-/// softened over `feather`. One mesh, so a light drawn with it never doubles
-/// up where pieces would overlap.
+/// Draw one feathered mesh band so overlapping segments do not double up.
 fn ribbon(points: &[Pos2], width: f32, feather: f32, color: impl Fn(usize) -> Color32) -> Mesh {
     let mut mesh = Mesh::default();
     if points.len() < 2 {
@@ -76,8 +73,6 @@ fn ribbon(points: &[Pos2], width: f32, feather: f32, color: impl Fn(usize) -> Co
     mesh
 }
 
-/// A one-shot flare as a frame's work completes, `t` of the way through: the
-/// border lights up and fades while sparks pop along it.
 pub(crate) fn paint_border_flare(ui: &Ui, rect: Rect, radius: f32, color: Color32, t: f32) {
     if !ui.is_rect_visible(rect) {
         return;
@@ -110,8 +105,6 @@ pub(crate) fn paint_border_flare(ui: &Ui, rect: Rect, radius: f32, color: Color3
     Motion::of(ui).keep_alive(ui, rect);
 }
 
-/// The border of a rounded rectangle, walked clockwise from the start of its
-/// top edge.
 #[derive(Clone, Copy, Debug)]
 struct Outline {
     rect: Rect,
@@ -137,7 +130,6 @@ impl Outline {
         2.0 * (self.across + self.down) + 4.0 * self.arc
     }
 
-    /// The point `distance` along the border, wrapping around.
     fn point(&self, distance: f32) -> Pos2 {
         let Self {
             rect,

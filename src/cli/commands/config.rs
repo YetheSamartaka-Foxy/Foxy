@@ -115,9 +115,7 @@ fn cmd_config_import(
     }
 
     if !cli.yes {
-        // Packs are shared between users and choose their own destinations, so
-        // the refusal names every path the import would write to rather than
-        // asking for a blind confirmation.
+        // Packs select their own destinations; show every write path before requesting confirmation.
         let targets = foxypack::inspect_pack(&args.input)
             .map(|inspection| {
                 inspection

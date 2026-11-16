@@ -42,9 +42,8 @@ use crate::core::utils::disk_space::{
 use crate::core::utils::resource_profile::{ResourcePressure, ResourceProfile};
 use crate::core::utils::speed_of_light::{SolLight, sol_line};
 
-/// Maximum retries for network connectivity pre-check.
 const CONNECTIVITY_CHECK_MAX_RETRIES: u32 = 3;
-/// Base delay for connectivity check retries.
+
 const CONNECTIVITY_CHECK_BASE_DELAY_MS: u64 = 1000;
 const PROGRESS_CHECKPOINT_NORMAL_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 const PROGRESS_CHECKPOINT_PRESSURE_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
@@ -75,10 +74,7 @@ fn download_limits_for_profile(
     }
 }
 
-/// Nominal sequential rate of a 7200 rpm disk. A reading aid, not a
-/// calibrated device bound: the traffic model counts logical bytes and cannot
-/// tell a platter read from a page-cache hit, so its ratio is labelled
-/// nominal and may legitimately exceed one on a warm run.
+/// The rotational-disk rate is nominal because logical traffic cannot distinguish cache hits from platter reads.
 const ROTATIONAL_SEQUENTIAL_BPS: u64 = 110_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,16 +82,13 @@ struct DiskLight {
     bytes: u64,
     light_bps: u64,
     ideal_secs: f64,
-    /// `ideal / actual` unclamped; `None` when the elapsed time is zero.
+
     ratio_raw: Option<f64>,
-    /// Legacy clamped ratio, `0.0` when no ratio is computable.
+
     ratio: f64,
 }
 
-/// Logical disk traffic of a download stage on rotational media: `full_bytes`
-/// written once, the patch sources (`delta_savings_bytes`) read once, and every
-/// byte that was not delta patched read back by the on-arrival hash. Logical,
-/// not physical: a reread served from the page cache is counted all the same.
+/// Count logical writes, patch-source reads, and full-download hash reads, including cached rereads.
 fn rotational_disk_light(
     full_bytes: u64,
     delta_savings_bytes: u64,
@@ -118,8 +111,7 @@ fn rotational_disk_light(
     }
 }
 
-/// Terminal outcome of the download stage as carried on its `SOL` line, so
-/// consumers can keep cancelled and failed runs out of best-case selection.
+/// Exclude cancelled and failed runs from best-case SOL selection.
 fn download_sol_outcome(
     cancelled: bool,
     mods_failed: usize,
@@ -225,14 +217,10 @@ pub(crate) async fn apply_download_plan_bytes(
     (patchable_file_ids, planned_bytes, full_bytes)
 }
 
-/// Clean up stale temp files from previous delta patching crashes and validate
-/// that download target files on disk match the expected state in the database.
-/// Comparable form of a patch artifact path, as stored in a plan row or listed.
 fn patch_artifact_key(path: &Path) -> String {
     crate::core::utils::content_hash::normalize_path(&path.to_string_lossy())
 }
 
-/// Artifact paths that saved patch plans of this space's database still use.
 async fn referenced_patch_artifacts(context: &FoxyContext) -> Option<HashSet<String>> {
     match context
         .db()
@@ -266,7 +254,6 @@ async fn pre_download_cleanup(
     targets: &[DownloadTargetWithModName],
     referenced_patch_artifacts: Option<&HashSet<String>>,
 ) {
-    // Collect unique parent directories from download targets to scan for temp files
     let mut parent_dirs: HashSet<&Path> = HashSet::new();
     for target in targets {
         if let Some(parent) = Path::new(target.download.download_local_path.as_ref()).parent() {
@@ -344,10 +331,7 @@ async fn pre_download_cleanup(
         }
     }
 
-    // Clean stale patch artifacts, but preserve artifacts for files that are
-    // about to be downloaded and any a saved plan still references: another
-    // repository's prepared update would otherwise fall back to full downloads.
-    // The legacy shared folder is swept only for unreferenced files as well.
+    // Preserve artifacts referenced by prepared queues so another repository does not fall back to full downloads.
     let current_file_ids: HashSet<u64> = targets.iter().map(|t| t.download.file_id).collect();
     let patch_dirs = if referenced_patch_artifacts.is_some() {
         vec![foxy_patch_artifacts_dir(), foxy_large_payload_dir()]
@@ -364,7 +348,6 @@ async fn pre_download_cleanup(
             if name.starts_with("file_")
                 && (name.ends_with(".patch.json") || name.ends_with(".patch.bin"))
             {
-                // Extract file_id from filename like "file_1234.patch.json"
                 let is_current = name
                     .strip_prefix("file_")
                     .and_then(|rest| rest.split('.').next())
@@ -460,14 +443,8 @@ async fn cleanup_staged_temp_files(targets: &[DownloadTargetFile]) -> (usize, us
     (removed, failed)
 }
 
-/// Validate that download target files on disk are consistent with database state.
-/// Resets download progress for files that are missing or have unexpected sizes.
-///
-/// Uses `spawn_blocking` to avoid blocking the tokio runtime with synchronous
-/// filesystem metadata calls, which can stall other async tasks when many
-/// download targets need validation.
+/// Use spawn_blocking for filesystem metadata probes so large target sets do not stall async tasks.
 async fn validate_download_targets(targets: &mut [DownloadTargetWithModName]) {
-    // Collect paths + DB progress into a Vec so we can send them into spawn_blocking.
     let checks: Vec<(String, usize, usize)> = targets
         .iter()
         .map(|t| {
@@ -487,9 +464,7 @@ async fn validate_download_targets(targets: &mut [DownloadTargetWithModName]) {
                 let part_len = std::fs::metadata(&part_path)
                     .ok()
                     .map(|meta| meta.len() as usize);
-                // A valid resume sidecar records which chunks of a ranged
-                // download already completed; its byte count is the trusted
-                // progress for full-length pre-allocated part files.
+                // Trust sidecar completion records over preallocated file length or database progress.
                 let sidecar_completed = RangePartMeta::load_sync(&range_part_meta_path(path))
                     .filter(|meta| meta.file_size == *size as u64)
                     .map(|meta| meta.completed_bytes() as usize);
@@ -587,8 +562,7 @@ fn reconcile_download_progress(
         };
     }
 
-    // Ranged downloads pre-allocate the full file and record completed chunks
-    // in a sidecar; trust the sidecar byte count over part length or DB state.
+    // Ranged downloads trust sidecar completion records, not preallocated length or DB progress.
     if part_len == file_size
         && let Some(completed) = sidecar_completed
     {
@@ -599,9 +573,7 @@ fn reconcile_download_progress(
     }
 
     if part_len < file_size {
-        // A sidecar with a short part is inconsistent (ranged parts are always
-        // full length) - discard. Without a sidecar this is an append-style
-        // part and its length is the resume offset.
+        // Discard short ranged parts; without a sidecar, part length is the sequential resume offset.
         if sidecar_completed.is_some() {
             return DownloadProgressReconcile {
                 download_total: 0,
@@ -627,8 +599,6 @@ fn reconcile_download_progress(
     }
 }
 
-/// Check that enough disk space is available for the planned downloads.
-/// Returns the shortfall when the destination volume cannot take them.
 fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Option<DiskSpaceShortfall> {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     if targets.is_empty() {
@@ -640,7 +610,6 @@ fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Option<DiskSpaceSh
         .map(|t| t.download.expected_download_bytes as u64)
         .sum();
 
-    // Find the first valid download target path to check disk space on its drive
     let check_path = targets
         .iter()
         .filter_map(|t| {
@@ -650,9 +619,7 @@ fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Option<DiskSpaceSh
         })
         .next();
 
-    let Some(check_path) = check_path else {
-        return None; // Can't determine path, proceed optimistically
-    };
+    let check_path = check_path?;
 
     match fs4::available_space(check_path) {
         Ok(available) => {
@@ -668,7 +635,7 @@ fn check_disk_space(targets: &[DownloadTargetWithModName]) -> Option<DiskSpaceSh
         }
         Err(err) => {
             warn!("Could not check disk space: {}", err);
-            None // Proceed optimistically if we can't check
+            None
         }
     }
 }
@@ -688,15 +655,8 @@ fn format_disk_space_shortfall(shortfall: &DiskSpaceShortfall) -> String {
     )
 }
 
-/// Refuse to start when the destination filesystem cannot take the planned
-/// files: a FAT volume and a file of 4 GiB or more, a read-only volume, a name
-/// Windows cannot create, or two files that differ only by letter case on a
-/// case-insensitive volume. Those fail deep inside the transfer otherwise, or
-/// worse, overwrite each other and re-flag the addon on every check. One volume
-/// probe per addon and pure string work per file; nothing is opened.
-///
-/// Findings that are survivable (a path at the Windows `MAX_PATH` limit) are
-/// logged and do not block.
+/// Preflight filesystem limits and case collisions to prevent late failures or overwriting files.
+/// Log survivable path-length findings without blocking.
 async fn find_held_targets(targets: &[DownloadTargetWithModName]) -> Vec<PathBuf> {
     let paths: Vec<PathBuf> = targets
         .iter()
@@ -823,10 +783,6 @@ fn metrics_format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Check whether the download server supports HTTP Range requests.
-/// Sends a single HEAD request with a Range header; returns `true` if the server
-/// responds with 206 Partial Content. This is called once per download session
-/// to avoid redundant per-file probes that waste bandwidth and connections.
 async fn check_range_support(context: &FoxyContext, sample_url: &str) -> bool {
     match tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -862,9 +818,6 @@ async fn check_range_support(context: &FoxyContext, sample_url: &str) -> bool {
     }
 }
 
-/// Try a HEAD request to the download server to verify network connectivity.
-/// Retries with backoff before giving up - avoids having every file individually
-/// exhaust its retry budget when the network is simply down.
 async fn check_network_connectivity(context: &FoxyContext, sample_url: &str) -> Result<(), String> {
     for attempt in 0..=CONNECTIVITY_CHECK_MAX_RETRIES {
         if attempt > 0 {
@@ -969,9 +922,7 @@ pub(crate) async fn download_files(
     let small_file_permits = Arc::new(Semaphore::new(resource_limits.max_small_files));
     let scheduler_state = Arc::new(DownloadSchedulerState::new(resource_limits));
 
-    // When the pipeline provides a scoped file-id set (e.g. from quick-scan
-    // pending updates), drop any download-target rows that leaked in from
-    // remote_repository() for mods that do not actually need updating.
+    // Drop targets outside the caller's scoped file IDs so unrelated mods are not downloaded.
     if let Some(ref allowed) = allowed_file_ids {
         let pre_filter = targets.len();
         targets.retain(|t| allowed.contains(&t.download.file_id));
@@ -1011,7 +962,6 @@ pub(crate) async fn download_files(
         return Ok(metrics.build_report(&[]));
     }
 
-    // Startup cleanup: remove stale temp files and validate file state vs DB
     {
         let _phase = metrics.phase("pre_download_cleanup");
         let referenced = referenced_patch_artifacts(&context).await;
@@ -1075,7 +1025,6 @@ pub(crate) async fn download_files(
         );
     }
 
-    // Issue 14: Verify network connectivity before starting downloads
     {
         let _phase = metrics.phase("connectivity_check");
         if let Some(first_url) = targets
@@ -1090,7 +1039,6 @@ pub(crate) async fn download_files(
         }
     }
 
-    // Check Range support once for the whole session to avoid per-file probes
     let supports_range = {
         let _phase = metrics.phase("range_support_check");
         if let Some(first_url) = targets
@@ -1103,7 +1051,6 @@ pub(crate) async fn download_files(
         }
     };
 
-    // Issue 09: Check available disk space before starting downloads
     {
         let _phase = metrics.phase("disk_space_check");
         if let Some(shortfall) = check_disk_space(&targets) {
@@ -1139,7 +1086,6 @@ pub(crate) async fn download_files(
         return Err(anyhow!("download cancelled"));
     }
 
-    // Collect lightweight references to all download targets for periodic progress persistence
     let all_download_refs: Vec<DownloadTargetFile> =
         targets.iter().map(|t| t.download.clone()).collect();
 
@@ -1171,7 +1117,6 @@ pub(crate) async fn download_files(
         })
         .collect();
 
-    // Prioritize completing whole mods (largest first) before moving on.
     batches.sort_by_key(|batch| std::cmp::Reverse(batch.total_size));
 
     let total_files: usize = batches.iter().map(|b| b.files.len()).sum();
@@ -1203,21 +1148,14 @@ pub(crate) async fn download_files(
         operation_id.clone(),
     );
 
-    // Start always-on throughput sampler (independent of bandwidth limiter).
-    // Anchor telemetry elapsed at the moment real download work begins - after
-    // the pre-download validation phases above - so the speed graph starts at
-    // the download's own t=0 instead of trailing the prep work. Share that epoch
-    // with the hash worker so the download and hash lanes line up on one timeline.
+    // Start telemetry after validation and share its origin with hash progress.
     let telemetry_started_at = std::time::Instant::now();
     let _ = telemetry_epoch.set(telemetry_started_at);
     let sampler_handle = metrics.spawn_sampler(progress_tx.clone(), telemetry_started_at);
 
-    // Periodic progress checkpoint: flush dirty download progress with adaptive spacing.
-    // When SQLite reports contention or a slow checkpoint, progress persistence backs off
-    // until several clean flushes complete. The final flush remains authoritative.
+    // Back off progress flushes under contention; the final flush remains authoritative.
     let checkpoint_stop = Arc::new(AtomicBool::new(false));
-    // Woken on shutdown so the stage does not wait out the current delay; without
-    // it the download stage is quantized to the checkpoint period.
+    // Wake on shutdown rather than wait for the checkpoint timer.
     let checkpoint_wake = Arc::new(tokio::sync::Notify::new());
     let checkpoint_handle = {
         let stop_signal = checkpoint_stop.clone();
@@ -1321,14 +1259,9 @@ pub(crate) async fn download_files(
         })
     };
 
-    // Start ALL mods concurrently. Each mod batch spawns its files immediately,
-    // with the shared semaphores (large_file_permits / small_file_permits) acting
-    // as the sole concurrency limiter. This avoids the old proportional slot-budget
-    // system that starved mods with few large files.
     let mut active: FuturesUnordered<tokio::task::JoinHandle<(usize, ModDownloadBatch, bool)>> =
         FuturesUnordered::new();
 
-    // Initialize queued large file count for adaptive split scheduling.
     let total_large_files: usize = batches
         .iter()
         .flat_map(|b| &b.files)
@@ -1454,11 +1387,9 @@ pub(crate) async fn download_files(
         let _ = handle.await;
     }
 
-    // Stop the throughput sampler
     metrics.stop_sampler();
     let _ = sampler_handle.await;
 
-    // Stop the checkpoint task and do a final progress flush (only files with progress)
     checkpoint_stop.store(true, Ordering::SeqCst);
     checkpoint_wake.notify_one();
     let _ = checkpoint_handle.await;
@@ -1542,9 +1473,7 @@ pub(crate) async fn download_files(
         avg_speed_mbps
     );
 
-    // Speed-of-light accounting (see conventions/SPEED_OF_LIGHT.md, O1).
-    // Light = configured limiter cap when set, otherwise the best 1-second
-    // throughput sample demonstrated within this run.
+    // SOL light is the configured limit or the best qualified throughput sample.
     let wire_bytes = metrics
         .counters
         .bytes_transferred
@@ -1591,8 +1520,7 @@ pub(crate) async fn download_files(
             format!("{:.3}", metrics.peak_window().as_secs_f64()),
         ),
     ];
-    // The ramp before the first plateau window and the tail after the last
-    // one are the two terms between the plateau rate and the wall time.
+
     let series = metrics.series();
     let shape = super::metrics::ramp_tail_profile(&series, peak_bps, download_elapsed);
     if shape.reached {
@@ -1629,11 +1557,7 @@ pub(crate) async fn download_files(
             tail.join(" ")
         );
     }
-    // On a rotational destination the disk, not the link, is the likelier
-    // bound: every byte is written once, patch sources are read once, and full
-    // downloads are read back by the hash. Report that nominal light too so a
-    // low network ratio is not misread as a slow link; it is logical traffic
-    // against a nominal rate, not a calibrated device bound.
+    // Report nominal rotational-disk traffic so low network ratios are not mistaken for link limits.
     if matches!(
         destination_storage,
         HashStorageClass::Hdd | HashStorageClass::Removable
@@ -1938,8 +1862,6 @@ mod tests {
 
     #[test]
     fn rotational_disk_light_counts_writes_patch_reads_and_hash_rereads() {
-        // 23.2 GB written, 11.4 GB copied by patches (read once), 11.8 GB of
-        // full downloads read back by the hash; patched files are not re-read.
         let disk = rotational_disk_light(
             23_200_000_000,
             11_400_000_000,
@@ -1957,9 +1879,6 @@ mod tests {
 
     #[test]
     fn rotational_disk_light_keeps_a_warm_run_above_one_in_the_raw_ratio() {
-        // 4.33 GB written plus a presumed full reread is 78.7 s at the nominal
-        // rate; a warm run finishing in 45 s is faster than the nominal bound,
-        // which the raw ratio must show instead of reading as "at the light".
         let disk = rotational_disk_light(4_331_121_846, 0, 0, std::time::Duration::from_secs(45));
         assert_eq!(disk.ratio, 1.0);
         assert!(disk.ratio_raw.unwrap() > 1.7);

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Milestone Execution"
+  short_description: "Deliver complete outcomes with focused validation"
+  default_prompt: "Use $foxy-milestone-execution to finish the current Foxy milestone with scoped implementation, review and acceptance evidence."

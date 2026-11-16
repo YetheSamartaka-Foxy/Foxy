@@ -278,7 +278,7 @@ impl Foxy {
             self.current_view = FoxyView::RepositoryList;
             self.last_view = FoxyView::None;
         } else {
-            // A clone shares the original's folder rows until one of them moves.
+            // Clones share folder rows until either clone changes them.
             let original_instance_key =
                 Self::repo_instance_key(&original_repo_address, &original_repo_path_raw);
             let original_instance_still_configured = self
@@ -310,10 +310,8 @@ impl Foxy {
                     "Repository local path changed; wiping cached database entries for {}",
                     original_repo_name
                 );
-                // Wipe only the cached rows for the repository's *previous* folder.
-                // Keying the purge by URL alone would also destroy a sibling
-                // repository that shares this URL under a different folder (e.g. the
-                // same repo installed in a repository space), corrupting its hashes.
+
+                // Purge only this folder so same-URL siblings retain cached state.
                 self.wipe_repository_database_entries_by_url_and_path(
                     &original_repo_address,
                     &original_repo_path_raw,

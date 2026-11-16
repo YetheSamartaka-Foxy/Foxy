@@ -58,23 +58,7 @@ pub(crate) enum RepositoryAddonListKind {
     OptionalAddons,
 }
 
-/// Per-row text galleys for the addon list views, laid out once and reused
-/// across frames.
-///
-/// egui's own galley cache only retains galleys laid out in the *current* frame,
-/// so scrolling re-shapes every newly revealed row's text (the centered name and
-/// the long path overlay) from scratch - the dominant per-frame cost while
-/// scrolling long addon lists. Caching the shaped galleys here turns that
-/// first-reveal shaping into a one-off cost per row, kept resident in RAM.
-///
-/// Galleys are laid out with [`eframe::egui::Color32::PLACEHOLDER`] and recolored
-/// at paint time through the fallback color, so toggling a row's enabled /
-/// favorite / client-side state never invalidates them. The name galley is
-/// width-independent; the truncated path and origin galleys depend on the
-/// overlay width and are dropped only when that width changes (window resize).
-///
-/// Slots are filled lazily as rows scroll into view, so resident memory tracks
-/// the rows actually rendered rather than the full list.
+/// Cache row galleys across frames so virtualized lists do not reshape off-screen text on every scroll. Lazily fill slots; invalidate width-dependent layouts on resize.
 #[derive(Debug, Default)]
 pub struct AddonRowGalleyCache {
     name_font: f32,
@@ -88,8 +72,6 @@ pub struct AddonRowGalleyCache {
 }
 
 impl AddonRowGalleyCache {
-    /// Resize the per-row slots and drop every cached galley when the row count
-    /// or font sizes change. Call once per frame before rendering rows.
     pub fn ensure_rows(&mut self, row_count: usize, name_font: f32, path_font: f32) -> bool {
         if self.name_galleys.len() == row_count
             && self.name_font == name_font
@@ -99,7 +81,7 @@ impl AddonRowGalleyCache {
         }
         self.name_font = name_font;
         self.path_font = path_font;
-        // Force the width-dependent galleys to rebuild on the next row.
+
         self.path_wrap_width = f32::NEG_INFINITY;
         self.name_galleys = vec![None; row_count];
         self.path_galleys = vec![None; row_count];
@@ -109,9 +91,6 @@ impl AddonRowGalleyCache {
         true
     }
 
-    /// Record the current path overlay width. Width-dependent slots invalidate
-    /// themselves individually, avoiding full-list cache drops during egui's
-    /// layout/scrollbar width negotiation.
     pub fn ensure_path_width(&mut self, width: f32) {
         if self.path_wrap_width == width {
             return;
@@ -162,17 +141,7 @@ impl AddonRowGalleyCache {
     }
 }
 
-/// Per-row text galleys for the editor-mission list (repository detail view).
-///
-/// Same rationale as [`AddonRowGalleyCache`]: the mission list paints each row's
-/// name, terrain badge and date directly with `Painter::text`, which re-shapes on
-/// every scroll because egui only caches the current frame's galleys. These
-/// galleys (laid out unwrapped with `Color32::PLACEHOLDER`, recolored at paint
-/// time) are filled lazily per mission index and reused while scrolling.
-///
-/// Keyed on the mission scan timestamp ([`CachedMissionList::scanned_at`]) so any
-/// rescan (rename/duplicate/delete or the 30s TTL refresh) drops stale galleys,
-/// plus the three font sizes so a font-size change rebuilds them.
+/// Cache mission-row galleys across frames; key them by scan timestamp and font sizes so rescans or typography changes discard stale layouts.
 #[derive(Debug, Default)]
 pub struct MissionRowGalleyCache {
     scanned_at: Option<Instant>,
@@ -185,8 +154,6 @@ pub struct MissionRowGalleyCache {
 }
 
 impl MissionRowGalleyCache {
-    /// Resize the per-row slots and drop every cached galley when the mission
-    /// scan or any font size changes. Call once per frame before rendering rows.
     pub fn ensure(
         &mut self,
         scanned_at: Option<Instant>,
@@ -225,25 +192,7 @@ impl MissionRowGalleyCache {
     }
 }
 
-/// Generic lazy, frame-persistent galley cache for the rows of any scrollable
-/// list, generalizing [`AddonRowGalleyCache`] / [`MissionRowGalleyCache`].
-///
-/// egui only retains galleys laid out in the *current* frame, so any list that
-/// renders just its visible rows - a virtualized `ScrollArea::show_rows`, or a
-/// `ScrollArea::show` that skips off-screen rows via `is_rect_visible` - must
-/// re-shape every row that scrolls into view. (Lists that lay out *all* their
-/// rows every frame do not have this problem; egui's per-frame cache already
-/// covers them and this cache would be dead weight.) This shapes each row's text
-/// once and reuses the `Arc<Galley>` across frames.
-///
-/// The caller supplies a `generation` (bump whenever the row *contents* change)
-/// and a `fingerprint` (fold in every layout input other than the row index:
-/// font sizes, wrap widths, and any color baked into the galley - see
-/// [`crate::ui::views::galley_cache::fingerprint`]). When either changes - or the
-/// row / column count changes - every slot is dropped. Each row owns `columns`
-/// slots, filled lazily as rows scroll into view, so resident memory tracks the
-/// rows actually rendered. The slots are filled and painted with the helpers in
-/// [`crate::ui::views::galley_cache`].
+/// Cache virtualized row layouts lazily; drop slots when row content generation, layout fingerprint, or dimensions change.
 #[derive(Debug, Default)]
 pub struct ListGalleyCache {
     generation: u64,
@@ -254,9 +203,6 @@ pub struct ListGalleyCache {
 }
 
 impl ListGalleyCache {
-    /// Resize and clear the slots when the row / column count, content
-    /// `generation`, or layout `fingerprint` changes. Call once per frame before
-    /// rendering rows.
     pub fn ensure(&mut self, rows: usize, columns: usize, generation: u64, fingerprint: u64) {
         if self.rows == rows
             && self.columns == columns
@@ -272,12 +218,10 @@ impl ListGalleyCache {
         self.slots = vec![None; rows.saturating_mul(columns)];
     }
 
-    /// Flat slot index for a `(row, column)` cell.
     const fn slot_index(columns: usize, row: usize, column: usize) -> usize {
         row * columns + column
     }
 
-    /// Mutable galley slot for `(row, column)`.
     pub fn slot(&mut self, row: usize, column: usize) -> &mut Option<Arc<Galley>> {
         debug_assert!(
             row < self.rows,
@@ -320,10 +264,7 @@ pub struct RepositoryAddonListCache {
     pub include_file_search_filter: bool,
     pub filters_dirty: bool,
     pub galleys: AddonRowGalleyCache,
-    /// Cursor into `filtered_indices` for the incremental galley prewarm, so the
-    /// name/path galleys of off-screen rows are shaped ahead of the scroll
-    /// instead of on first reveal. Reset whenever the rows, filter, or overlay
-    /// width change. See `prewarm_repository_addon_galleys`.
+
     pub galley_prewarm_cursor: usize,
     pub galley_prewarm_path_width: Option<f32>,
 }
@@ -409,6 +350,8 @@ pub struct RepositorySettingsAddonPreloadResult {
 
 #[derive(Debug, Default)]
 pub struct RepositoryAddonSizeLoadResult {
+    pub space_id: String,
+    pub generation: u64,
     pub sizes_by_repo_and_addon: HashMap<(String, String), u64>,
 }
 
@@ -447,18 +390,14 @@ pub struct JoinPreflightAmbiguousAddon {
     pub selected_candidate: Option<usize>,
 }
 
-/// An external addon that is enabled for this repository but whose configured
-/// path can no longer be resolved on disk. These are silently skipped by the
-/// launcher, so the preflight surfaces them as a warning instead of letting the
-/// user join believing they are loaded.
+/// Warn when enabled external addons cannot resolve: the launcher silently skips them.
 #[derive(Clone, Debug)]
 pub struct JoinPreflightUnavailableAddon {
     pub addon_name: String,
     pub path: String,
 }
 
-/// A Creator DLC whose enablement differs from what the joined server runs.
-/// Ticked applies the change (enable or disable) for this launch only.
+/// A server DLC mismatch is applied only for this launch.
 #[derive(Clone, Debug)]
 pub struct JoinPreflightDlcChange {
     pub code: &'static str,
@@ -475,9 +414,7 @@ pub struct PendingJoinPreflightState {
     pub ambiguous: Vec<JoinPreflightAmbiguousAddon>,
     pub known_remote: Vec<JoinPreflightKnownRemoteAddon>,
     pub extra_enabled: Vec<JoinPreflightAddonSuggestion>,
-    /// Enabled external addons whose configured path no longer resolves on disk.
-    /// Informational only: the launcher skips them, so the modal warns about
-    /// them rather than letting them disappear silently.
+    /// Warn about enabled external addons whose paths are missing because launch skips them silently.
     pub unavailable_enabled: Vec<JoinPreflightUnavailableAddon>,
     /// Creator DLCs the server runs that are disabled for this repository.
     pub dlc_enable: Vec<JoinPreflightDlcChange>,
@@ -491,20 +428,15 @@ pub struct PendingJoinPreflightState {
     pub steam_required: bool,
     /// Latest result of the Steam-running process check.
     pub steam_running: bool,
-    /// This modal was opened from the plain "Launch" button rather than a
-    /// "Join" action, so there is no server to connect to. The `server` field
-    /// holds a placeholder and the launch must not pass connection params.
+    /// Plain Launch has no server to connect to and must not pass placeholder connection parameters.
     pub launch_only: bool,
-    // Readiness confirmation must resume server checks before any game launch.
+    // Resume server checks before any game launch after readiness confirmation.
     pub query_server_before_join: bool,
-    /// These facts came from a successful server addon query, so Join refreshes
-    /// them before dispatch.
+    /// Refresh successful server addon-query facts before Join dispatch.
     pub server_addons_checked: bool,
-    /// The server answered its status query but not the addon query; Join may
-    /// retry or continue without the addon check.
+    /// Offer retry or Join without addon checking when the status query succeeded but the addon query failed.
     pub addon_query_error: Option<String>,
-    /// A fresh server/local facts query has been completed and changed facts
-    /// are awaiting the user's renewed confirmation.
+    /// Changed facts require renewed user confirmation before launch.
     pub final_facts_refreshed: bool,
     /// The user's pending final choice: true keeps the selected suggestions.
     pub final_confirmation_choice: Option<bool>,
@@ -605,9 +537,7 @@ pub struct PendingJoinPreflightQuery {
     pub original_repository: Repository,
 }
 
-/// A Join request waiting on a background server-status (A2S) query. The status
-/// query does DNS resolution plus a UDP round-trip, so it runs off the UI
-/// thread; the join decision resumes once a fresh status arrives.
+/// A2S status checks perform DNS and UDP work off-thread; resume Join only after a fresh result.
 #[derive(Debug)]
 pub struct PendingJoinStatusQuery {
     pub repo_name: String,
@@ -634,6 +564,8 @@ impl JoinServerStatusResult {
 #[derive(Clone, Debug)]
 pub struct JoinPreflightQueryResult {
     pub query_id: u64,
+    pub space_id: String,
+    pub generation: u64,
     pub address: String,
     pub port: u16,
     pub display_names: crate::core::addon_metadata::AddonDisplayNameSnapshot,
@@ -684,6 +616,8 @@ mod tests {
         };
         let result = JoinPreflightQueryResult {
             query_id: 11,
+            space_id: "space-a".to_string(),
+            generation: 3,
             address: "127.0.0.1".to_string(),
             port: 2302,
             display_names: Default::default(),
@@ -860,8 +794,7 @@ mod tests {
     fn ensure_is_a_noop_when_inputs_are_unchanged() {
         let mut cache = ListGalleyCache::default();
         cache.ensure(2, 1, 1, 10);
-        // A filled slot must survive an identical `ensure` so scrolling does not
-        // re-shape rows every frame.
+        // Preserve filled galley slots across identical cache checks so scrolling does not reshape rows each frame.
         *cache.slot(0, 0) = None;
         let ptr = cache.slots.as_ptr();
         cache.ensure(2, 1, 1, 10);

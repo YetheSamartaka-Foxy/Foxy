@@ -4,9 +4,7 @@ use std::time::Duration;
 use egui::{Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Widget, WidgetInfo};
 use egui::{Role, emath::lerp, vec2};
 
-/// How often a spinner or live progress asks for its next frame on Auto. egui's
-/// own spinner asks for one on every paint, which keeps the whole UI redrawing
-/// at the display rate for as long as any spinner is on screen.
+/// Auto pacing limits continuous repainting from egui spinners while progress is visible.
 pub(crate) const PROGRESS_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Fastest and slowest progress frame rates the setting accepts.
@@ -23,8 +21,6 @@ fn frame_interval_for_rate(frames_per_second: u32) -> Duration {
     Duration::from_micros(1_000_000 / u64::from(rate))
 }
 
-/// Pace progress animations and progress-driven repaints at `frames_per_second`,
-/// or at [`PROGRESS_FRAME_INTERVAL`] with `None`.
 pub(crate) fn set_progress_frame_rate(frames_per_second: Option<u32>) {
     let micros = frames_per_second
         .map(|rate| frame_interval_for_rate(rate).as_micros() as u64)
@@ -47,8 +43,7 @@ pub(crate) enum WindowPresence {
 
 static WINDOW_PRESENCE: AtomicU8 = AtomicU8::new(0);
 
-/// Record where the window is, once a frame; progress paces slower while it is
-/// not in front, so Foxy's drawing does not compete with the program that is.
+/// Pace progress more slowly when the window is not in front so rendering does not compete with the foreground program.
 pub(crate) fn set_window_presence(presence: WindowPresence) {
     let encoded = match presence {
         WindowPresence::Foreground => 0,
@@ -74,7 +69,6 @@ fn presence_frame_interval(presence: WindowPresence) -> Option<Duration> {
     }
 }
 
-/// The slower of two optional pacing limits.
 fn slowest(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.max(b)),
@@ -82,8 +76,6 @@ fn slowest(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
     }
 }
 
-/// The slowest pacing in force beyond Auto: the user's progress frame rate,
-/// or the slower pacing used while the window is not in front.
 pub(crate) fn progress_frame_interval_override() -> Option<Duration> {
     let setting = match PROGRESS_FRAME_INTERVAL_OVERRIDE_US.load(Ordering::Relaxed) {
         0 => None,
@@ -92,7 +84,6 @@ pub(crate) fn progress_frame_interval_override() -> Option<Duration> {
     slowest(setting, presence_frame_interval(window_presence()))
 }
 
-/// How often live progress asks for its next frame.
 pub(crate) fn progress_frame_interval() -> Duration {
     progress_frame_interval_override().unwrap_or(PROGRESS_FRAME_INTERVAL)
 }
@@ -101,7 +92,6 @@ pub(crate) fn request_frame_after(ctx: &egui::Context, delay: Duration) {
     ctx.request_repaint_after(delay);
 }
 
-/// egui's spinner, drawn the same way, animated at [`progress_frame_interval`].
 #[must_use = "You should put this widget in a ui with `ui.add(widget);`"]
 #[derive(Default)]
 pub(crate) struct PacedSpinner {
@@ -167,7 +157,7 @@ mod tests {
     #[test]
     fn a_visible_spinner_asks_for_its_next_frame_after_the_interval_not_at_once() {
         let ctx = egui::Context::default();
-        // The first two passes always ask for another while fonts and layout settle.
+
         for _ in 0..2 {
             frame_with_spinner(&ctx).textures_delta.clear();
         }

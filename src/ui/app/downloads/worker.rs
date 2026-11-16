@@ -532,10 +532,7 @@ impl Foxy {
     }
 }
 
-/// The blocking finding for a direct download destination, phrased for the
-/// user: a FAT drive and a file of 4 GiB or more, a read-only drive, a name
-/// Windows cannot create, or a case collision. `None` when the plan can be
-/// written; survivable findings are logged only.
+/// Block destinations with unsupportable file size, read-only access, invalid names, or case collisions; log survivable findings.
 fn direct_download_destination_problem(
     plan: &crate::ui::app::DirectDownloadPlan,
     destination: &std::path::Path,

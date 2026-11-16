@@ -16,15 +16,10 @@ use crate::ui::types::{
     additional_folder_alias_key, sanitize_additional_folder_alias,
 };
 
-/// Upper bound on the addon size-walk workers. The walks are metadata-bound
-/// rather than CPU-bound, so more threads than this buy nothing and only add
-/// queue depth on a spinning disk.
+/// Limit metadata-bound size walks to avoid excess queue depth on spinning disks.
 const ADDON_SIZE_SCAN_MAX_WORKERS: usize = 8;
 
-/// How often the UI thread rechecks an in-flight inventory worker while waiting
-/// to adopt its result. Waiting on a slow worker is still cheaper than racing it
-/// with a second scan; the recheck only exists so a worker that died without
-/// sending cannot wedge the wait.
+/// Poll a running inventory worker so a worker that exits without sending cannot wedge the wait; do not race it with another scan.
 const ADDON_INVENTORY_ADOPT_POLL: Duration = Duration::from_millis(25);
 
 impl Foxy {
@@ -89,8 +84,6 @@ impl Foxy {
                 .is_some_and(|suffix| suffix.starts_with('/'))
     }
 
-    /// Find the actual `steamapps` directory under a parent, handling case
-    /// differences between platforms (e.g. `SteamApps` vs `steamapps`).
     fn find_steamapps_dir(parent: &Path) -> Option<PathBuf> {
         if let Ok(entries) = std::fs::read_dir(parent) {
             for entry in entries.flatten() {
@@ -105,18 +98,12 @@ impl Foxy {
         None
     }
 
-    /// Build candidate paths where Steam Workshop content for Arma 3 might live.
-    /// The !Workshop junction is tried first; then we derive the real path from
-    /// the Arma 3 install location (assumes standard `steamapps/common/<game>`
-    /// layout) and the Steam directory setting.
     fn build_workshop_candidate_paths(arma_dir: &str, steam_dir: &str) -> Vec<PathBuf> {
         let mut candidates = Vec::new();
 
         if !arma_dir.is_empty() {
             candidates.push(Path::new(arma_dir).join("!Workshop"));
 
-            // Arma 3 is typically at <steam>/steamapps/common/Arma 3, so
-            // parent().parent() yields the steamapps directory.
             let arma_path = Path::new(arma_dir);
             if let Some(steamapps) = arma_path.parent().and_then(|p| p.parent())
                 && steamapps
@@ -128,7 +115,6 @@ impl Foxy {
         }
 
         if !steam_dir.is_empty() {
-            // Use the actual directory name on disk to handle case differences
             let steam_path = Path::new(steam_dir);
             if let Some(actual_steamapps) = Self::find_steamapps_dir(steam_path) {
                 candidates.push(
@@ -138,7 +124,6 @@ impl Foxy {
                         .join("107410"),
                 );
             } else {
-                // Fallback to lowercase if directory listing fails
                 candidates.push(
                     steam_path
                         .join("steamapps")
@@ -182,8 +167,7 @@ impl Foxy {
         workshop_root: Option<&str>,
     ) -> bool {
         let normalized_path = Self::normalize_origin_lookup_path(path);
-        // Common Steam workshop location on Windows/Linux for Arma 3.
-        // Use case-insensitive check to handle SteamApps vs steamapps on any platform.
+
         if normalized_path
             .to_ascii_lowercase()
             .contains("/steamapps/workshop/content/107410")
@@ -250,10 +234,7 @@ impl Foxy {
         }
     }
 
-    /// Whether the active game has a client-side addon concept at all. Arma 3
-    /// servers report their addon list and tolerate extra client-only mods;
-    /// Reforger activates exactly the server's mod set on join, so no surface
-    /// may offer or honor a client-side marking there.
+    /// Client-side addons apply to Arma 3, whose servers tolerate extras; Reforger activates the server's exact set.
     pub(crate) fn client_side_addons_supported() -> bool {
         crate::core::game::registry()
             .active()
@@ -392,9 +373,7 @@ impl Foxy {
     ) -> Vec<AddonInventoryEntry> {
         let mut discovered: Vec<(String, String, String)> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        // Every repository joined to a repository space shares one folder, so
-        // without these caches the same directory tree and the same origin
-        // lookup are repeated once per repository.
+        // Repository-space members share a folder, so reuse the directory and origin lookup across them.
         let mut scanned_by_path: HashMap<String, Vec<(String, String)>> = HashMap::new();
         let mut origins_by_addon_path: HashMap<String, Vec<String>> = HashMap::new();
         let additional_origin_by_folder =
@@ -501,9 +480,6 @@ impl Foxy {
                 .then(a_path.cmp(b_path))
         });
 
-        // The recursive size walk dominates the inventory build and every entry
-        // is an independent directory tree, so the walks run across workers
-        // instead of one folder after another.
         let sizes = addon_directory_total_sizes(
             &discovered
                 .iter()
@@ -530,12 +506,7 @@ impl Foxy {
         )
     }
 
-    /// Take the inventory an already running worker is building rather than
-    /// starting a second scan of the same folders on the UI thread.
-    ///
-    /// A worker spawned before the last `invalidate_addon_inventory_cache` is
-    /// scanning for a generation nobody wants any more, so it is left to finish
-    /// on its own rather than waited on.
+    /// Reuse an in-progress inventory scan; do not wait for a worker from an invalidated generation.
     fn adopt_pending_addon_inventory(&mut self) {
         if self
             .repository_settings_addon_preload_worker
@@ -642,16 +613,6 @@ impl Foxy {
         self.start_addon_inventory_worker(repo_index);
     }
 
-    /// Build the addon inventory in the background whenever the app is idle
-    /// and does not have one, so opening Repository Settings finds it ready
-    /// instead of paying for the whole folder walk between the click and the
-    /// first frame.
-    ///
-    /// Idle is the gate rather than "once at startup". The inventory is dropped
-    /// on an addon delete, a path change, a finished download or a game space
-    /// switch, and without a re-arm the next open would pay the walk again.
-    /// Idle keeps the scan off the disk while sync work is using it, and reads
-    /// the repository list only once a switch has finished installing it.
     pub(in crate::ui::app) fn maybe_warm_addon_inventory(&mut self) {
         if self.cached_all_addons.is_some()
             || self.repository_settings_addon_preload_worker.is_some()
@@ -666,6 +627,9 @@ impl Foxy {
     }
 
     fn start_addon_inventory_worker(&mut self, repo_index: usize) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         if self.cached_all_addons.is_some()
             || self.repository_settings_addon_preload_worker.is_some()
         {
@@ -717,6 +681,9 @@ impl Foxy {
     }
 
     pub(crate) fn poll_repository_settings_addon_preload_results(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         loop {
             match self.repository_settings_addon_preload_rx.try_recv() {
                 Ok(result) => {
@@ -757,9 +724,7 @@ impl Foxy {
         repo: &Repository,
         server: Option<&RepositoryServer>,
     ) -> Option<std::process::Command> {
-        // Never build a launch for a module that does not declare the
-        // capability, and never for the read-only fallback module of a space
-        // whose game is not registered.
+        // Build launches only when the active module declares the capability, never through an unregistered game's read-only fallback.
         let Some(module) = crate::core::game::registry().active_module() else {
             warn!(
                 "Repository launch is not supported: the active game space names an unknown game"
@@ -818,9 +783,7 @@ impl Foxy {
             return false;
         };
 
-        // Restore the per-mod snapshot captured when this repo finished
-        // downloading so the modal shows this repo's list, not whichever
-        // repo happened to be the last one cached in `mod_diff_cache`.
+        // Restore the completion-time diff for this repository instead of the last repository cached.
         if notice.mods.is_empty() {
             self.clear_mod_diff_cache();
             self.update_ready_repo = None;
@@ -925,8 +888,7 @@ impl Foxy {
             .count()
             == 1;
 
-        // Do not persist a notice when the download completed with nothing
-        // actually updated (e.g. after a DB wipe + recheck cycle).
+        // Do not save a notice for a download with no changes.
         if !summary.has_meaningful_content() {
             info!(
                 "Skipping update summary notice for {} - no mods, files, or parts were updated",
@@ -935,9 +897,7 @@ impl Foxy {
             return;
         }
 
-        // Snapshot the per-mod diff so the modal can reconstruct this repo's
-        // list later, even after further updates overwrite `mod_diff_cache`
-        // during a bulk space update.
+        // Snapshot the diff so later bulk updates cannot replace the list shown for this completed repository.
         let mods_snapshot: Vec<_> = self
             .mod_diff_cache
             .iter()
@@ -1055,19 +1015,12 @@ impl Foxy {
     }
 }
 
-/// Total size of every addon folder in `paths`, in the same order.
-///
-/// One `addon_directory_total_size` per entry, spread over workers: the walks
-/// touch disjoint trees and are metadata-bound, so they overlap rather than
-/// queue behind each other.
 fn addon_directory_total_sizes(paths: &[String]) -> Vec<Option<u64>> {
     let mut sizes: Vec<Option<u64>> = vec![None; paths.len()];
     if paths.is_empty() {
         return sizes;
     }
 
-    // Directory metadata on a rotational disk is one seek per entry; parallel
-    // walkers only make the head jump between addon folders.
     let rotational = paths.iter().any(|path| {
         matches!(
             crate::core::tasks::calculate_hashes::detect_storage_class_for_path(path),
@@ -1326,7 +1279,7 @@ mod tests {
         write_addon(root, "@shared", &[("a.pbo", 10)]);
         write_addon(root, "@only_main", &[("a.pbo", 20)]);
         write_addon(root, "@only_ww2", &[("a.pbo", 30)]);
-        // No `addons` subfolder, so it is not an addon folder at all.
+
         std::fs::create_dir_all(root.join("@not_an_addon")).expect("plain dir");
 
         let aliases = HashMap::new();

@@ -94,6 +94,9 @@ impl Foxy {
     }
 
     pub fn start_manual_addon_restore(&mut self, restore_state: AddonBackupRestoreState) -> bool {
+        if !self.client_db_admission.allows() {
+            return false;
+        }
         if self.pending_retry_matches_instance(
             &restore_state.repository_url,
             &restore_state.repository_path,
@@ -259,9 +262,17 @@ impl Foxy {
         });
         let task_tx = self.addon_backup_task_tx.clone();
         let repaint_ctx = self.repaint_ctx.clone();
+        let Some(scope) = self.capture_worker_scope() else {
+            self.addon_backup_status = None;
+            return false;
+        };
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
         self.addon_backup_worker = Some(std::thread::spawn(move || {
             let result = addon_backup::restore_addon_backup(&selected_backup, &destination)
                 .map(|_| AddonBackupTaskResult {
+                    space_id: space_id.clone(),
+                    generation,
                     repo_index,
                     action: AddonBackupTaskAction::Restore,
                     addon_name: addon_name.clone(),
@@ -271,6 +282,8 @@ impl Foxy {
                     trigger_recheck: true,
                 })
                 .unwrap_or_else(|err| AddonBackupTaskResult {
+                    space_id,
+                    generation,
                     repo_index,
                     action: AddonBackupTaskAction::Restore,
                     addon_name,

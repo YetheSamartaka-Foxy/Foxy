@@ -17,7 +17,7 @@ const ADDON_ICON_BUTTON_SIZE: f32 = 28.0;
 const ADDON_ACTION_WIDTH: f32 = 56.0;
 const OPTIONAL_ADDON_ACTION_WIDTH: f32 = 112.0;
 const MAX_ADDON_PATH_OVERLAY_WIDTH: f32 = 440.0;
-/// Rows whose name/path galleys are shaped per frame by the background prewarm.
+
 const ADDON_GALLEY_PREWARM_ROWS_PER_FRAME: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,10 +94,6 @@ fn paint_addon_icon_cell(
     response
 }
 
-/// Path-overlay width for an addon row, computed from the list's content width
-/// (outside the `ScrollArea`). Using one scrollbar-independent width for both the
-/// prewarm and the row render keeps the truncated path galley a cache hit instead
-/// of re-shaping at a slightly different inner width on every reveal.
 fn addon_path_overlay_width(
     available_width: f32,
     horizontal_padding: f32,
@@ -180,10 +176,7 @@ impl Foxy {
         addon_context_action: &mut Option<(String, Option<String>, AddonContextAction)>,
     ) {
         let row_size = Vec2::new(ui.available_width(), ADDON_ROW_HEIGHT);
-        // Sense clicks so the expanded file rows carry their own right-click menu:
-        // when scrolling deep inside a long expanded structure the addon header is
-        // off-screen, so a per-file "Collapse addon structure" entry lets the user
-        // collapse without scrolling back up to the header.
+        // Each expanded file row gets a collapse context-menu action so users need not scroll back to an off-screen addon header.
         let (row_rect, response) = ui.allocate_exact_size(row_size, egui::Sense::click());
         if response.hovered() {
             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -232,12 +225,6 @@ impl Foxy {
         );
     }
 
-    /// Shape a chunk of off-screen addon name/path galleys per frame so they are
-    /// cached before the user scrolls to them, instead of being shaped on first
-    /// reveal (the dominant per-frame cost while scrolling). Mirrors the external
-    /// addon prewarm. Walks `filtered_indices` from a stored cursor that resets
-    /// when the rows, filter, or overlay width change; requests another frame
-    /// until the whole filtered list is warm, then becomes a no-op.
     fn prewarm_repository_addon_galleys(
         &mut self,
         ui: &Ui,
@@ -373,7 +360,7 @@ impl Foxy {
                 Vec2::splat(ADDON_ICON_BUTTON_SIZE),
             )
         });
-        // Without a client-side button the favorite star takes its slot.
+
         let favorite_anchor_left = client_side_button_rect.unwrap_or(checkbox_rect).left();
         let favorite_button_rect = optional_row.then(|| {
             egui::Rect::from_min_size(
@@ -443,9 +430,6 @@ impl Foxy {
         };
         galley_cache::paint_centered(ui, text_rect, name_galley, text_color);
 
-        // `path_width` is computed once outside the ScrollArea and passed in, so
-        // the prewarm and the render shape the truncated path galley at the same
-        // width and it stays a cache hit across scroll.
         let mut path_rect = text_rect;
         path_rect.set_width(path_width.min(text_rect.width()));
         let path_galley = {
@@ -688,7 +672,7 @@ impl Foxy {
             .font_sizes
             .repository_settings_view
             .addon_path as f32;
-        // Compact addon cards: shrink all card text by 20% to reduce vertical size.
+
         let path_font = addon_path_font * 1.0;
         let name_font = ui
             .style()
@@ -740,9 +724,6 @@ impl Foxy {
                 );
                 let info_color = self.color_text_dim();
 
-                // Reserve the action buttons on the right first, then let the info
-                // text fill the remaining width and wrap to as many lines as it
-                // needs so the buttons always stay fully visible.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_space(50.0);
 
@@ -787,10 +768,6 @@ impl Foxy {
             });
             ui.separator();
 
-            // Filter field + trailing controls share one wrapping row. On a wide
-            // window the filter expands so the controls sit toward the right edge;
-            // when the window is too narrow the controls collapse onto their own
-            // line(s) below instead of being clipped off the edge.
             ui.horizontal_wrapped(|ui| {
                 ui.label(tr("Filter:"));
                 self.filter_help_icon(ui, &tr("addon_filter_help"));
@@ -802,9 +779,7 @@ impl Foxy {
                     _ => tr("All"),
                 };
                 let item_spacing = ui.spacing().item_spacing.x;
-                // The explicit add_space() gaps plus egui's per-widget item spacing.
-                // Counting them in full keeps the filter from being sized too wide,
-                // which would otherwise shove the trailing controls off the edge.
+
                 let mut controls_width = super::filter_controls_text_width(ui, &tr("State:"))
                     + super::filter_controls_combo_width(ui, &state_selected)
                     + 16.0
@@ -1018,9 +993,7 @@ impl Foxy {
                     cache.galley_prewarm_path_width = None;
                 }
             }
-            // One scrollbar-independent overlay width for both the prewarm and the
-            // row render, computed here (outside the ScrollArea) so the truncated
-            // path galleys stay cache hits while scrolling.
+
             let action_width = if kind == RepositoryAddonListKind::OptionalAddons {
                 OPTIONAL_ADDON_ACTION_WIDTH
             } else {
@@ -1118,7 +1091,6 @@ impl Foxy {
         if repo_data_changed {
             self.persist_repository_addon_row_state_cached(repo_index, kind);
         } else if ui_state_changed {
-            // UI-only filter controls should not persist repository data.
         }
 
         if let Some((addon_name, addon_directory_path, action)) = addon_context_action {

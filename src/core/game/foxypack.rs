@@ -20,9 +20,7 @@ pub use recovery::{commit_pending_import, recover_pending_import, rollback_pendi
 
 pub const FOXY_PACK_SCHEMA_VERSION: u32 = 1;
 
-/// Ceiling on the total uncompressed payload an import will unpack. Packs carry
-/// only the user's own config and extra files, so anything past this is either a
-/// mistake or a decompression bomb aimed at the game space directory.
+/// Maximum uncompressed payload accepted during import, limiting archive expansion.
 pub const MAX_PACK_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -117,12 +115,9 @@ pub struct ImportSummary {
     pub workshop_count: usize,
 }
 
-/// A filesystem location an import would write to or start syncing into. Packs
-/// are shared between users, so every path a pack chooses is surfaced before
-/// the import is confirmed rather than only counted.
+/// Packs choose destinations; surface each path before confirmation rather than only a write count.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PackWriteTarget {
-    /// `extra_file` or `repository`.
     pub kind: String,
     pub name: String,
     /// Destination as written in the pack, `{game_dir}` still unexpanded.
@@ -142,7 +137,7 @@ pub struct PackInspection {
     pub profile_count: usize,
     pub extra_file_count: usize,
     pub workshop_count: usize,
-    /// Every path the import would write to or sync into.
+
     pub write_targets: Vec<PackWriteTarget>,
     /// Uncompressed size of the pack's payloads, so an oversized pack is
     /// visible before it is unpacked into the game space.

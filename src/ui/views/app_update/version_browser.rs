@@ -122,7 +122,6 @@ impl Foxy {
                             }
                         });
 
-                        // Collapsible changelog
                         let ver_str = &entry.version;
                         let has_changelog = self
                             .app_update_changelogs
@@ -159,7 +158,6 @@ impl Foxy {
                             }
                         });
 
-                        // Install/reinstall button
                         if entry.platforms.contains_key(platform_key) {
                             ui.add_space(4.0);
 
@@ -201,10 +199,6 @@ impl Foxy {
                 }
             });
     }
-
-    // -----------------------------------------------------------------------
-    // Shared changelog rendering
-    // -----------------------------------------------------------------------
 
     pub(super) fn render_changelogs_list(&self, ui: &mut Ui) {
         let mut sorted: Vec<&ChangelogVersion> = self.app_update_changelogs.iter().collect();

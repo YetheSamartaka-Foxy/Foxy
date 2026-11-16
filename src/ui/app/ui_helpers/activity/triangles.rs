@@ -4,21 +4,17 @@ use egui::{Color32, Mesh, Pos2, Rect, pos2};
 use super::{bump, mix, noise};
 use crate::ui::palette::ON_STRONG_FILL;
 
-/// Gap between neighboring triangles as a share of a row's height.
 const GAP_SHARE: f32 = 0.2;
-/// How far lit and brightest triangles move from the fill toward white.
+
 const LIGHT_SHARE: f32 = 0.35;
 const BRIGHT_SHARE: f32 = 0.7;
-/// Shorter triangles stop reading as triangles, so a short grid drops rows.
+
 const MIN_HEIGHT_PX: f32 = 4.0;
-/// Base of an equilateral triangle as a share of its height.
+
 const BASE_PER_HEIGHT: f32 = 1.154_700_5;
-/// Share of its own rhythm a blinking triangle spends lit.
+
 const BLINK_SHARE: f32 = 0.12;
 
-/// Rows of triangles side by side, pointing up and down by turns like a
-/// tiling, each one its own cell. Rows sit on whole physical pixels so every
-/// row and gap is the same size at fractional scales.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct TriangleGrid {
     pub(super) columns: usize,
@@ -33,8 +29,6 @@ pub(super) struct TriangleGrid {
 }
 
 impl TriangleGrid {
-    /// Up to `max_rows` rows of the tallest triangles that fit `rect`'s height,
-    /// as many across as fit its width, centered in it.
     pub(super) fn fit(rect: Rect, max_rows: usize, pixels_per_point: f32) -> Self {
         let pixels_per_point = pixels_per_point.max(f32::EPSILON);
         let height_px = (rect.height() * pixels_per_point).max(1.0);
@@ -64,13 +58,10 @@ impl TriangleGrid {
         self.columns * self.rows
     }
 
-    /// Whether triangle (`column`, `row`) points up; its neighbors point down.
     pub(super) fn points_up(column: usize, row: usize) -> bool {
         (column + row).is_multiple_of(2)
     }
 
-    /// The three corners of triangle (`column`, `row`), in points: the two
-    /// ends of its base, then its apex.
     pub(super) fn corners(&self, column: usize, row: usize) -> [Pos2; 3] {
         let left = self.left_px + column as f32 * self.step_px;
         let top = self.top_px + row as f32 * self.row_pitch_px;
@@ -88,8 +79,6 @@ impl TriangleGrid {
         .map(|corner| pos2(corner.x, corner.y) / self.pixels_per_point)
     }
 
-    /// Adds triangle (`column`, `row`) in `color`, its edges softened over a
-    /// physical pixel so the slanted sides do not stair-step.
     pub(super) fn add(&self, mesh: &mut Mesh, column: usize, row: usize, color: Color32) {
         add_soft_triangle(
             mesh,
@@ -99,17 +88,14 @@ impl TriangleGrid {
         );
     }
 
-    /// Distance from one triangle to the next along a row, in points.
     pub(super) fn pitch(&self) -> f32 {
         self.step_px / self.pixels_per_point
     }
 
-    /// Height of one row of triangles, in points.
     pub(super) fn cell_size(&self) -> f32 {
         self.height_px / self.pixels_per_point
     }
 
-    /// The x of a point `columns` triangles in from the grid's left edge.
     pub(super) fn x_at(&self, columns: f32) -> f32 {
         (self.left_px + self.base_px / 2.0 + columns * self.step_px) / self.pixels_per_point
     }
@@ -120,7 +106,6 @@ impl TriangleGrid {
     }
 }
 
-/// Rows, row height and gap, in physical pixels, for a grid `height_px` tall.
 fn rows_that_fit(height_px: f32, max_rows: usize) -> (usize, f32, f32) {
     let mut rows = max_rows.max(1);
     loop {
@@ -137,8 +122,6 @@ fn rows_that_fit(height_px: f32, max_rows: usize) -> (usize, f32, f32) {
     }
 }
 
-/// A triangle whose edges fade out over `feather` points: an opaque core
-/// shrunk by half the feather and a clear rim grown by the other half.
 fn add_soft_triangle(mesh: &mut Mesh, corners: [Pos2; 3], feather: f32, color: Color32) {
     let center = pos2(
         (corners[0].x + corners[1].x + corners[2].x) / 3.0,
@@ -172,8 +155,6 @@ fn inradius(corners: [Pos2; 3]) -> f32 {
     2.0 * area / perimeter.max(f32::EPSILON)
 }
 
-/// The four tones every triangle is painted in, flat like the rest of the
-/// app: empty, filled, lit and brightest.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Tones {
     pub(super) empty: Color32,
@@ -192,8 +173,6 @@ impl Tones {
         }
     }
 
-    /// A filled triangle carrying `light` from a blink, a bubble or the
-    /// frontier glow, from none (0) to full (1).
     pub(super) fn lit(&self, light: f32) -> Color32 {
         if light >= 0.6 {
             self.bright
@@ -204,8 +183,6 @@ impl Tones {
         }
     }
 
-    /// A triangle `amount` of the way from empty to lit, as cells being read
-    /// and the scanning beam show it.
     pub(super) fn rising(&self, amount: f32) -> Color32 {
         if amount >= 0.75 {
             self.light
@@ -217,8 +194,6 @@ impl Tones {
     }
 }
 
-/// How brightly triangle `index` blinks at `time`: each one flashes briefly
-/// on its own rhythm, so a filled bar glitters all over.
 pub(super) fn blink(index: usize, time: f64) -> f32 {
     let period = 1.6 + 2.2 * f64::from(noise(index as u32, 71));
     let phase = (time / period + f64::from(noise(index as u32, 73))).fract() as f32;

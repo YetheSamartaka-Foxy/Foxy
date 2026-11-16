@@ -1,0 +1,26 @@
+{
+  "bindPort": 2001,
+  "bindAddress": "127.0.0.1",
+  "publicAddress": "203.0.113.10",
+  "a2s": {
+    "address": "127.0.0.1",
+    "port": 17777
+  },
+  "game": {
+    "name": "MainServer",
+    "maxPlayers": 64,
+    "visible": false,
+    "crossPlatform": false,
+    "scenarioId": "{2BBBE828037C6F4B}Missions/22_GM_Arland.conf",
+    "modsRequiredByDefault": false,
+    "mods": [],
+    "gameProperties": {
+      "serverMaxViewDistance": 1600,
+      "serverMinGrassDistance": 0,
+      "battlEye": true,
+      "missionHeader": {
+        "kept": true
+      }
+    }
+  }
+}

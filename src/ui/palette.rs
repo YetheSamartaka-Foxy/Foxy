@@ -1,86 +1,60 @@
 use egui::Color32;
 use serde::{Deserialize, Serialize};
 
-/// Highlight brand color (Used for top bar, launch buttons, etc)
 pub const PRIMARY_ACCENT: Color32 = Color32::from_rgb(200, 100, 15);
 
-/// A slightly lighter gray for buttons or selected states
 pub const WIDGET_BG: Color32 = Color32::from_rgb(60, 60, 60);
 
-/// A darker background color (Used for panels, bottom bar, etc)
 pub const MAIN_BG: Color32 = Color32::from_rgb(45, 45, 45);
 
-/// A dark gray background for cards or frames
 pub const CARD_BG: Color32 = Color32::from_rgb(35, 35, 35);
 
-/// An even darker background to represent offline servers (or a disabled state)
 pub const SERVER_OFFLINE_BG: Color32 = Color32::from_rgb(30, 30, 30);
 
-/// Normal, bright text color
 pub const TEXT_NORMAL: Color32 = Color32::WHITE;
 
-/// Gray text color
 pub const TEXT_GRAY: Color32 = Color32::GRAY;
 
-/// Dimmer text color (Used for hints, help messages, or disabled content)
 pub const TEXT_DIM: Color32 = Color32::from_gray(150);
 
-/// Error or destructive color
 pub const TEXT_ERROR: Color32 = Color32::from_rgb(122, 31, 39);
 
-/// Bright red for error log messages
 pub const ERROR: Color32 = Color32::from_rgb(255, 80, 80);
 
-/// Orange for warning log messages
 pub const WARN: Color32 = Color32::from_rgb(255, 180, 50);
 
-/// Blue for debug log messages
 pub const DEBUG: Color32 = Color32::from_rgb(90, 150, 255);
 
-/// Green used for success/completed actions
 pub const SUCCESS: Color32 = Color32::from_rgb(0, 170, 0);
 
-/// Darker green used for success banners and secondary success actions
 pub const SUCCESS_MUTED: Color32 = Color32::from_rgb(0, 120, 0);
 
-/// Blue action color used by repository status banners
 pub const ACTION_INFO: Color32 = Color32::from_rgb(50, 50, 200);
 
-/// Red action color used by destructive/pending update actions
 pub const ACTION_DESTRUCTIVE: Color32 = Color32::from_rgb(200, 50, 50);
 
-/// Text and glyphs drawn on a saturated accent or destructive fill, in every theme
 pub const ON_STRONG_FILL: Color32 = Color32::WHITE;
 
-/// Backing and outline behind text drawn over progress bars, in every theme
 pub const BAR_LABEL_SHADE: Color32 = Color32::BLACK;
 
-/// Dims the app behind a scene caption an agent GUI scenario shows, in every theme
 pub const AGENT_CAPTION_BACKDROP: Color32 = Color32::from_black_alpha(120);
 
-/// Green used to indicate enabled checkbox states
 pub const CHECKBOX_ENABLED: Color32 = Color32::from_rgb(70, 170, 70);
 
-/// Enabled checkbox color when hovered
 pub const CHECKBOX_ENABLED_HOVER: Color32 = Color32::from_rgb(82, 192, 82);
 
-/// Enabled checkbox color when pressed/active
 pub const CHECKBOX_ENABLED_ACTIVE: Color32 = Color32::from_rgb(62, 150, 62);
 
-/// Border color for enabled checkbox state
 pub const CHECKBOX_ENABLED_BORDER: Color32 = Color32::from_rgb(48, 118, 48);
 
-/// Label color for enabled checkbox state
 pub const CHECKBOX_ENABLED_LABEL: Color32 = Color32::from_rgb(118, 218, 118);
 
-/// Enabled checkbox colors used when the active palette has a light surface.
 pub const CHECKBOX_ENABLED_LIGHT: Color32 = Color32::from_rgb(36, 145, 36);
 pub const CHECKBOX_ENABLED_HOVER_LIGHT: Color32 = Color32::from_rgb(45, 165, 45);
 pub const CHECKBOX_ENABLED_ACTIVE_LIGHT: Color32 = Color32::from_rgb(30, 125, 30);
 pub const CHECKBOX_ENABLED_BORDER_LIGHT: Color32 = Color32::from_rgb(24, 100, 24);
 pub const CHECKBOX_ENABLED_LABEL_LIGHT: Color32 = Color32::from_rgb(0, 105, 0);
 
-/// Chart series for a single benchmark, indexed by metric slot.
 pub const BENCHMARK_SERIES: [Color32; 6] = [
     Color32::from_rgb(86, 156, 214),
     Color32::from_rgb(232, 145, 56),

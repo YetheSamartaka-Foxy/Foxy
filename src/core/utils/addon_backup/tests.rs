@@ -1,8 +1,6 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
-// ── sanitize_backup_component ───────────────────────────────────────
-
 #[test]
 fn sanitize_normal_name() {
     assert_eq!(helpers::sanitize_backup_component("@ace"), "@ace");
@@ -44,8 +42,6 @@ fn sanitize_control_chars() {
     );
 }
 
-// ── backup_folder_name ──────────────────────────────────────────────
-
 #[test]
 fn backup_folder_name_format() {
     let name = helpers::backup_folder_name("@ace", "abc123");
@@ -57,8 +53,6 @@ fn backup_folder_name_trims_hash() {
     let name = helpers::backup_folder_name("mod", "  hash  ");
     assert_eq!(name, "HASH_mod");
 }
-
-// ── parse_backup_folder_name ────────────────────────────────────────
 
 #[test]
 fn parse_valid_folder_name() {
@@ -90,8 +84,6 @@ fn parse_folder_name_multiple_underscores() {
     );
 }
 
-// ── addon_directory_name ────────────────────────────────────────────
-
 #[test]
 fn addon_directory_name_normal() {
     let name = helpers::addon_directory_name(Path::new("/mods/@ace")).unwrap();
@@ -103,32 +95,26 @@ fn addon_directory_name_root_fails() {
     assert!(helpers::addon_directory_name(Path::new("/")).is_err());
 }
 
-// ── backup_addon (full round-trip) ──────────────────────────────────
-
 #[test]
 fn backup_and_list_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let backup_root = dir.path().join("backups");
     let addon_path = dir.path().join("@test_mod");
 
-    // Create a fake addon
     std::fs::create_dir(&addon_path).unwrap();
     std::fs::write(addon_path.join("config.cpp"), b"class CfgMods {};").unwrap();
     std::fs::write(addon_path.join("data.pbo"), b"pbo content").unwrap();
 
-    // Back it up
     let record = backup_addon(&backup_root, &addon_path).unwrap();
     assert_eq!(record.addon_name, "@test_mod");
     assert!(!record.content_hash.is_empty());
     assert!(record.path.exists());
     assert!(record.size_bytes > 0);
 
-    // List backups
     let backups = list_addon_backups(&backup_root, "@test_mod").unwrap();
     assert_eq!(backups.len(), 1);
     assert_eq!(backups[0].addon_name, "@test_mod");
 
-    // Idempotent: backing up the same content again reuses existing backup
     let record2 = backup_addon(&backup_root, &addon_path).unwrap();
     assert_eq!(record.content_hash, record2.content_hash);
     let backups2 = list_addon_backups(&backup_root, "@test_mod").unwrap();
@@ -325,30 +311,23 @@ fn backup_addon_non_directory_fails() {
     assert!(result.is_err());
 }
 
-// ── restore_addon_backup ────────────────────────────────────────────
-
 #[test]
 fn restore_overwrites_existing_addon() {
     let dir = tempfile::tempdir().unwrap();
     let backup_root = dir.path().join("backups");
     let addon_path = dir.path().join("@restore_test");
 
-    // Create and backup v1
     std::fs::create_dir(&addon_path).unwrap();
     std::fs::write(addon_path.join("file.txt"), b"version1").unwrap();
     let backup_v1 = backup_addon(&backup_root, &addon_path).unwrap();
 
-    // Modify addon to v2
     std::fs::write(addon_path.join("file.txt"), b"version2_longer").unwrap();
 
-    // Restore v1
     restore_addon_backup(&backup_v1, &addon_path).unwrap();
 
     let content = std::fs::read_to_string(addon_path.join("file.txt")).unwrap();
     assert_eq!(content, "version1");
 }
-
-// ── delete_addon_backup ─────────────────────────────────────────────
 
 #[test]
 fn delete_backup_removes_directory() {
@@ -380,8 +359,6 @@ fn delete_nonexistent_backup_is_ok() {
     assert!(delete_addon_backup(&record).is_ok());
 }
 
-// ── list_all_addon_backups ──────────────────────────────────────────
-
 #[test]
 fn list_all_backups_empty_root() {
     let dir = tempfile::tempdir().unwrap();
@@ -398,15 +375,13 @@ fn list_all_backups_missing_root() {
 #[test]
 fn list_all_backups_ignores_non_backup_dirs() {
     let dir = tempfile::tempdir().unwrap();
-    // Directory without underscore won't match parse_backup_folder_name
+
     std::fs::create_dir(dir.path().join("nounderscore")).unwrap();
-    // Files (not dirs) are also ignored
+
     std::fs::write(dir.path().join("HASH_addon"), b"not a dir").unwrap();
     let records = list_all_addon_backups(dir.path()).unwrap();
     assert!(records.is_empty());
 }
-
-// ── cleanup_addon_backups ───────────────────────────────────────────
 
 #[test]
 fn cleanup_keep_latest_per_addon() {
@@ -414,7 +389,6 @@ fn cleanup_keep_latest_per_addon() {
     let backup_root = dir.path().join("backups");
     let addon_path = dir.path().join("@cleanup_test");
 
-    // Create 3 backups with different content
     for i in 0..3 {
         std::fs::create_dir_all(&addon_path).unwrap();
         std::fs::write(
@@ -440,16 +414,14 @@ fn cleanup_keep_latest_per_addon() {
     assert_eq!(after.len(), 1);
 }
 
-// ── directory_total_size ────────────────────────────────────────────
-
 #[test]
 fn directory_total_size_sums_files() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), b"hello").unwrap(); // 5 bytes
-    std::fs::write(dir.path().join("b.txt"), b"world!").unwrap(); // 6 bytes
+    std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+    std::fs::write(dir.path().join("b.txt"), b"world!").unwrap();
     let sub = dir.path().join("sub");
     std::fs::create_dir(&sub).unwrap();
-    std::fs::write(sub.join("c.txt"), b"!!").unwrap(); // 2 bytes
+    std::fs::write(sub.join("c.txt"), b"!!").unwrap();
     let size = helpers::directory_total_size(dir.path()).unwrap();
     assert_eq!(size, 13);
 }
@@ -462,8 +434,6 @@ fn directory_total_size_single_file() {
     let size = helpers::directory_total_size(&file).unwrap();
     assert_eq!(size, 5);
 }
-
-// ── copy_directory_recursive ────────────────────────────────────────
 
 #[test]
 fn copy_directory_recursive_preserves_structure() {

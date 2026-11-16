@@ -1,27 +1,15 @@
-//! Platform-specific random-access file I/O helpers.
-//!
-//! These are used by the download transfer layer, range scheduler, and delta
-//! patch transfer to write (and read) at arbitrary byte offsets without seeking,
-//! enabling safe concurrent access from multiple tasks sharing an `Arc<File>`.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static BYTES_WRITTEN: AtomicU64 = AtomicU64::new(0);
 
-/// Bytes written to download, patch and staging files since the process
-/// started: every [`write_at`] plus what streamed writers report through
-/// [`note_written`]. The download telemetry reads its disk-write rate here, so
-/// the rate follows the writes as they happen.
 pub(crate) fn bytes_written_total() -> u64 {
     BYTES_WRITTEN.load(Ordering::Relaxed)
 }
 
-/// Count bytes a writer that does not go through [`write_at`] has written.
 pub(crate) fn note_written(bytes: u64) {
     BYTES_WRITTEN.fetch_add(bytes, Ordering::Relaxed);
 }
 
-/// Write `buf` at `offset` in `file`, retrying partial writes on Windows.
 #[cfg(unix)]
 pub(crate) fn write_at(file: &std::fs::File, offset: u64, buf: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
@@ -54,7 +42,6 @@ pub(crate) fn write_at(file: &std::fs::File, offset: u64, buf: &[u8]) -> std::io
     Ok(())
 }
 
-/// Read exactly `buf.len()` bytes from `offset` in `file`.
 #[cfg(unix)]
 pub(crate) fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
@@ -85,25 +72,16 @@ pub(crate) fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> std:
     Ok(())
 }
 
-/// Maximum retry attempts for file removal when blocked by a transient lock.
 const REMOVE_RETRY_ATTEMPTS: u32 = 3;
 
-/// Base delay between removal retries (doubles each attempt).
 const REMOVE_RETRY_BASE_MS: u64 = 100;
 
-/// Check whether an I/O error is a transient file-lock that may clear on retry.
-///
-/// On Windows this covers `PermissionDenied` (OS error 5 - "Access is denied")
-/// which commonly occurs when OneDrive, antivirus, or indexing services hold a
-/// brief lock on a file.
+/// Windows access-denied errors can be transient locks held by antivirus, indexing or cloud-sync services.
 fn is_transient_lock_error(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::PermissionDenied
 }
 
-/// Remove a file, retrying on transient `PermissionDenied` errors (async).
-///
-/// Returns `Ok(())` if the file was removed or did not exist.
-/// After exhausting retries the last error is returned.
+/// Missing files count as removed; exhausted transient-error retries return the final failure.
 pub(crate) async fn retry_remove_file(path: &std::path::Path) -> std::io::Result<()> {
     let profiled = crate::core::utils::profiling::FsTimer::start();
     let result = retry_remove_file_inner(path).await;
@@ -130,14 +108,11 @@ async fn retry_remove_file_inner(path: &std::path::Path) -> std::io::Result<()> 
             Err(err) => return Err(err),
         }
     }
-    // Unreachable, but satisfy the compiler
+
     tokio::fs::remove_file(path).await
 }
 
-/// Remove a file, retrying on transient `PermissionDenied` errors (sync).
-///
-/// Returns `Ok(())` if the file was removed or did not exist.
-/// After exhausting retries the last error is returned.
+/// Missing files count as removed; exhausted transient-error retries return the final failure.
 #[cfg(test)]
 pub(crate) fn retry_remove_file_sync(path: &std::path::Path) -> std::io::Result<()> {
     let profiled = crate::core::utils::profiling::FsTimer::start();
@@ -166,7 +141,7 @@ fn retry_remove_file_sync_inner(path: &std::path::Path) -> std::io::Result<()> {
             Err(err) => return Err(err),
         }
     }
-    // Unreachable, but satisfy the compiler
+
     std::fs::remove_file(path)
 }
 

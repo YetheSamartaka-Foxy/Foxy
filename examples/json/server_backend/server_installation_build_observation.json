@@ -1,0 +1,19 @@
+{
+  "executable_version": {
+    "major": 2,
+    "minor": 22,
+    "patch": 0,
+    "build": 150000
+  },
+  "executable_version_source": "windows_product_version_resource",
+  "steam_manifest": {
+    "app_id": 233780,
+    "build_id": "246810",
+    "branch": "public",
+    "branch_conflict": false
+  },
+  "tested_engine_layout": null,
+  "vendor_authenticity_verified": false,
+  "package_completeness_verified": false,
+  "engine_layout_verified": false
+}

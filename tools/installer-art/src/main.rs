@@ -80,7 +80,6 @@ fn lerp(from: Rgb<u8>, to: Rgb<u8>, amount: f32) -> Rgb<u8> {
     }))
 }
 
-/// Brightest at `center`, falling to nothing `radius` pixels away.
 fn glow_amount(x: u32, y: u32, center: (f32, f32), radius: f32, strength: f32) -> f32 {
     let distance = (x as f32 - center.0).hypot(y as f32 - center.1);
     (1.0 - distance / radius).max(0.0).powi(2) * strength

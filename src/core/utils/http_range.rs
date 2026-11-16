@@ -1,7 +1,5 @@
 use anyhow::{Context, anyhow};
 
-/// Parse the byte range from a `Content-Range: bytes start-end/total` header value.
-/// Returns `(start, end)` on success.
 pub(crate) fn parse_content_range(content_range: &str) -> Option<(u64, u64)> {
     let trimmed = content_range.trim();
     let range_part = trimmed.strip_prefix("bytes ")?;
@@ -12,7 +10,6 @@ pub(crate) fn parse_content_range(content_range: &str) -> Option<(u64, u64)> {
     Some((start, end))
 }
 
-/// Validate that a `Content-Range` response header matches the requested byte range.
 pub(crate) fn validate_content_range_header(
     response: &reqwest::Response,
     requested_start: u64,

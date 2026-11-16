@@ -26,9 +26,7 @@ use super::transfer::{
 };
 use super::{LARGE_FILE_THRESHOLD, MAX_FILE_RETRIES};
 
-/// Files at or below this size are classified as "tiny" and skip patch plan
-/// checks and per-file progress DB writes, reducing overhead for the many
-/// small metadata/signature files typical in mod repositories.
+/// Skip patch checks and per-file DB progress for tiny files to reduce fixed overhead.
 const TINY_FILE_THRESHOLD: usize = 64 * 1024;
 const MOD_PROGRESS_TICK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -105,8 +103,7 @@ pub(super) struct ModDownloadBatch {
     pub(super) mod_name: String,
     pub(super) files: Vec<DownloadTargetFile>,
     pub(super) total_size: usize,
-    /// File IDs that have a delta patch plan available.
-    /// Files not in this set skip `try_patch_first` entirely.
+
     pub(super) patchable_file_ids: HashSet<u64>,
 }
 
@@ -117,8 +114,7 @@ pub(crate) struct DownloadModCompletion {
     pub(crate) file_ids: HashSet<u64>,
     pub(crate) bytes: u64,
     pub(crate) success: bool,
-    /// Part checksums a delta-patch apply verified while writing the file, so
-    /// the hash stage can record them instead of re-reading the output.
+    /// Reuse apply-time part checksums instead of rereading output bytes.
     pub(crate) patched_segments: Option<PatchedFileSegments>,
 }
 
@@ -176,8 +172,7 @@ async fn download_single_file(
         .fetch_add(1, Ordering::Relaxed);
     if is_large {
         scheduler.active_large_files.fetch_add(1, Ordering::Relaxed);
-        // Saturating decrement - avoids wrapping to usize::MAX on retries
-        // (a retried file has already been dequeued on the first attempt).
+        // Saturate retries because the file was dequeued on its first attempt.
         let _ =
             scheduler
                 .queued_large_files
@@ -209,9 +204,7 @@ async fn download_single_file(
                 rate_limiter.clone(),
                 metrics.clone(),
                 scheduler.patch_apply_permits.clone(),
-                // The global permits bound the total; the per-file cap is the
-                // ceiling so the last blob in flight can take the permits the
-                // finished files freed instead of the fair share at dispatch.
+                // The per-file ceiling lets remaining files use permits freed by completed files.
                 PatchRequestBudget {
                     range_permits: scheduler.range_permits.clone(),
                     per_file_requests: scheduler.limits.max_ranges_per_file,
@@ -346,7 +339,7 @@ async fn download_single_file(
             });
 
             let is_tiny = file.size <= TINY_FILE_THRESHOLD;
-            // Tiny files use debug-level logging to reduce log noise
+
             if is_tiny {
                 debug!(
                     "Tiny file download completed: file_id={} mod_id={} size={} elapsed={:.2?} method={}",
@@ -486,8 +479,6 @@ pub(super) async fn process_mod_batch(
     let progress_update_lock = Arc::new(Mutex::new(()));
     let mod_name_arc: Arc<str> = Arc::from(batch.mod_name.clone());
 
-    // Extract lightweight progress entries (just size + download counter)
-    // instead of cloning the entire DownloadTargetFile vec.
     let progress_entries: Arc<Vec<ModProgressEntry>> = Arc::new(
         batch
             .files
@@ -667,8 +658,7 @@ pub(super) async fn process_mod_batch(
                 small_queue.push_back(file);
             }
         }
-        // Longest-processing-time first: the biggest file claims a permit
-        // earliest, so it is not left transferring alone at the end of the run.
+        // Start large files early so they do not become the lone tail transfer.
         large_files.sort_by_key(|file| std::cmp::Reverse(file.size));
         let mut large_queue: VecDeque<DownloadTargetFile> = VecDeque::from(large_files);
 
@@ -735,7 +725,6 @@ pub(super) async fn process_mod_batch(
         let large_sem = large_file_permits.clone();
         let small_sem = small_file_permits.clone();
 
-        // Kick off initial batch up to slot budget
         while running_total < slot_budget && !cancellation_requested(&cancel_rx) {
             if let Some(file) = large_queue.pop_front() {
                 let patchable = batch.patchable_file_ids.contains(&file.file_id);
@@ -984,7 +973,7 @@ pub(super) async fn process_mod_batch(
                     }
                 }
             }
-            // Reset per-file cycle counters so retried downloads don't double-count bytes
+
             for file in &failed {
                 file.download_cycle.store(0, Ordering::SeqCst);
             }

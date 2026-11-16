@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "instance_id": "server_00000000000000000000000000000001",
+  "revision": 3,
+  "jobs": [
+    {
+      "id": "job_0000000000000001",
+      "revision": 2,
+      "revised_unix_ms": 1795000000000,
+      "definition": {
+        "name": "Nightly restart",
+        "enabled": true,
+        "action": "restart",
+        "schedule": {
+          "Recurring": {
+            "minutes_of_day": 270,
+            "weekdays": 127
+          }
+        },
+        "clock": "local",
+        "policy": {
+          "grace_minutes": 10,
+          "player_policy": "require_empty",
+          "max_defer_minutes": 30,
+          "max_attempts": 2,
+          "retry_delay_seconds": 60,
+          "stop_timeout_seconds": 60
+        }
+      }
+    },
+    {
+      "id": "job_0000000000000002",
+      "revision": 1,
+      "revised_unix_ms": 1795000600000,
+      "definition": {
+        "name": "Patch day restart",
+        "enabled": true,
+        "action": "restart",
+        "schedule": {
+          "OnceAt": {
+            "unix_ms": 1795100400000
+          }
+        },
+        "clock": "utc",
+        "policy": {
+          "grace_minutes": 0,
+          "player_policy": "ignore",
+          "max_defer_minutes": 0,
+          "max_attempts": 1,
+          "retry_delay_seconds": 60,
+          "stop_timeout_seconds": 120
+        }
+      }
+    }
+  ]
+}

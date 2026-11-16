@@ -10,6 +10,7 @@ pub(super) fn validate_links(repo: &Path, diagnostics: &mut Vec<Diagnostic>) {
         ".claude/skills",
         ".codex/agents",
         ".claude/agents",
+        ".cursor/agents",
     ] {
         collect_markdown_files(&repo.join(directory), &mut files);
     }
@@ -54,6 +55,7 @@ pub(super) fn validate_dashes(repo: &Path, diagnostics: &mut Vec<Diagnostic>) {
         ".claude/skills",
         ".codex/agents",
         ".claude/agents",
+        ".cursor/agents",
     ] {
         collect_controlled_files(&repo.join(directory), &mut files);
     }

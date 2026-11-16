@@ -34,9 +34,7 @@ pub struct LogEntry {
     pub extra: serde_json::Map<String, Value>,
 }
 
-/// Save the raw envelope when `FOXY_TESTKIT_DRIVER_CAPTURE` names a directory,
-/// so `tests/driver-corpus/` can be refreshed from real runs rather than from
-/// the kit's own idea of the protocol.
+/// Capture real envelopes for independent protocol fixtures; never generate expected wire data from the testkit's own model.
 fn capture(command: &str, envelope: &Value) {
     let Some(directory) = std::env::var_os("FOXY_TESTKIT_DRIVER_CAPTURE") else {
         return;

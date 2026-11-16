@@ -1,57 +1,48 @@
-//! Cross-process exclusive claim on a game space's database.
-//!
-//! Turso's manual states plainly that it has "no multi-process access": two
-//! processes opening the same file is undefined behavior, not a supported
-//! concurrent-writer setup the way stock SQLite's WAL is. Foxy ships one binary
-//! that runs as both a GUI and a CLI against the same data root, and nothing
-//! stopped a second launch (or a CLI command run while the window is open) from
-//! opening `database.db` alongside the first. The failure mode is the worst
-//! kind: no error, just a database that quietly stops agreeing with itself.
-//!
-//! The claim is an advisory whole-file lock on `database.lock` held for the
-//! life of the process. The OS drops it when the process exits, crash included,
-//! so there is no stale-lock state to repair. The owning PID is kept in an
-//! unlocked `database.owner` sidecar purely so the "already running" message can
-//! name the process; on Windows the lock itself blocks reads, so the PID cannot
-//! live in the locked file.
+//! Turso supports no multi-process database access, so this lock is held for
+//! the process lifetime; the PID sidecar stays readable while the lock is held.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use log::{error, info, warn};
 
 use crate::core::utils::format::sanitize_log_path;
 
-/// How long to keep retrying a contended lock before giving up.
-///
-/// Not just politeness: the Windows installer runs with `/CLOSEAPPLICATIONS` and
-/// can start the new Foxy while the old one is still tearing down, so a fresh
-/// launch must be able to wait out the handoff instead of refusing to start.
+/// Allow the new process to wait briefly while the installer closes the old one.
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 const ACQUIRE_POLL: Duration = Duration::from_millis(100);
 
-/// Result of trying to claim a game space's database.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LockOutcome {
-    /// This process now owns the database.
     Acquired,
-    /// Another Foxy process owns it. Carries the owner's PID when the sidecar
-    /// could be read.
+
     Busy { holder_pid: Option<u32> },
-    /// The lock could not be evaluated (permissions, read-only volume, an
-    /// filesystem with no lock support). Never treated as contention - refusing
-    /// to start over an unreadable lock file would be worse than the risk it
-    /// guards against.
+
     Unavailable(String),
 }
 
-/// The lock currently held by this process, with the database path it covers.
-/// Dropping the `File` releases the OS lock, so a game-space switch releases the
-/// previous space by replacing this slot.
-static HELD: Mutex<Option<(PathBuf, File)>> = Mutex::new(None);
+static HELD: Mutex<Option<(PathBuf, Arc<File>)>> = Mutex::new(None);
+
+pub(crate) struct HeldClaimPin {
+    _file: Arc<File>,
+}
+
+pub(crate) fn pin_held_claim(db_path: &Path) -> Result<HeldClaimPin, String> {
+    let db_path = std::path::absolute(db_path)
+        .map_err(|_| "Cannot resolve the database claim path".to_string())?;
+    let held = HELD
+        .lock()
+        .map_err(|_| "Database ownership slot is unavailable".to_string())?;
+    let Some((_, file)) = held.as_ref().filter(|(path, _)| path == &db_path) else {
+        return Err("An exclusive claim on the selected game space is required".into());
+    };
+    Ok(HeldClaimPin {
+        _file: Arc::clone(file),
+    })
+}
 
 /// A target database claim prepared before the active database is closed.
 /// Dropping the value releases the target without changing `HELD`.
@@ -66,6 +57,14 @@ impl ReservedClaim {
         let Ok(mut held) = HELD.lock() else {
             return LockOutcome::Unavailable("lock slot poisoned".to_string());
         };
+        if held
+            .as_ref()
+            .is_some_and(|(_, file)| Arc::strong_count(file) > 1)
+        {
+            return LockOutcome::Unavailable(
+                "A running operation still pins the current database claim".into(),
+            );
+        }
         if held
             .as_ref()
             .is_some_and(|(held_path, _)| held_path != &self.db_path)
@@ -88,16 +87,17 @@ impl ReservedClaim {
             "Claimed exclusive access to database {}",
             sanitize_log_path(&self.db_path)
         );
-        *held = Some((self.db_path, self.file));
+        *held = Some((self.db_path, Arc::new(self.file)));
         LockOutcome::Acquired
     }
 }
 
-/// Reserve `db_path` without releasing or replacing the current claim.
-///
-/// The returned file keeps the target exclusively locked until it is activated
-/// or dropped. Owner metadata is published only when activation succeeds.
+/// Keep the target locked until activation; publish owner metadata only after activation succeeds.
 pub(crate) fn reserve(db_path: &Path) -> Result<ReservedClaim, LockOutcome> {
+    let db_path = std::path::absolute(db_path).map_err(|_| {
+        LockOutcome::Unavailable("Cannot resolve the database claim path".to_string())
+    })?;
+    let db_path = db_path.as_path();
     let held = HELD
         .lock()
         .map_err(|_| LockOutcome::Unavailable("lock slot poisoned".to_string()))?;
@@ -200,18 +200,23 @@ fn read_holder_pid(db_path: &Path) -> Option<u32> {
     contents.trim().parse().ok()
 }
 
-/// Claim `db_path` for this process, waiting out a brief handoff window.
-///
-/// Idempotent: calling it again for a path this process already holds returns
-/// [`LockOutcome::Acquired`] without touching the filesystem. Claiming a
-/// different path releases the previous claim, which is what a game-space
-/// switch wants.
+/// A different database path requires a successful close of the current database first.
 pub fn acquire(db_path: &Path) -> LockOutcome {
+    let db_path = match std::path::absolute(db_path) {
+        Ok(path) => path,
+        Err(_) => {
+            return LockOutcome::Unavailable("Cannot resolve the database claim path".to_string());
+        }
+    };
+    let db_path = db_path.as_path();
     let Ok(mut held) = HELD.lock() else {
         return LockOutcome::Unavailable("lock slot poisoned".to_string());
     };
     if held.as_ref().is_some_and(|(path, _)| path == db_path) {
         return LockOutcome::Acquired;
+    }
+    if held.is_some() {
+        return LockOutcome::Unavailable("Another game space is still claimed by this process; close its database before switching".to_string());
     }
 
     let lock_path = lock_path_for(db_path);
@@ -276,8 +281,6 @@ pub fn acquire(db_path: &Path) -> LockOutcome {
         }
     }
 
-    // Safe to publish the PID now: nobody else can hold the lock, and the
-    // sidecar is only ever read while a live process owns it.
     let owner_path = owner_path_for(db_path);
     if let Err(err) = File::create(&owner_path)
         .and_then(|mut owner| write!(owner, "{}", std::process::id()).and_then(|()| owner.flush()))
@@ -293,37 +296,76 @@ pub fn acquire(db_path: &Path) -> LockOutcome {
         "Claimed exclusive access to database {}",
         sanitize_log_path(db_path)
     );
-    *held = Some((db_path.to_path_buf(), file));
+    *held = Some((db_path.to_path_buf(), Arc::new(file)));
     LockOutcome::Acquired
 }
 
-/// Claim the active game space's database.
 pub fn acquire_for_active_space() -> LockOutcome {
     acquire(&crate::core::tasks::db_turso::database_file_path())
 }
 
-/// Whether this process holds the claim on `db_path`.
 pub fn holds(db_path: &Path) -> bool {
+    let Ok(db_path) = std::path::absolute(db_path) else {
+        return false;
+    };
     HELD.lock()
         .ok()
-        .is_some_and(|held| held.as_ref().is_some_and(|(path, _)| path == db_path))
+        .is_some_and(|held| held.as_ref().is_some_and(|(path, _)| path == &db_path))
 }
 
-/// Release whatever claim this process holds, if any. Used when closing a game
-/// space's database so another process (or another space) can take it.
-pub fn release() {
-    if let Ok(mut held) = HELD.lock()
-        && let Some((path, _)) = held.take()
+pub(crate) fn held_database_path() -> Option<PathBuf> {
+    HELD.lock().ok()?.as_ref().map(|(path, _)| path.clone())
+}
+
+pub(crate) fn with_held_claim<T>(
+    db_path: &Path,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let db_path = std::path::absolute(db_path)
+        .map_err(|_| "Cannot resolve the database claim path".to_string())?;
+    let held = HELD
+        .lock()
+        .map_err(|_| "Database ownership slot is unavailable".to_string())?;
+    if held.as_ref().is_none_or(|(path, _)| path != &db_path) {
+        return Err("An exclusive claim on the selected game space is required".to_string());
+    }
+    // Keep release/space switching blocked until the synchronous write finishes.
+    let result = operation();
+    drop(held);
+    result
+}
+
+/// Release only the claim whose engine has been closed.
+pub(crate) fn release_for(db_path: &Path) -> Result<(), String> {
+    let db_path = std::path::absolute(db_path)
+        .map_err(|_| "Cannot resolve the database claim path".to_string())?;
+    let mut held = HELD
+        .lock()
+        .map_err(|_| "Database ownership slot is unavailable".to_string())?;
+    if held.as_ref().is_some_and(|(path, _)| path != &db_path) {
+        return Err("Cannot release a different game space's database claim".to_string());
+    }
+    if held
+        .as_ref()
+        .is_some_and(|(_, file)| Arc::strong_count(file) > 1)
     {
-        info!(
-            "Released exclusive access to database {}",
-            sanitize_log_path(&path)
-        );
+        return Err("A running operation still pins the database claim".into());
+    }
+    if let Some((path, file)) = held.take() {
         let _ = std::fs::remove_file(owner_path_for(&path));
+        drop(file);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn release() {
+    let path = HELD.lock().unwrap().as_ref().map(|(path, _)| path.clone());
+    if let Some(path) = path {
+        release_for(&path).unwrap();
     }
 }
 
-/// One-line lock state for the diagnostics manifest.
 pub fn diagnostics_state() -> String {
     let db_path = crate::core::tasks::db_turso::database_file_path();
     if holds(&db_path) {
@@ -339,8 +381,6 @@ pub fn diagnostics_state() -> String {
 mod tests {
     use super::*;
 
-    /// `HELD` is process-wide, so these tests cannot run concurrently with each
-    /// other. Poisoning is ignored: a failing test must not cascade.
     static SERIALIZE: Mutex<()> = Mutex::new(());
 
     fn serialized() -> std::sync::MutexGuard<'static, ()> {
@@ -382,24 +422,145 @@ mod tests {
         assert!(!holds(&db));
     }
 
-    /// Switching game spaces claims the new space and drops the old one.
     #[test]
-    fn claiming_a_second_path_releases_the_first() {
+    fn claiming_a_second_path_keeps_the_first_until_explicit_release() {
         let _guard = serialized();
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("a").join("database.db");
         let second = dir.path().join("b").join("database.db");
 
         assert_eq!(acquire(&first), LockOutcome::Acquired);
+        assert!(matches!(acquire(&second), LockOutcome::Unavailable(_)));
+        assert!(holds(&first));
+        assert!(!holds(&second));
+        assert!(!second.parent().unwrap().exists());
+        release();
         assert_eq!(acquire(&second), LockOutcome::Acquired);
-
-        assert!(!holds(&first));
-        assert!(holds(&second));
         release();
     }
 
-    /// The owning PID is published where a contending process can read it even
-    /// though the lock file itself is unreadable while locked.
+    #[test]
+    fn synchronous_owner_work_pins_the_claim_until_completion() {
+        let _guard = serialized();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        let other = dir.path().join("other/database.db");
+        assert!(with_held_claim(&path, || Ok(())).is_err());
+        assert_eq!(acquire(&path), LockOutcome::Acquired);
+        assert!(with_held_claim(&other, || Ok(())).is_err());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let mut releasing = None;
+        with_held_claim(&path, || {
+            assert!(matches!(
+                HELD.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            let path = path.clone();
+            releasing = Some(std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                release_for(&path).unwrap();
+                finished_tx.send(()).unwrap();
+            }));
+            started_rx.recv().unwrap();
+            assert!(finished_rx.try_recv().is_err());
+            Ok(())
+        })
+        .unwrap();
+        releasing.unwrap().join().unwrap();
+        finished_rx.recv().unwrap();
+        assert!(!holds(&path));
+    }
+
+    #[test]
+    fn long_lived_pins_preserve_ownership_without_blocking_readers() {
+        let _guard = serialized();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("database.db");
+        let other = dir.path().join("other/database.db");
+        assert!(pin_held_claim(&path).is_err());
+        assert_eq!(acquire(&path), LockOutcome::Acquired);
+        assert!(pin_held_claim(&other).is_err());
+        let pin = pin_held_claim(&path).unwrap();
+        assert!(HELD.try_lock().is_ok());
+        assert!(holds(&path));
+        assert_eq!(held_database_path(), Some(path.clone()));
+        assert!(release_for(&path).is_err());
+        assert!(matches!(acquire(&other), LockOutcome::Unavailable(_)));
+        let replacement = reserve(&path).unwrap();
+        assert!(matches!(
+            replacement.activate(),
+            LockOutcome::Unavailable(_)
+        ));
+        let probe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path_for(&path))
+            .unwrap();
+        assert!(matches!(probe.try_lock(), Err(TryLockError::WouldBlock)));
+        drop(probe);
+        with_held_claim(&path, || Ok(())).unwrap();
+        drop(pin);
+        release_for(&path).unwrap();
+        assert!(!holds(&path));
+    }
+
+    #[test]
+    fn unavailable_lock_does_not_claim_or_create_a_database() {
+        let _guard = serialized();
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("file");
+        std::fs::write(&parent, b"unchanged").unwrap();
+        let db = parent.join("database.db");
+        assert!(matches!(acquire(&db), LockOutcome::Unavailable(_)));
+        assert!(!holds(&db));
+        assert!(!db.exists());
+        assert_eq!(std::fs::read(&parent).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn an_independent_process_is_refused_until_release() {
+        let _guard = serialized();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("database.db");
+        assert_eq!(acquire(&path), LockOutcome::Acquired);
+        let run_probe = |busy: bool| {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "core::tasks::db_process_lock::tests::independent_process_lock_probe",
+                    "--ignored",
+                ])
+                .env("FOXY_TEST_DATABASE_LOCK_PATH", &path)
+                .env("FOXY_TEST_LOCK_EXPECT_BUSY", if busy { "1" } else { "0" })
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "lock probe failed: {}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        };
+        run_probe(true);
+        assert!(holds(&path));
+        release();
+        run_probe(false);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    #[ignore = "Invoked only by the independent-process ownership test"]
+    fn independent_process_lock_probe() {
+        let path = PathBuf::from(std::env::var_os("FOXY_TEST_DATABASE_LOCK_PATH").unwrap());
+        if std::env::var("FOXY_TEST_LOCK_EXPECT_BUSY").unwrap() == "1" {
+            assert!(matches!(acquire(&path), LockOutcome::Busy { .. }));
+        } else {
+            assert_eq!(acquire(&path), LockOutcome::Acquired);
+            release();
+        }
+    }
+
+    /// Keep owner PID readable from a sidecar because Windows locks the lock file against reads.
     #[test]
     fn owner_sidecar_names_the_holding_process() {
         let _guard = serialized();
@@ -477,6 +638,21 @@ mod tests {
         assert!(holds(&db_path));
         assert_lock_busy(&db_path);
         release();
+        assert_lock_free(&db_path);
+    }
+
+    #[test]
+    fn reservation_uses_the_same_normalized_identity_as_an_active_claim() {
+        let _guard = serialized();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("database.db");
+        let alias = dir.path().join(".").join("database.db");
+
+        assert_eq!(acquire(&db_path), LockOutcome::Acquired);
+        let reservation = reserve(&alias).unwrap();
+        assert_eq!(reservation.activate(), LockOutcome::Acquired);
+        assert!(holds(&db_path));
+        release_for(&alias).unwrap();
         assert_lock_free(&db_path);
     }
 

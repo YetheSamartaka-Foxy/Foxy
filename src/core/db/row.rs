@@ -1,16 +1,8 @@
-//! Storage-neutral result row for the DB seam (plan.md §5.1).
-//!
-//! A [`DbRow`] is what `query_all`/`query_one` hand back. It exposes
-//! column-name accessors (`get_i64`, `get_string`, …) over a materialized Turso
-//! row (parallel column-name / value vectors). Call sites read columns by name
-//! via `row.get_string("col")` rather than positional indexing.
-
 use std::sync::Arc;
 
 use super::DbErr;
 use super::value::DbValue;
 
-/// One materialized result row: parallel column-name / value vectors.
 pub(crate) struct DbRow {
     pub(crate) columns: Arc<Vec<String>>,
     pub(crate) values: Vec<DbValue>,
@@ -79,8 +71,6 @@ impl DbRow {
         }
     }
 
-    /// Read an INTEGER column as a boolean (`!= 0`), matching SQLite's storage of
-    /// booleans as integers.
     pub(crate) fn get_bool(&self, col: &str) -> Result<bool, DbErr> {
         Ok(self.get_i64(col)? != 0)
     }

@@ -6,18 +6,16 @@ use super::triangles::{Tones, TriangleGrid};
 use super::{Motion, bump, noise};
 
 pub(super) const ROWS: usize = 4;
-/// Sparkles drifting up off the cells being verified.
+
 pub(super) const DUST_MOTES: usize = 8;
 const CELL: f32 = 7.0;
 const GAP: f32 = 2.0;
 pub(super) const FRONT_PULSE_SECONDS: f64 = 1.1;
 pub(super) const BEAM_PERIOD_SECONDS: f64 = 2.6;
-/// Beam half-width in columns while the amount of work is unknown.
+
 const BEAM_SPREAD_COLUMNS: f32 = 3.0;
 
-/// A defragmenter-style map of the data being verified. Cells settle column by
-/// column with a little jitter, as parallel hashing finishes work slightly out
-/// of order; the cells being read blink, and freshly verified ones glow.
+/// Show verified cells in completion order; parallel hashing can finish columns out of order.
 #[must_use = "You should put this widget in a ui with `ui.add(widget);`"]
 pub(crate) struct VerificationMap {
     progress: Option<f32>,
@@ -28,18 +26,13 @@ pub(crate) struct VerificationMap {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum CellLook {
     Pending,
-    /// Being read now; `phase` staggers the cells' flicker.
-    Reading {
-        phase: f32,
-    },
-    /// Verified; `glow` fades from 1 at the frontier to 0 behind it.
-    Verified {
-        glow: f32,
-    },
+
+    Reading { phase: f32 },
+
+    Verified { glow: f32 },
 }
 
 impl VerificationMap {
-    /// Four rows of the map's triangles; progress bars this tall match it exactly.
     pub(crate) const HEIGHT: f32 = ROWS as f32 * CELL + (ROWS - 1) as f32 * GAP;
 
     pub(crate) fn new(progress: Option<f32>, done: Color32, pending: Color32) -> Self {
@@ -90,8 +83,6 @@ impl VerificationMap {
     }
 }
 
-/// A known-progress triangle's tone: empty ahead, blinking while being read,
-/// filled behind the frontier and lit where it still glows.
 pub(super) fn known_color(
     look: CellLook,
     tones: &Tones,
@@ -121,8 +112,6 @@ impl Widget for VerificationMap {
     }
 }
 
-/// How lit a triangle being read is: each one blinks on its own phase; a
-/// still frame shows it half lit.
 fn reading_pulse(phase: f32, animating: bool, motion: Motion) -> f32 {
     if animating {
         bump((motion.cycle(FRONT_PULSE_SECONDS) + phase).fract())
@@ -131,7 +120,6 @@ fn reading_pulse(phase: f32, animating: bool, motion: Motion) -> f32 {
     }
 }
 
-/// Sparkles drifting up from the triangles around `center_x`.
 pub(super) fn paint_frontier_dust(
     ui: &Ui,
     grid: &TriangleGrid,
@@ -159,8 +147,6 @@ pub(super) fn paint_frontier_dust(
     ui.painter().add(Shape::mesh(dust));
 }
 
-/// How far toward lit a triangle is while the scanning beam sweeps work with no
-/// known end; a still frame shows a faint, even glow.
 pub(super) fn scan_light(index: usize, column: usize, columns: usize, motion: Motion) -> f32 {
     if !motion.animates() {
         return 0.12;
@@ -170,8 +156,6 @@ pub(super) fn scan_light(index: usize, column: usize, columns: usize, motion: Mo
     intensity * flicker
 }
 
-/// Progress at which cell `index` of `count` is verified. Cells run column by
-/// column, each jittered by up to about one column either way.
 fn cell_threshold(index: usize, count: usize, rows: usize) -> f32 {
     let count = count.max(1) as f32;
     let jitter = (noise(index as u32, 11) - 0.5) * rows as f32 * 1.5;
@@ -202,15 +186,11 @@ pub(super) fn cell_look(progress: f32, index: usize, count: usize, rows: usize) 
     }
 }
 
-/// How strongly the scanning beam lights `column` when `beam` is the share of
-/// its sweep across `columns` columns, run past both edges.
 fn beam_intensity(beam: f32, column: usize, columns: usize) -> f32 {
     let distance = (column as f32 - beam_center(beam, columns)) / BEAM_SPREAD_COLUMNS;
     (-distance * distance).exp()
 }
 
-/// The column the beam is over, `beam` of the way through a sweep that runs
-/// past both edges.
 pub(super) fn beam_center(beam: f32, columns: usize) -> f32 {
     let span = columns as f32 + 4.0 * BEAM_SPREAD_COLUMNS;
     beam * span - 2.0 * BEAM_SPREAD_COLUMNS

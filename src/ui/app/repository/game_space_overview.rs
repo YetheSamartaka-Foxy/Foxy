@@ -9,8 +9,6 @@ use crate::core::ts3_plugin;
 use crate::ui::app::Foxy;
 use crate::ui::views::settings::ts3_plugins::Ts3PluginRowStatus;
 
-/// One repository space (or the standalone group) as summarized for the
-/// active game space overview.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RepositoryGroupSummary {
     pub space_id: Option<String>,
@@ -26,7 +24,6 @@ pub struct TeamSpeakPluginSummary {
     pub status: Ts3PluginRowStatus,
 }
 
-/// Present only when a TeamSpeak 3 client was found on this machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TeamSpeakSummary {
     pub directory: PathBuf,
@@ -35,28 +32,24 @@ pub struct TeamSpeakSummary {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GameSpaceOverviewReport {
+    pub space_id: String,
+    pub generation: u64,
     pub total: AddonGroupStats,
     pub groups: Vec<RepositoryGroupSummary>,
     pub workspace_bytes: u64,
     pub teamspeak: Option<TeamSpeakSummary>,
 }
 
-/// Background-loaded numbers behind the game space overview panel. The DB
-/// aggregates and the workspace walk run off the UI thread; the panel shows
-/// the last report until a fresh one lands.
 #[derive(Default)]
 pub struct GameSpaceOverviewState {
     pub report: Option<GameSpaceOverviewReport>,
-    /// Benchmark whose detail is expanded inline in the Activity card.
+
     pub expanded_benchmark: Option<String>,
     rx: Option<Receiver<GameSpaceOverviewReport>>,
     loaded_key: Option<(u64, u64, u64)>,
     dirty: bool,
 }
 
-/// TeamSpeak inputs for the background load, gathered on the UI thread from
-/// the settings and the last plugin scan; `None` when the game has no TS3
-/// integration.
 struct TeamSpeakRequest {
     configured_dir: String,
     plugins: Vec<(String, PathBuf, Ts3PluginRowStatus)>,
@@ -114,9 +107,14 @@ fn spawn_overview_load(
     groups: Vec<GroupRequest>,
     workspace_dir: PathBuf,
     teamspeak: Option<TeamSpeakRequest>,
-) -> Receiver<GameSpaceOverviewReport> {
+    space_id: String,
+    generation: u64,
+) -> (
+    std::thread::JoinHandle<()>,
+    Receiver<GameSpaceOverviewReport>,
+) {
     let (tx, rx) = channel();
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let runtime = crate::core::api::background_runtime();
         let stats_for = |members: &[(String, String)]| -> AddonGroupStats {
             let Some(runtime) = runtime else {
@@ -138,6 +136,8 @@ fn spawn_overview_load(
             .flat_map(|group| group.members.iter().cloned())
             .collect();
         let report = GameSpaceOverviewReport {
+            space_id,
+            generation,
             total: stats_for(&all_members),
             groups: groups
                 .iter()
@@ -153,13 +153,10 @@ fn spawn_overview_load(
         };
         let _ = tx.send(report);
     });
-    rx
+    (handle, rx)
 }
 
 impl Foxy {
-    /// Show the active game space overview in the main panel by clearing
-    /// every sidebar selection; the panel is what renders when nothing is
-    /// selected.
     pub fn open_game_space_overview(&mut self) {
         self.repository_view_state.selected_repository = None;
         self.selected_repository_space_id = None;
@@ -171,9 +168,10 @@ impl Foxy {
         self.game_space_overview.dirty = true;
     }
 
-    /// Kick off a reload when the overview is stale and none is in flight,
-    /// then drain any finished report. Called from the overview panel.
     pub(crate) fn poll_game_space_overview(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         let key = (
             self.repositories_revision,
             self.repository_spaces_version,
@@ -183,6 +181,9 @@ impl Foxy {
             || self.game_space_overview.loaded_key != Some(key)
             || self.game_space_overview.report.is_none();
         if stale && self.game_space_overview.rx.is_none() {
+            let Some(scope) = self.capture_worker_scope() else {
+                return;
+            };
             let mut groups: Vec<GroupRequest> = self
                 .repository_spaces
                 .iter()
@@ -220,11 +221,15 @@ impl Foxy {
                     configured_dir: self.settings_view_state.teamspeak3_directory.clone(),
                     plugins: self.ts3_plugin_overview_entries(),
                 });
-            self.game_space_overview.rx = Some(spawn_overview_load(
+            let (handle, rx) = spawn_overview_load(
                 groups,
                 spaces::active_game_space_dir(),
                 teamspeak,
-            ));
+                scope.space_id().to_string(),
+                scope.generation(),
+            );
+            self.overview_worker = Some(handle);
+            self.game_space_overview.rx = Some(rx);
             self.game_space_overview.loaded_key = Some(key);
             self.game_space_overview.dirty = false;
         }
@@ -233,7 +238,9 @@ impl Foxy {
         };
         match rx.try_recv() {
             Ok(report) => {
-                self.game_space_overview.report = Some(report);
+                if self.scoped_result_applies(&report.space_id, report.generation) {
+                    self.game_space_overview.report = Some(report);
+                }
                 self.game_space_overview.rx = None;
                 self.needs_repaint = true;
             }

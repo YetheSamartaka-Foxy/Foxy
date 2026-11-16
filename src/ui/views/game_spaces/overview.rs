@@ -41,8 +41,6 @@ fn open_directory(path: &Path) -> Result<(), String> {
 }
 
 impl Foxy {
-    /// Main-panel summary of the active game space: identity, disk footprint,
-    /// repository spaces, and the most recent update and launch.
     pub(crate) fn render_game_space_overview(&mut self, ui: &mut Ui) {
         self.poll_game_space_overview();
         self.ensure_benchmarks_loaded();
@@ -221,9 +219,6 @@ impl Foxy {
         }
     }
 
-    /// The newest saved benchmarks with a jump to the Benchmarks tab and an
-    /// inline detail toggle. The store is per game space, so the list is
-    /// already scoped to this game. Returns whether the tab was requested.
     fn render_overview_recent_benchmarks(&mut self, ui: &mut Ui) -> bool {
         let text_color = self.color_text_normal();
         let dim_color = self.color_text_dim();
@@ -379,8 +374,6 @@ impl Foxy {
             });
     }
 
-    /// "Open folder" button followed by the path; an empty path renders as
-    /// "Not configured" with the button disabled.
     pub(crate) fn overview_folder_row(&self, ui: &mut Ui, path: &str, log_label: &str) {
         let dim_color = self.color_text_dim();
         ui.horizontal(|ui| {
@@ -543,8 +536,6 @@ impl Foxy {
         });
     }
 
-    /// One repository space row with its share of the game space's mods drawn
-    /// as a bar. Returns true when the row was clicked.
     fn render_repository_group_row(
         &self,
         ui: &mut Ui,

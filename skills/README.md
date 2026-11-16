@@ -12,6 +12,14 @@ The maintained workflows live here. Codex discovers thin loaders in `.agents/ski
 
 The five foundation skills above provide implementation, maintenance, translation, desktop-driver, and testkit mechanics. The following specialized workflows add domain-specific decisions and evidence requirements; load only the ones relevant to the task.
 
+## Delivery and evidence review
+
+| Skill | Use for |
+| --- | --- |
+| [foxy-milestone-execution](foxy-milestone-execution/SKILL.md) | Complete multi-step outcomes, acceptance mapping, scoped review and bounded iteration |
+| [foxy-test-oracle-review](foxy-test-oracle-review/SKILL.md) | Independent test expectations, fixture changes, meaningful failure cases and honest acceptance claims |
+| [foxy-native-acceptance](foxy-native-acceptance/SKILL.md) | Cheap preflight, fresh native process/platform evidence, diagnostics and required acceptance matrices |
+
 ## Diagnosis and reproducibility
 
 | Skill | Use for |
@@ -66,7 +74,7 @@ The five foundation skills above provide implementation, maintenance, translatio
 
 In Codex invoke `$foxy-rust-change` or select a skill from `/skills`; in Claude Code invoke `/foxy-rust-change`. The other names work the same way. Automatic selection remains enabled. Other clients can read `skills/<name>/SKILL.md` directly. If a client does not refresh discovery during the session, restart it.
 
-Use the `explorer`, `worker`, `reviewer`, and `async-safety-reviewer` roles for bounded delegation. Their definitions and shared handoff contract are documented in [agent workflows](../conventions/AGENT_WORKFLOWS.md). Model choice and permissions inherit the session.
+Use the `explorer`, `worker`, `reviewer`, and `async-safety-reviewer` roles for bounded delegation. Their definitions and shared handoff contract are documented in [agent workflows](../conventions/AGENT_WORKFLOWS.md). Codex and Claude Code inherit the session model. Cursor uses the Grok 4.7 pins in that document.
 
 After editing this setup, run from the repository root:
 

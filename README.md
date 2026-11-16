@@ -24,6 +24,7 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 - **Daily workflow tools** - Repository filtering, addon file search, editor mission scanning, mission open/duplicate/delete actions, dependency cleanup, scheduled rechecks, automatic downloads, and optional post-job close or shutdown actions are available from the app.
 - **Clear update visibility** - Download screens show per-addon progress, update summaries, toast notifications, transfer history graphs, adaptive speed limits, and grouped download/disk/hash performance metrics. Work in progress stays visible and alive: checks draw a sparkling map of triangles for the data being hashed, progress bars fill the same blinking triangles with flowing, bubbling mana, and the sidebar shows a round cluster of triangles per repository. **Reduce motion** turns the animations off.
 - **Game spaces** - Each supported game gets its own workspace with separate settings, repositories, stores, benchmarks, and database, switchable at runtime and remembered across launches. Arma 3 is the reference module; Total War: WARHAMMER III (`.pack` repositories and the `used_mods.txt` manifest) and Arma Reforger (`-addons`/`-addonsDir` launch and server join) ship alongside it, and a Generic game module covers other games with a user-supplied executable, arguments, and mods manifest, and can download and delta-update the game build itself from a repository.
+- **Application modes** - Client is the default. Server mode offers versioned Arma 3/Reforger instance drafts, adoption of native installations, configuration snapshots, verified immutable content stages, contained repository acquisition, offline deployment records and prepared generations, plus reviewed native activation, recovery and foreground lifecycle for exact tested Arma and Reforger builds. Activation copies the runtime and preserves the adopted source. Reforger addon acquisition uses an isolated vendor engine and retains exact versions and dependency provenance separately from desired latest intent. Native Steam installs and immutable update/repair successors support Arma 3 and separate Stable/Experimental Reforger apps. See the server guide for compatibility and acceptance limits.
 - **Steam Workshop management** - Import Workshop items by id, URL, collection, or share code, set the load order, freeze mods against Steam updates, compare setups with a state checksum, and exchange `.foxyshare` bundles, from the game space settings or the CLI.
 - **Safer launches and setup changes** - Launch and Join wait for active updates to settle, report a successful command handoff without claiming the game connected, and restore prepared files after a failed handoff. Extra-file activation reviews edited destinations and ordered overlaps, with a CLI dry run that lists the required choices before writing. Space switches prepare the destination before leaving the current workspace, config-pack imports recover as a complete setup, and removing a game space lets you preserve its private frozen mods and extra files.
 - **Reviewed file and backup operations** - Direct downloads preview existing-file collisions and require `--overwrite --yes` to replace them. Backup restore prefers matching repository origins, while cleanup previews its deletion set and asks separately before deleting the final recovery copy.
@@ -44,7 +45,7 @@ Current workspace status:
 ## Documentation
 
 - [User Guide](wiki/User-Guide.md) - game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
-- [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3, Arma Reforger, and custom game repositories and repository spaces with `foxy-server-backend-cli`, server launch lines and keys, and self-hosted app updates.
+- [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3, Arma Reforger, and custom game repositories and repository spaces with `foxy-server-backend-cli`, native Steam session preparation, server launch lines and keys, and self-hosted app updates.
 - The in-app Help page (**F1**) covers the same ground in every bundled language, with search across topic titles and text.
 
 ## Future roadmap
@@ -53,8 +54,7 @@ These are planned directions for Foxy. They are not listed in any particular ord
 
 - Desktop UI for the Reforger GUID addon store, extra-file, and config-pack tools that are currently CLI-only
 - Game-space-level profiles that carry a config folder and extra-file selection, for games that do not use repositories
-- Authentication support
-- Server mode - reuse Foxy's launch and addon management systems to set up, update, and manage dedicated servers
+- Steam depot and Workshop content acquisition through native providers
 - Further game modules on top of the existing game-space framework
 
 ## Installation
@@ -153,6 +153,7 @@ Behavior:
 - Terminal no-arg launch prints CLI help in release builds
 - Debug builds open UI on no-arg launch for faster iteration
 - `foxy ui` (or `foxy ui --debug-mode`) explicitly launches UI from terminal
+- `foxy ui --mode client|server` selects the UI mode for one session; `foxy settings set --app-mode client|server` saves its default. Existing CLI commands keep their behavior in either mode.
 - `foxy ui --debug-modal <app-update|db-schema-wipe|storage-check>` opens a startup modal with placeholder data for inspection (repeatable); the modal's real actions stay disabled
 - Commands work on the active game space; `foxy game use <id>` switches it for later CLI runs and the next UI start
 
@@ -173,9 +174,9 @@ Behavior:
 
 | Command | Description |
 |---------|-------------|
-| `ui` | Launch desktop UI |
+| `ui [--mode client\|server]` | Launch desktop UI with an optional session-only mode |
 | `version` | Print Foxy version, build kind, and source commit (`--version` prints the same label) |
-| `settings show\|set\|reset` | Inspect/modify settings |
+| `settings show\|set\|reset` | Inspect/modify settings; `set --app-mode client\|server` saves the UI mode |
 | `settings set --retry-failed-downloads <true\|false>` | Control automatic retries of temporary desktop update failures (enabled by default) |
 | `settings set --periodic-remote-check-enabled <true\|false>`, `--periodic-remote-check-interval-minutes <5-1440>` | Control idle repository metadata checks (enabled every 30 minutes by default) |
 | `settings set --cpu-usage-limit <10-100>`, `--cpu-usage-unlimited`, `--cpu-threads <N>`, `--cpu-threads-auto`, `--cpu-safe-limits <true\|false>` | Limit how much processor time and how many threads Foxy's work uses |
@@ -192,11 +193,76 @@ Behavior:
 | `config export\|import` | Export or import a `.foxypack` config pack |
 | `config extra-file list\|add\|remove\|set\|activate` | Managed extra files |
 | `server inspect-addons` | Inspect the addons an Arma 3 server reports |
+| `server steam status\|login\|resume\|anonymous\|forget [--game-space <id>]` | Inspect or prepare a protected native Steam session; credentials and Guard codes are never accepted as command arguments |
+| `server installation install plan\|apply <instance-id> --directory <new-folder> [--channel stable\|experimental] [--branch <name>] [--account <alias>\|--anonymous]` | Review Steam read-only, then download, verify and atomically publish a managed dedicated server into a new folder and bind it; apply needs `--yes` and the plan fingerprint |
+| `server installation check <instance-id> [--account <alias>\|--anonymous]` / `validate <instance-id>` | Compare the managed build with Steam or verify the complete local inventory offline without writes |
+| `server installation update\|repair plan\|apply <instance-id> --directory <new-folder> [--channel stable\|experimental] [--branch <name>] [--account <alias>\|--anonymous]` | Publish a verified successor on the installed channel and switch only this instance, retaining the previous installation; physical consumer gates, `--yes` and fingerprint apply |
+| `server workshop list\|plan\|acquire\|verify [<item>...] [--account <alias>\|--anonymous] [--repair]` | Review, download, verify and pin Arma 3 Workshop items as `workshop-<id>` content profiles; acquire needs `--yes` and the plan fingerprint |
+| `server headless list\|add\|set\|remove\|plan\|status\|start\|stop\|restart <instance-id> ...` | Define Arma headless clients and their start and restart policy in the draft, review their committed launch plans, show each client's owner-observed state and join evidence, and start, stop or restart all of them or one with `--client`; start, stop, restart and remove need `--yes` |
+| `server context [--game-space <id>]` | Inspect server-mode paths and support status without opening a database or changing the remembered space |
+| `server supervise --game-space <id>` | Host a foreground metadata owner with an exclusive space claim and no Turso engine |
+| `server owner --game-space <id>` | Authenticate and inspect that owner; supports the normal JSON/TOON output |
+| `server capabilities [--game-space <id>]` | Report implemented draft operations and remaining server-operation gates |
+| `server instance list\|show\|add\|clone\|rename\|replace\|validate\|remove [--game-space <id>]` | Manage versioned Arma 3/Reforger drafts; edits require revisions, removal requires `--yes`, mutations support `--dry-run` |
+| `server instance start-plan\|start\|status\|stop\|restart <id> [--game-space <id>]` | Review and control an exact activated native Arma or Reforger runtime through a foreground owner; actual effects require reviewed generations and `--yes` |
+| `server installation list\|inspect [--game-space <id>]` | Inspect existing native x64 server executables without running or changing them |
+| `server installation consumers <installation-id> [--game-space <id>]` | Inspect registered consumers and recovery intent/receipt metadata with bounded local evidence; no liveness or maintenance authority |
+| `server instance recovery-plan <id>` / `recover <id> --expected-plan-fingerprint <hash> --yes` | Review native crash cleanup evidence, then retire the exact exit-proven old-owner consumer group through an authenticated replacement owner; unknown records stay blocked |
+| `server maintenance list\|add\|set\|remove\|run\|cancel\|history <instance-id> ...` | Schedule one-time or weekly maintenance jobs that the running server owner executes; restart runs through the reviewed start plan and never starts a stopped server, update and backup stay blocked; remove, run and cancel need `--yes` |
+| `server instance adopt\|bind\|preflight [--game-space <id>]` | Adopt/bind an existing installation or review proposed isolated paths and deployment blockers |
+| `server instance render <id> [--game-space <id>]` | Preview typed Arma 3/Reforger configuration without writing |
+| `server reforger-addons list\|plan\|acquire <id> [--game-space <id>]` | Review isolated Reforger Workshop acquisition and retain exact addon/dependency versions; acquisition requires `--yes` and the reviewed fingerprint |
+| `server configuration plan\|list\|commit\|verify\|rollback [--game-space <id>]` | Review and manage immutable configuration snapshots; no runtime or game files are changed |
+| `server content list\|add-folder\|add-profile [--game-space <id>]` | Register addon folders and repository profiles; saves require exclusive space ownership |
+| `server content plan <instance-id> --bindings <file> [--game-space <id>]` | Preview independent source roles/order and path blockers without downloads or copies |
+| `server content bindings show\|plan\|save <instance-id> [--game-space <id>]` | Retain reviewed per-instance selections with stale-input protection; no content acquisition or deployment |
+| `server content stage plan\|apply\|verify\|list <instance-id> [--game-space <id>]` | Hash saved already-present content and retain or verify immutable unselected stages; only actual apply claims the space, and no stage opens the sync database |
+| `server content acquire plan\|apply <instance-id> [--game-space <id>]` | Review saved download profiles offline, then acquire and verify them into one inactive retained stage using contained scratch workers |
+| `server deploy plan <id> [--stage <id>] [--expected-revision <n>] [--expected-configuration-generation <n>] [--game-space <id>]` | Produce a read-only composition report from the persisted active configuration and an explicitly selected retained stage |
+| `server deploy prepare|commit|list|verify ...` | Prepare and save an immutable offline record, inspect its ID inventory, or verify its referenced archives; save requires the exact reviewed fingerprint |
+| `server deploy select-plan|select <id> <record-id> ...` | Review and explicitly select an indexed offline record; select requires the reviewed fingerprint and `--yes` unless dry-run |
+| `server deploy runtime plan|build|list|verify ...` | Review, build, inventory or verify immutable copies of the selected offline record; build does not activate runtime files |
+| `server deploy activation plan|apply|status|recovery-plan|resolve ...` | Review and activate an exact native Arma or Reforger runtime generation or review and resolve its transaction; apply/resolve require the review fingerprint and `--yes` except dry-run |
+| `server content consumers [--game-space <id>]` | Report exact source/repository identities, same-root cross-space profiles, and instance consumers; physical-installation registrations are cross-root |
+| `server deploy pins|pin|unpin ...` | Inspect or change retained deployment-record pins with generation guards; changes require `--yes` |
+| `server deploy reconcile plan|apply <id> ...` | Review and reclaim unreferenced instance artifacts; apply requires the exact plan fingerprint and `--yes` |
 | `direct-download` | Download by URL without full sync; replacing existing files requires `--overwrite --yes` |
 | `launch` | Build or execute the game launch command for a repository and profile; `--allow-live-fallback` and `--allow-incomplete-preparation` consent to a degraded launch once |
 | `agent-gui ...` | Drive a running UI started with `ui --agent-gui` (developer tooling) |
 
 Exit codes: `0` success, `2` validation error, `3` not found, `4` operation failed, `5` partial success, `6` busy (another Foxy process owns the configuration directory or the game space database).
+
+Database commands resolve the remembered game space before claiming it. If exclusive access cannot be verified, Foxy refuses access with code `4`; another active owner remains code `6`. `server context` reads an existing `games.json` without migrations, repairs, directory creation, or log writes. Missing or invalid configuration returns code `2`. Server management commands reject `--wipe-db` before creating locks or preparing the game space.
+
+Server draft commands also capture an existing space without remembering it. Inspection, validation and dry runs write nothing and can run beside the GUI. Draft saves use a temporary exclusive space claim or a serialized metadata permit from its authenticated foreground owner, without opening its database. Server desktop and CLI can edit through the same owner; a client GUI's database claim still blocks CLI saves. Draft commands reject `--wipe-db`; native lifecycle is a separate reviewed operation available for the exact accepted Arma and Reforger runtimes. See [server drafts](wiki/Server-Admin-Guide.md#server-instance-drafts), [Arma foreground lifecycle](wiki/Server-Admin-Guide.md#arma-foreground-lifecycle) and [Reforger foreground lifecycle](wiki/Server-Admin-Guide.md#reforger-native-adoption-and-foreground-lifecycle).
+
+Installation inspection shows local executable-version metadata on Windows, matching Arma Steam build/branch metadata when available, and exact executable matches to the tested Arma 2.22 layout on Windows and Linux. Activation accepts only that exact executable fingerprint/layout; acceptance evidence does not establish general engine compatibility or broad platform release support.
+
+Server content staging is capability-enabled on native Windows and Linux for Arma 3 and Reforger spaces. Plan and verify hash bytes without acquiring the DB claim; stage listing is inventory only. Apply `--dry-run` rebuilds and checks the exact plan without a claim or writes; a real apply claims only its captured game space and retains a verified archive under that instance. Native Windows/Linux Arma activation acceptance exercised local retained stages; it does not establish provider acquisition or general server readiness. Stages themselves do not download or activate content.
+
+`server deploy plan` reads the persisted active configuration selection and never follows a configuration revision highlighted only in UI history. Pass `--stage <id>` to inspect that exact retained archive; omitting it reports a missing-stage blocker without selecting the newest stage. The deterministic report fingerprint is evidence only, not authority to apply. Completed reports exit `0` even with blockers; stale expected revisions/generations exit `2`, a missing instance exits `3`, and corrupt state or storage failures exit `4`. A corrupt selected archive is reported as an integrity blocker. The command is read-only, may run while the game-space database is busy, and rejects `--wipe-db`. It performs no database open or claim, logger initialization, filesystem writes, network work, or adopted executable hash check. `--dry-run` runs the same plan.
+
+`server deploy select-plan <id> <record-id> --expected-deployment-generation <n>` verifies an indexed target and both pinned archives, then returns a review fingerprint. `server deploy select` requires that same generation and `--expected-plan-fingerprint`, plus `--yes` for every non-dry-run invocation, including a no-op. `--dry-run` needs no `--yes` and performs no claim or write. Selection changes only `deployments/state.json`; it creates or deletes no archives, does not change the current draft or other configuration/content intent, and does not activate or start anything. Selecting the already selected record leaves the generation unchanged. Planning and dry-run may run beside the database owner; a real selection claims the captured space but never opens Turso.
+
+Deployment records are available on supported native Windows/Linux builds. `prepare` reviews the persisted active configuration and explicit retained stage and returns an immutable manifest ID plus a plan fingerprint. `commit` takes the same inputs, reruns the review, then stores the record and updates only the offline selection state. `list` returns saved IDs and selection generation without verifying file integrity; `verify` checks the record manifest and both referenced archives without consulting current source files. The record manifest references immutable configuration and content archives rather than copying them, and Foxy does not garbage-collect those archives. Preparation and verification are read-only and can run beside a busy database owner; only an actual commit claims the captured game space, and none of these commands opens Turso. Commit `--dry-run` verifies the exact plan without claiming or writing. Cancellation is cooperative; the caller waits for owned temporary cleanup. Interrupted commits may leave a complete unselected record, and unknown files are preserved. These records do not activate a runtime deployment, prove engine/provider readiness, or start a process.
+
+`server deploy runtime plan|build|list|verify` adds a separate offline preparation copy of the selected indexed record. Plan/build require `--expected-deployment-generation`; build also requires the exact `--expected-plan-fingerprint`. The immutable copy contains the full configuration archive and content stage under `deployments/prepared/prepared_<hash>/` and has its own strict manifest/integrity verification. Plan and dry-run are write-free; an actual build claims the captured game space without opening Turso. Verify uses only the copied generation and does not depend on the original archives, but still requires a valid current game-space context and instance. The UI may plan from the loaded record while draft edits are unsaved. Build does not change selection, install or activate runtime files, start a process, acquire a lease, or clean up other entries. Prepared files are not an engine runtime layout and do not imply readiness. Windows and WSL D05 acceptance exercised the local prepared-copy path; it does not establish provider acquisition or broad platform release support.
+
+`server deploy activation plan|apply|status|recovery-plan|resolve` implements reviewed native runtime activation for the exact tested Arma `2.22.154089` and Reforger `1.9.0.37` executable/layout patterns on Windows and Linux x64. Windows and WSL acceptance passed for eight fresh engine generations, activation/rollback, persistence and three owner interruption/recovery scenarios. This evidence does not imply broad platform release support. Plan binds an explicit prepared generation, deployment-selection generation, activation generation, saved instance/catalog evidence, installation fingerprint and selected payload into a review fingerprint. Apply recomputes that plan; real apply requires the fingerprint and `--yes`, then runs through the authenticated foreground owner and installation/transaction admission without opening Turso. Global `--dry-run` verifies the exact plan without starting an owner or writing. Status verifies the active runtime. Recovery-plan reviews retained transaction evidence; resolve recomputes the review and requires its fingerprint and `--yes` except for dry-run. After an uncertain owner result, inspect status and recovery-plan before retrying. Runtime files are private complete copies; the adopted installation and preparation source remain unchanged. The Arma boundary includes the selected base engine payload, reviewed configuration, mission templates, server-only staged addons and unchanged tested base `a3` key. Extra or changed keys and client-required/optional addon trust remain unsupported. Reforger activation copies the reviewed engine payload and `server.json` for an explicit IPv4 bind address, distinct game/A2S ports, a built-in scenario and empty addon intent. It does not copy Arma keys or addon content. Per-instance profile/config/cache/runtime state is separate and mutable. Activation never starts the engine. Reviewed owner-routed Start/Status/Stop/Restart for those exact Arma and Reforger runtimes are separate operations. See the server guide for the tested scope.
+
+Content-source discovery covers game spaces under the same config root; repository identity remains `(URL, local path)`. Physical-installation consumer registrations are shared across config roots. Do not register private stage or runtime-copy folders as external content sources; use an external shared content root and pin records that must remain available. Reconciliation removes only manifest-owned trees with full file hashes, refuses live or uncertain consumers, and recovers interrupted quarantine deletion only from a durable receipt scoped to the config context, instance, artifact kind and original owned name. Plans and dry runs do not open Turso. Reconciliation requires a reviewed fingerprint and `--yes` to apply, never wipes the database, and never retires consumer registrations.
+
+`server capabilities --json` includes runtime prerequisites. Instance preflight verifies the selected configuration archive, compares it with the current draft and inspects registered installation consumers without writing. Shared supervisor primitives have native Windows and Linux fixture proofs. Linux requires an ordinary user and permitted user/PID namespace APIs. Persistent registrations block maintenance after uncertain cleanup; Windows and WSL D05 native activation/recovery acceptance passed for the exact tested Arma layout. Owner-routed Arma and Reforger Start/Status/Stop/Restart use the separately reviewed native runtime and retained sessions. Server mode drains client work, closes its database and authenticates a separate metadata owner. The desktop and attached metadata CLI use serialized owner permits without opening Turso; client schedules remain paused until ownership returns. `server supervise --game-space <id>` hosts the owner and `server owner --game-space <id> --json` inspects it. Explicit detach is available as described below; launch-plan stays read-only and Start uses an authenticated owner.
+
+Server lifecycle status now includes cached process/query health, freshness, CPU/RSS history and sanitized bounded logs. Use `server instance monitor <id> --game-space <space>` for a snapshot, `server instance logs <id> --limit 20 --game-space <space>` for a tail, or opt into framed NDJSON with `monitor <id> --follow --stream-json`. Query readiness does not establish joinability or scenario readiness. Desktop Server mode presents the same observations with log search, pause, copy and export.
+
+Explicit **Detach owner and keep server running** preserves supervision after the desktop closes. The CLI supports `server supervise --detach --yes` and reviewed `server instance start <id> --detach --yes`; reconnect with `server owner`, optionally replaying bounded scoped events with `--events-after`. Stop every instance before `server supervise --shutdown --yes` releases the detached owner's game space. Default foreground behavior remains available; no OS service is installed.
+
+After an owner crash, **Consumer recovery** reviews independent native cleanup receipts before explicit cleanup. Establish a replacement owner, review `server instance recovery-plan <id>`, then apply its exact fingerprint with `recover`. Pending group members, missing or malformed proof, legacy records, other configuration roots and current-owner records remain protected. Recovery never kills a process or starts a replacement game automatically. See [verified consumer recovery](wiki/Server-Admin-Guide.md).
+
+Arma headless clients are defined per draft with `server headless add|set|remove` or the desktop **Headless clients** editor section. Each gets its own profile and logs, a deterministic addon list and no dedicated-only arguments. The join password reaches it only through an owner-only parameter file. The owner starts each client automatically, in order and after an optional delay, once the running server answers its query port; an explicit start refuses before that. `server headless status` and the desktop lifecycle panel show each client's state, join evidence from its own log, starts and automatic restarts, and offer individual start, stop and restart. A client that exits unexpectedly is restarted with a growing delay up to its restart limit within 10 minutes, then left stopped until started again. A manual stop is never undone automatically. Stopping the server stops its headless clients first, and a server restart brings back the clients that were not stopped by an operator.
+
+Scheduled maintenance (`server maintenance`, or the desktop **Scheduled maintenance** section) keeps up to 16 one-time or weekly jobs per Arma 3 or Reforger instance, in local time or UTC. Only the running server owner executes them, so nothing runs while no owner is running, and a time missed beyond its grace window is skipped. Each occurrence is a durable record claimed exactly once; one interrupted by an owner crash is reported as unknown and never repeated. A restart can wait for an empty server, retries within its limits, and never starts a server an operator stopped. Update and backup jobs are recorded as blocked until those actions exist. A queued Foxy update waits while supervised server sessions or a detached owner are running. See [Scheduled server maintenance](wiki/Server-Admin-Guide.md#scheduled-server-maintenance).
 
 Examples:
 ```bash
@@ -235,6 +301,14 @@ Foxy stores app-global data at the config root and everything that belongs to on
 | `games/<space_id>/paused_repositories.json` | Download pauses remembered per repository installation |
 | `games/<space_id>/empty_publications.json` | Accepted empty publications and retained-file removal scope |
 | `games/<space_id>/interrupted_updates/` | Notices for updates that still need verification after interruption |
+| `games/<space_id>/server/servers.json` | Versioned ordered server drafts, adopted installation records and bindings, independent of the disposable database |
+| `games/<space_id>/server/servers.v1.<hash>.json` | Exact previous catalog preserved on the first successful v1-to-v2 save |
+| `games/<space_id>/server/mission-library/` | Arma mission source pointers and immutable PBO revisions; cycles pin exact revisions and deployment leaves original sources untouched |
+| `games/<space_id>/server/instances/<id>/configuration/` | Immutable rendered configuration revisions plus their atomic saved selection; separate from runtime deployment |
+| `games/<space_id>/server/credentials/<id>/` | Instance-scoped credential records, protected with current-user DPAPI on Windows or private directory/file permissions on Linux; excluded from portable packs |
+| `games/<space_id>/server/instances/<id>/deployments/runtime-state/home/private-configuration/` | Private per-runtime configuration with resolved credentials, created only at native Start |
+| `games/<space_id>/server/instances/<id>/content-stages/stage_<manifest-blake3>/` | Immutable verified local content archive and `manifest.json`; never selected as an active deployment |
+| `games/<space_id>/server/instances/<id>/deployments/prepared/prepared_<manifest-blake3>/` | Immutable offline copy of one selected deployment record's configuration and content archives; not an engine runtime layout |
 | `games/<space_id>/images/` | Cached images |
 
 A legacy flat layout from Foxy 1.1 or earlier is migrated into an Arma 3 game space on first start, and the previous files are kept as `.pre-gamespaces.bak` copies. See `examples/json/appdata/` for sample files.
@@ -246,6 +320,8 @@ Default locations:
 Overrides:
 - Environment variable: `FOXY_CONFIG_DIR`
 - CLI flag: `--config-dir`
+
+Supervisor installation-lock metadata uses the OS user's local data directory at `Foxy/server-installation-locks/`, independently of these overrides. Persistent lock files and consumer registrations coordinate physical installations across config roots and never replace space-scoped server data. Registrations record session identities before execution and remain after uncertain cleanup. Read-only preflight, capabilities and consumer inspection do not create this namespace. Do not remove its files to bypass a recovery blocker.
 
 ## Swifty Compatibility
 
@@ -260,6 +336,10 @@ Generation modes:
 | Hybrid mode | `--mode hybrid` | Both artifact sets side by side |
 
 ## Foxy Server Backend CLI
+
+Desktop Server mode and the client binary's `server configuration` commands support [Arma configuration imports and portable instance packs](wiki/Server-Configuration-Import.md), including explicit operator ownership, protected credential references, redacted exports and unresolved-path review. These commands are separate from the repository generator below.
+
+The [Arma mission library](wiki/Arma-Server-Missions.md) imports PBOs/folders or hash-verified HTTP PBOs, preserves source bytes and pins ordered enabled mission-cycle entries to immutable revisions through the existing deployment workflow. Matching commands are under `server mission`.
 
 Build:
 ```bash
@@ -512,7 +592,7 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace
 ```
 
-Agent instructions, skills, and role definitions use the standalone Rust checker `cargo agent-check`. The [skill catalog](skills/README.md) documents Codex and Claude Code discovery, shared workflows, and bounded subagent roles. Standalone helpers have their own validation commands in [tools instructions](tools/AGENTS.md).
+Agent instructions, skills, and role definitions use the standalone Rust checker `cargo agent-check`. The [skill catalog](skills/README.md) documents Codex, Claude Code, and Cursor discovery, shared workflows, and bounded subagent roles. Standalone helpers have their own validation commands in [tools instructions](tools/AGENTS.md).
 
 ## Contributing
 

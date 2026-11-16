@@ -1,13 +1,5 @@
-//! Keeps Foxy's processor use at or under the CPU usage limit setting, a share
-//! of the whole computer. Work threads that hash and patch call [`checkpoint`]
-//! between chunks. Once the process nears the limit, each checkpoint books the
-//! CPU time its thread used since the last one on a schedule shared by every
-//! work thread, which advances at the CPU rate the limit leaves for that work,
-//! and the thread waits until the schedule catches up. The total is held
-//! however many threads the work runs on, including pools far wider than the
-//! processor count whose threads mostly wait on the disk.
-//! CPU time comes from the OS clocks in `thread_cpu`; on a platform without
-//! them nothing waits.
+//! Enforces the process-wide CPU usage limit at checkpoints between work chunks.
+//! Work threads share one schedule; unsupported platforms do not pause work.
 
 use std::cell::Cell;
 use std::sync::Mutex;
@@ -21,42 +13,31 @@ pub const DEFAULT_CPU_USAGE_LIMIT_PERCENT: u8 = 90;
 pub const MIN_CPU_USAGE_LIMIT_PERCENT: u8 = 10;
 pub const MAX_CPU_USAGE_LIMIT_PERCENT: u8 = 100;
 
-/// How long one measurement of the process's CPU rate covers. Windows charges
-/// CPU time in clock ticks of about 15.6 ms per processor, so a shorter window
-/// is mostly rounding.
 const MEASURE_WINDOW: Duration = Duration::from_millis(250);
-/// While work is not paced the rate is checked this often, so a burst past the
-/// limit runs unpaced for a tenth of a second at most.
+
 const ENGAGE_WINDOW: Duration = Duration::from_millis(100);
-/// Share of the budget the process must use before work is paced at all, so
-/// work well under the limit never reads a thread clock.
+
 const ENGAGE_SHARE: f64 = 0.75;
-/// Work keeps at least a tenth of the budget however much CPU the rest of the
-/// process uses.
+
 const MIN_ALLOWANCE_SHARE: f64 = 0.1;
-/// How far the schedule may run ahead before a thread waits, so a short burst
-/// passes untouched.
+
 const BURST: Duration = Duration::from_millis(20);
 const MIN_PAUSE: Duration = Duration::from_millis(2);
-/// Waits are slept in slices so a lifted limit or the end of pacing frees the
-/// thread quickly.
+
 const PAUSE_SLICE: Duration = Duration::from_millis(50);
-/// Longest single wait; a schedule further ahead than this is forgiven.
+
 const MAX_PAUSE: Duration = Duration::from_secs(1);
-/// A thread that has not checked in for this long starts counting afresh.
+
 const STALE_CHECKPOINT: Duration = Duration::from_secs(1);
 
-/// Applied limit in percent; 0 means no limit.
 static LIMIT_PERCENT: AtomicU32 = AtomicU32::new(0);
-/// CPU the paced work may use, in thousandths of a processor thread; 0 means
-/// work is not paced.
+
 static ALLOWANCE_MILLI: AtomicU32 = AtomicU32::new(0);
-/// Nanoseconds after [`epoch`] by which every booked CPU time is paid for at
-/// the allowance.
+
 static SCHEDULE_NS: AtomicU64 = AtomicU64::new(0);
-/// CPU time booked by paced work since the process started.
+
 static BOOKED_NS: AtomicU64 = AtomicU64::new(0);
-/// Nanoseconds after [`epoch`] when the CPU rate is next measured.
+
 static NEXT_MEASURE_NS: AtomicU64 = AtomicU64::new(0);
 static PAUSED_NS: AtomicU64 = AtomicU64::new(0);
 static PAUSES: AtomicU64 = AtomicU64::new(0);
@@ -67,9 +48,9 @@ struct Measurement {
     at: Instant,
     process_cpu: Duration,
     booked: Duration,
-    /// Work was paced for the whole window that starts here.
+
     pacing: bool,
-    /// Processor threads' worth of CPU the process uses outside checkpoints.
+
     unpaced: f64,
 }
 
@@ -88,8 +69,6 @@ thread_local! {
     };
 }
 
-/// Time spent paused by the limit, and how many pauses, since the process
-/// started. Callers take the difference over an operation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GovernorCounters {
     pub(crate) paused: Duration,
@@ -112,7 +91,6 @@ pub(crate) fn counters() -> GovernorCounters {
     }
 }
 
-/// The applied limit, `None` when there is none.
 pub(crate) fn limit_percent() -> Option<u8> {
     match LIMIT_PERCENT.load(Ordering::Relaxed) {
         0 => None,
@@ -120,8 +98,6 @@ pub(crate) fn limit_percent() -> Option<u8> {
     }
 }
 
-/// The setting as stored: kept within the accepted range, with 100 and above
-/// meaning no limit.
 pub fn sanitize_cpu_usage_limit(limit: Option<u8>) -> Option<u8> {
     limit.map(|percent| percent.clamp(MIN_CPU_USAGE_LIMIT_PERCENT, MAX_CPU_USAGE_LIMIT_PERCENT))
 }
@@ -133,7 +109,6 @@ fn applied_limit(limit: Option<u8>) -> u32 {
     }
 }
 
-/// Processor threads' worth of CPU time per second the limit allows.
 pub fn budget_threads(limit_percent: u8, detected_threads: usize) -> f64 {
     detected_threads as f64 * f64::from(limit_percent) / 100.0
 }
@@ -171,10 +146,7 @@ fn enforceable() -> bool {
     super::thread_cpu::process_cpu().is_some() && super::thread_cpu::current_thread_cpu().is_some()
 }
 
-/// Call between chunks of CPU-heavy work on a blocking thread, never on an
-/// async worker and never while holding a lock or database transaction others
-/// wait on: it may sleep for up to [`MAX_PAUSE`]. One atomic load when no
-/// limit is set, and no clock read while the process is well under it.
+/// May sleep up to MAX_PAUSE: call only on blocking workers between chunks, without contended locks or DB transactions.
 pub(crate) fn checkpoint() {
     let limit = LIMIT_PERCENT.load(Ordering::Relaxed);
     if limit == 0 {
@@ -229,8 +201,6 @@ pub(crate) fn checkpoint() {
     }
 }
 
-/// CPU the thread used since its last checkpoint, nothing when it has not
-/// checked in recently and the CPU may belong to unrelated work.
 fn used_since(state: ThreadState, cpu: Duration, now: Instant) -> Duration {
     match state.seen {
         Some(seen) if now.saturating_duration_since(seen) <= STALE_CHECKPOINT => {
@@ -298,7 +268,7 @@ fn measure_if_due(limit: u32, now: Instant) {
                 .saturating_sub(previous.process_cpu)
                 .as_secs_f64()
                 / wall;
-            // Booked CPU only covers paced work once a whole window was paced.
+
             let unpaced = if previous.pacing {
                 unpaced_estimate(
                     previous.unpaced,
@@ -332,10 +302,7 @@ fn measure_if_due(limit: u32, now: Instant) {
     ALLOWANCE_MILLI.store(allowance_milli, Ordering::Relaxed);
 }
 
-/// CPU the paced work may use, in processor threads, for a process using
-/// `rate_threads` of which `unpaced_threads` happen outside checkpoints; 0
-/// while the process is comfortably under `budget_threads` and no thread is
-/// waiting on the schedule (`backlog`).
+/// Pace only checkpointed CPU consumption after subtracting unpaced threads; an idle schedule books no work.
 fn next_allowance(
     rate_threads: f64,
     unpaced_threads: f64,
@@ -345,8 +312,7 @@ fn next_allowance(
     if budget_threads <= 0.0 || !rate_threads.is_finite() {
         return 0.0;
     }
-    // Threads still waiting mean the work wants more than it gets, however low
-    // the rate read in one window.
+
     if !backlog && rate_threads < budget_threads * ENGAGE_SHARE {
         return 0.0;
     }
@@ -358,21 +324,14 @@ fn next_allowance(
     (budget_threads - unpaced).clamp(budget_threads * MIN_ALLOWANCE_SHARE, budget_threads)
 }
 
-/// The CPU the process uses outside checkpoints, averaged with the previous
-/// window so one rounding in the clocks does not swing the allowance.
 fn unpaced_estimate(previous: f64, rate_threads: f64, booked_threads: f64) -> f64 {
     0.5 * previous + 0.5 * (rate_threads - booked_threads).max(0.0)
 }
 
-/// Wall time the schedule advances for `used` CPU at `allowance_milli`
-/// thousandths of a processor thread.
 fn scheduled_cost(used: Duration, allowance_milli: u32) -> u64 {
     (used.as_nanos() * 1000 / u128::from(allowance_milli.max(1))).min(u128::from(u64::MAX)) as u64
 }
 
-/// Book `cost` on a schedule that stands at `schedule`, at `now`: the new
-/// schedule, and how long the caller waits for it. The schedule never runs
-/// more than [`MAX_PAUSE`] past the tolerated burst.
 fn admit(schedule: u64, now: u64, cost: u64) -> (u64, Duration) {
     let burst = BURST.as_nanos() as u64;
     let latest = now
@@ -509,9 +468,6 @@ mod tests {
         assert_eq!(next, now + ns(BURST) + ns(MAX_PAUSE));
     }
 
-    /// Threads that mostly wait on the disk, far more of them than the
-    /// allowance, book their CPU on the shared schedule: together they use the
-    /// allowance and no more.
     #[test]
     fn a_wide_pool_of_disk_bound_threads_is_held_to_the_allowance() {
         fn simulate(threads: u64, allowance_milli: u32) -> f64 {
@@ -535,7 +491,6 @@ mod tests {
             used as f64 / span as f64
         }
 
-        // Unpaced, 96 threads at 5 ms of CPU per 55 ms use about 8.7 threads.
         let natural = simulate(96, 1_000_000);
         assert!((8.0..9.0).contains(&natural), "{natural}");
         for allowance in [3.2, 8.0] {
@@ -552,8 +507,6 @@ mod tests {
         }
     }
 
-    /// Process CPU between `settle` and `until` after `started`, as a share of
-    /// every processor thread.
     fn machine_share(started: Instant, settle: Duration, until: Duration, threads: usize) -> f64 {
         use crate::core::utils::thread_cpu;
 
@@ -564,7 +517,6 @@ mod tests {
         cpu.as_secs_f64() / from.elapsed().as_secs_f64() / threads as f64 * 100.0
     }
 
-    /// Run it alone: tests running beside it add their own CPU to the process.
     #[test]
     #[ignore = "burns every processor thread for five seconds; run manually with --ignored --nocapture"]
     fn a_busy_process_settles_near_the_limit() {
@@ -593,9 +545,6 @@ mod tests {
         );
     }
 
-    /// Eight threads per processor thread, each waiting 8 ms between 2 ms bursts
-    /// of CPU, like a hash pool reading from a fast disk. A per-thread pause cap would
-    /// leave such a pool near half the machine. Run it alone.
     #[test]
     #[ignore = "runs a wide busy pool for five seconds; run manually with --ignored --nocapture"]
     fn a_wide_mostly_waiting_pool_settles_near_the_limit() {

@@ -44,18 +44,15 @@ struct RemoteRepositoryManifest {
 pub(crate) struct RemoteRepositoryMetadata {
     pub foxy_mode: FoxyMode,
     pub app_update_url: Option<String>,
-    /// `true` when the remote refresh was skipped because checksums already matched.
+
     pub skipped: bool,
-    /// `true` when the repository has linked addons, remote state (mods/files/parts),
-    /// and non-empty checksums - meaning the tree is fully initialized and does not
-    /// need a bootstrap hash pass.
+
     pub repository_complete: bool,
-    /// `true` when linked addons and remote file/part metadata exist in the DB.
+
     pub remote_graph_complete: bool,
-    /// `true` when remote addon/file/part manifests were fetched during this call.
+
     pub remote_graph_fetched: bool,
-    /// The server explicitly published no addons. Existing local ownership is
-    /// retained; this does not authorize deleting installed content.
+    /// An explicit empty publication does not authorize deleting installed content.
     pub accepted_empty: bool,
 }
 
@@ -152,9 +149,7 @@ fn checksum_eq(left: &str, right: &str) -> bool {
     !left.is_empty() && left == right.trim()
 }
 
-/// The repository checksum stored at the start of a refresh. A new instance
-/// keeps an empty value until its addon data is applied, so an interrupted
-/// refresh still looks changed to the next probe.
+/// Keep new instances' checksum empty until addon data is applied so interrupted refreshes remain detectable.
 fn repository_remote_checksum_until_applied(previous: Option<&str>) -> &str {
     previous
         .map(str::trim)
@@ -293,8 +288,6 @@ async fn repository_has_linked_addons(context: Arc<FoxyContext>, repository_id: 
     }
 }
 
-/// Published addons by lowercase name with the `checkSum` the addon list
-/// gives for each (empty when it gives none).
 fn collect_remote_addon_checksums(data: &Value) -> Option<HashMap<String, String>> {
     let mut checksums = HashMap::new();
     let mut saw_mod_list = false;
@@ -325,11 +318,7 @@ fn collect_remote_addon_checksums(data: &Value) -> Option<HashMap<String, String
     saw_mod_list.then_some(checksums)
 }
 
-/// Whether every addon checksum the remote addon list publishes is the one
-/// stored for that addon. The stored value is copied from the same list, so
-/// a difference means the addon's manifest changed since it was last read,
-/// even when the repository checksum already reads as clean: a sibling sync
-/// can bring the local files up to the new version first.
+/// Compare addon checksums too: a sibling sync may advance files while the repository checksum still appears clean.
 fn remote_addon_checksums_match(
     remote: &HashMap<String, String>,
     stored: &HashMap<String, String>,
@@ -426,19 +415,8 @@ async fn repository_has_remote_state(
     repository_id: i64,
     enabled_overrides: Option<&HashMap<String, bool>>,
 ) -> bool {
-    // File-level grouped stats only - deliberately NOT joined to `subfiles`. The
-    // old query LEFT JOINed subfiles, which multiplied the row set to one per
-    // part (tens of thousands) before GROUP BY + COUNT(DISTINCT), and that
-    // explosion was the dominant cost of every clean remote recheck on Turso.
-    //
-    // Part completeness is derived instead of scanned: a file's remote_checksum
-    // is rolled up from its parts' remote checksums during the metadata rebuild,
-    // so a file with a non-empty remote_checksum implies its parts already carry
-    // theirs (mirrors the local rollup ordering in `calculate_hashes`). With all
-    // files complete, the parts are complete too, so the part term in
-    // `remote_state_complete_from_addons` is satisfied with part_count = 0. The
-    // one hole in that derivation (files persisted, parts never landed) is
-    // closed by the `LIMIT 1` part probe below.
+    // Avoid joining subfiles into file counts; derive part completeness from file rollups and probe for missing rows.
+    // The LIMIT 1 probe catches deferred inserts interrupted before their parts landed.
     let rows = match context
         .db()
         .query_all(
@@ -479,7 +457,7 @@ async fn repository_has_remote_state(
             missing_file_remote_checksums: row
                 .get_i64("missing_file_remote_checksums")
                 .unwrap_or(0),
-            // Derived from file completeness (see query comment) - not scanned.
+
             part_count: 0,
             missing_part_remote_checksums: 0,
         })
@@ -510,12 +488,8 @@ async fn repository_has_remote_state(
         return false;
     }
 
-    // The derivation above assumes the parts landed with the files. A deferred
-    // rebuild writes the file rows inline and holds the part rows in memory until
-    // the hash pass persists them, so a process exit in between leaves every file
-    // "complete" over an empty `subfiles`. Such a graph cannot produce local tree
-    // hashes and the quick scan preflight already refuses it; the skip decision
-    // must agree, or every sync re-reads the whole repository for nothing.
+    // Deferred part inserts can leave apparently complete file rows without
+    // parts after interruption; quick-scan readiness rejects that graph too.
     let enabled_file_count: i64 = states
         .iter()
         .filter(|addon| addon_enabled_for_remote_state(addon, enabled_overrides))
@@ -537,9 +511,7 @@ async fn repository_has_remote_state(
     }
 }
 
-/// Indexed `LIMIT 1` probe for any part row under the repository's enabled
-/// addons. Mirrors the quick scan preflight probe so both gates agree on what a
-/// missing part graph looks like.
+/// Match quick-scan readiness with an indexed LIMIT 1 probe for missing part rows.
 async fn repository_part_rows_exist(context: Arc<FoxyContext>, repository_id: i64) -> Option<bool> {
     match context
         .db()
@@ -568,9 +540,7 @@ async fn repository_part_rows_exist(context: Arc<FoxyContext>, repository_id: i6
     }
 }
 
-/// Emit the `SOL op=remote_refresh` action record (conventions/SPEED_OF_LIGHT.md,
-/// O5): one line per refresh with its branch as `outcome`, the index requests
-/// it made, and the manifest work when the graph was rebuilt.
+/// Emit one remote-refresh SOL record per outcome with index and manifest work.
 fn log_remote_refresh_sol(
     context: &FoxyContext,
     started: std::time::Instant,
@@ -607,7 +577,6 @@ fn log_remote_refresh_sol(
     );
 }
 
-/// Acquire repository information from URL, process addons if local and remote repository checksums differ
 pub(crate) async fn remote_repository(
     context: Arc<FoxyContext>,
     repository_url: &str,
@@ -638,7 +607,7 @@ async fn remote_repository_attempt(
     retry_count: u8,
 ) -> Option<RemoteRepositoryMetadata> {
     context.clear_staged_manifest_responses();
-    // Normalize remote URL to always have trailing slash for consistent path joins
+
     let normalized_url = crate::core::models::repository::normalize_repository_url(repository_url);
     let refresh_started = std::time::Instant::now();
     let mut index_requests = 1usize;
@@ -711,13 +680,7 @@ async fn remote_repository_attempt(
         info!("Repository {} uses {:?}", repository_url, foxy_mode);
     }
 
-    // For FoxyMode repos, the deterministic BLAKE3 repository checksum is
-    // published in foxy_addons.json. The repo.json `checksum` may be a non-deterministic,
-    // algorithm-mismatched SHA-1 (Hybrid/Swifty-generated repos seed it with a timestamp),
-    // which can never equal the client's BLAKE3 rollup and causes a perpetual false
-    // "remote changed" / redownload loop. Fetch foxy_addons.json once here and prefer its
-    // top-level `checksum` so the repository-level comparison is BLAKE3-vs-BLAKE3 and
-    // stable. The fetched payload is reused below as the mod metadata source.
+    // Prefer FoxyMode's BLAKE3 checksum; `repo.json` may publish an incomparable SHA-1 value.
     let foxy_addons_data = if foxy_mode.is_foxy() {
         let foxy_addons_url = format!("{}foxy_addons.json", normalized_url);
         index_requests += 1;
@@ -776,8 +739,6 @@ async fn remote_repository_attempt(
         );
     }
 
-    // Save repository
-    // Normalize local path (ensure trailing slash, use forward slashes)
     let normalized_local_path = local_path_override
         .map(|p| {
             let mut s = p.replace('\\', "/");
@@ -826,8 +787,7 @@ async fn remote_repository_attempt(
             return None;
         }
     };
-    // Decisions below compare the fetched checksum. The database row keeps the
-    // previous value until the data behind this one has been applied.
+    // Keep the prior checksum until the data represented by the new one is applied.
     repository.remote_checksum = remote_checksum.clone();
 
     let has_linked_addons =
@@ -940,9 +900,7 @@ async fn remote_repository_attempt(
         );
     }
 
-    // If the repository has linked addons and remote state but its own checksums
-    // are incomplete, try to fill them from sibling repositories that share the
-    // same addon paths before giving up and forcing a full metadata rebuild.
+    // Recover incomplete checksums from path-sharing siblings before a full metadata rebuild.
     if has_linked_addons
         && has_remote_state
         && (repository.local_checksum.trim().is_empty()
@@ -953,11 +911,10 @@ async fn remote_repository_attempt(
             repository.remote_url
         );
         pre_propagate_sibling_checksums(context.clone(), &normalized_url).await;
-        // Roll up addon-level checksums to repository level so
-        // repository_refresh_complete() can see the propagated state.
+
         finalize_repository_hashes_from_mods(context.clone(), &normalized_url).await;
         finalize_repository_content_hashes_from_mods(context.clone(), &normalized_url).await;
-        // Re-read the repository record to pick up propagated + rolled-up checksums
+
         if let Ok(refreshed) = load_repository_by_remote_url_and_local_path(
             context.clone(),
             &normalized_url,
@@ -1076,7 +1033,6 @@ async fn remote_repository_attempt(
         repository.local_path
     );
 
-    // TODO: Hack remove
     if repository.local_path.is_empty() {
         if !normalized_local_path.is_empty() {
             repository.local_path = normalized_local_path.clone();
@@ -1094,9 +1050,6 @@ async fn remote_repository_attempt(
         return None;
     }
 
-    // Sync - for FoxyMode repos, use the foxy_addons.json payload fetched above for its
-    // mod lists (repo.json mod lists are empty in pure FoxyMode). Falls back to repo.json
-    // data when the foxy_addons.json fetch failed or this is not a FoxyMode repo.
     let mods_data = foxy_addons_data.unwrap_or(data);
 
     let repository = Arc::new(repository);
@@ -1169,10 +1122,7 @@ async fn remote_repository_attempt(
         return None;
     }
 
-    // Temporarily increase write concurrency for the rebuild. During first-run
-    // metadata rebuild there are no competing writers (no downloads, no hash
-    // persist, no UI writes), so extra permits are safe. We add permits before
-    // and reclaim them after the rebuild completes.
+    // Add write permits only during the initial rebuild, when no other writers compete.
     let extra_permits = (*DB_WRITE_PERMITS * 2).min(4);
     DB_WRITE_SEMAPHORE.add_permits(extra_permits);
     info!(
@@ -1191,8 +1141,6 @@ async fn remote_repository_attempt(
     .await;
     context.clear_staged_manifest_responses();
 
-    // Reclaim extra permits: acquire them and forget (permanently removes).
-    // All rebuild work is done, so all permits from within are already released.
     if extra_permits > 0 {
         if let Ok(permit) = DB_WRITE_SEMAPHORE.acquire_many(extra_permits as u32).await {
             permit.forget();
@@ -1307,14 +1255,10 @@ mod tests {
     use crate::core::models::repository::FoxyMode;
     use serde_json::json;
 
-    // ── default_repo_image_path ─────────────────────────────────────────
-
     #[test]
     fn default_repo_image_path_is_repo_png() {
         assert_eq!(default_repo_image_path(), "repo.png");
     }
-
-    // ── normalize_optional_url ──────────────────────────────────────────
 
     #[test]
     fn normalize_optional_url_some_valid() {
@@ -1346,8 +1290,6 @@ mod tests {
     fn normalize_optional_url_none_returns_none() {
         assert_eq!(normalize_optional_url(None), None);
     }
-
-    // ── RemoteRepositoryManifest deserialization ────────────────────────
 
     #[test]
     fn deserialize_full_manifest() {
@@ -1393,8 +1335,6 @@ mod tests {
         let manifest: RemoteRepositoryManifest = serde_json::from_value(json).unwrap();
         assert_eq!(manifest.repo_name, "Repo");
     }
-
-    // ── repository_refresh_complete ─────────────────────────────────────
 
     fn make_repo(local_checksum: &str, local_content_hash: &str) -> FoxyRepository {
         FoxyRepository {
@@ -1465,7 +1405,6 @@ mod tests {
         std::fs::create_dir_all(shared.join("@common")).expect("create shared addon");
         std::fs::create_dir_all(&target).expect("create target root");
 
-        // A parent repository row is required for the repository_addons FK.
         fdb.execute(
             "INSERT INTO repositories (id, name, remote_url, local_path) VALUES (1, 'r', 'https://example.com/', ?)",
             params![target.to_string_lossy().to_string()],
@@ -1569,8 +1508,6 @@ mod tests {
         assert!(repository_has_remote_state(context, 1, None).await);
     }
 
-    // ── should_skip_remote_refresh ──────────────────────────────────────
-
     #[test]
     fn skip_refresh_when_checksums_match_and_complete() {
         let mut repo = make_repo("MATCH", "HASH");
@@ -1635,8 +1572,6 @@ mod tests {
             false
         ));
     }
-
-    // ── FoxyMode ────────────────────────────────────────────────────────
 
     #[test]
     fn skip_unchanged_remote_graph_when_remote_matches_stored_remote() {

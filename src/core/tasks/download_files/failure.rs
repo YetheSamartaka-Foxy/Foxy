@@ -10,8 +10,7 @@ pub(super) fn is_missing_remote_file(error: &anyhow::Error) -> bool {
     })
 }
 
-/// Another process holds the file open without delete sharing (a running game
-/// keeps its PBOs open this way), so it cannot be renamed aside or replaced.
+/// A process without delete sharing prevents replacement of its open file.
 pub(super) fn is_target_in_use(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -37,9 +36,6 @@ fn is_in_use_io_error(error: &std::io::Error) -> bool {
     }
 }
 
-/// Whether another process holds `path` open in a way that refuses the rename
-/// a promote performs. Opening for delete access asks the same question the
-/// rename does without changing the file.
 #[cfg(target_os = "windows")]
 fn target_is_held_open(path: &std::path::Path) -> bool {
     use std::os::windows::fs::OpenOptionsExt;
@@ -59,9 +55,6 @@ fn target_is_held_open(_path: &std::path::Path) -> bool {
     false
 }
 
-/// Existing target files that another process is holding open. A second probe
-/// after a short pause drops brief holds such as an antivirus scan, so only a
-/// lasting holder (a running game) blocks the update.
 pub(super) fn find_targets_in_use(paths: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
     let held: Vec<_> = paths
         .iter()
@@ -77,9 +70,6 @@ pub(super) fn find_targets_in_use(paths: &[std::path::PathBuf]) -> Vec<std::path
         .collect()
 }
 
-/// After a promote failed with a sharing violation: whether the existing target
-/// is what another process holds. A brief hold on the staged file (an antivirus
-/// scan of the fresh download) leaves the target free and is retried instead.
 pub(super) async fn target_still_held(target_path: &str) -> bool {
     let path = std::path::PathBuf::from(target_path);
     tokio::task::spawn_blocking(move || {
@@ -151,8 +141,7 @@ impl DownloadStop {
         self.missing_remote_file.load(Ordering::SeqCst)
     }
 
-    /// The update is rolled back anyway once a file cannot be replaced, so the
-    /// remaining transfers stop instead of finishing for nothing.
+    /// Stop remaining transfers after rollback; they cannot be committed usefully.
     pub(super) fn target_held_open(&self) {
         self.target_in_use.store(true, Ordering::SeqCst);
         self.cancel_tx.send_replace(true);

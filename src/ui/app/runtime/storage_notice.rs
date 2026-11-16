@@ -11,19 +11,14 @@ use crate::core::utils::storage_compat::{
 use crate::ui::app::Foxy;
 use crate::ui::palette;
 
-/// Locations shown per finding before the rest collapse into a count.
 const NOTICE_LOCATION_LIMIT: usize = 3;
 
-/// One row of the "Storage check" window: a finding plus every configured
-/// location it applies to (several repositories on one FAT32 drive share a
-/// row).
 #[derive(Clone, Debug)]
 pub(crate) struct StorageNoticeRow {
     pub(crate) issue: StorageIssue,
     pub(crate) locations: Vec<(String, PathBuf)>,
 }
 
-/// Startup storage findings queued for the "Storage check" window.
 #[derive(Clone, Debug)]
 pub(crate) struct StorageCompatNotice {
     pub(crate) rows: Vec<StorageNoticeRow>,
@@ -31,8 +26,6 @@ pub(crate) struct StorageCompatNotice {
     pub(crate) suppress_future: bool,
 }
 
-/// Order-independent identity of a set of findings, stored in settings when
-/// the user asks not to see them again.
 pub(crate) fn storage_notice_fingerprint(rows: &[StorageNoticeRow]) -> String {
     let mut parts: Vec<String> = rows
         .iter()
@@ -45,8 +38,6 @@ pub(crate) fn storage_notice_fingerprint(rows: &[StorageNoticeRow]) -> String {
         .to_string()
 }
 
-/// Collapse raw findings into rows: advisories stay in the log, and findings
-/// with the same identity merge their locations. Blocking rows come first.
 pub(crate) fn storage_notice_rows(issues: Vec<StorageIssue>) -> Vec<StorageNoticeRow> {
     let mut rows: BTreeMap<String, StorageNoticeRow> = BTreeMap::new();
     let mut order = Vec::new();
@@ -83,9 +74,6 @@ pub(crate) fn storage_notice_rows(issues: Vec<StorageIssue>) -> Vec<StorageNotic
 }
 
 impl Foxy {
-    /// Repository instances the background storage check may query. Empty
-    /// while the database must not be opened (another Foxy owns it, or a
-    /// schema wipe is pending) and in debug mode, mirroring the quick scan.
     pub(crate) fn storage_check_repositories(&self) -> Vec<StartupRepositoryInstance> {
         if self.settings_view_state.debug_mode
             || self.db_lock_conflict.is_some()
@@ -116,9 +104,6 @@ impl Foxy {
         instances
     }
 
-    /// Turn the background report into the window's content, or `None` when
-    /// there is nothing above advisory level or the user already acknowledged
-    /// exactly these findings.
     pub(crate) fn build_storage_compat_notice(
         &self,
         issues: Vec<StorageIssue>,

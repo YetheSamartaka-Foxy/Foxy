@@ -33,15 +33,11 @@ pub struct WorkshopViewState {
     pub bundle_import_mode: workshop::bundle::BundleImportMode,
     pub compare_code: String,
     pub compare_result: Option<ShareComparison>,
-    /// Cleared whenever the tab is (re)entered so the store is read from disk
-    /// on the next frame. The CLI and other Foxy processes can change
-    /// `workshop.json` while the tab sits idle.
+    /// Reload `workshop.json` on tab entry because the CLI or another Foxy process may change it while the view is idle.
     pub loaded: bool,
 }
 
 impl Foxy {
-    /// The Steam app id whose Workshop store this space manages, or `None` when
-    /// the active game has no Workshop support or has not been configured yet.
     pub(crate) fn workshop_app_id(&self) -> Option<u32> {
         let module = crate::core::game::registry().active_module()?;
         if !module.capabilities().steam_workshop {
@@ -106,6 +102,10 @@ impl Foxy {
     }
 
     pub(crate) fn start_workshop_task(&mut self, task: WorkshopTask) {
+        if !self.client_db_admission.allows() {
+            self.show_error_toast(self.t("Another Workshop action is still running."));
+            return;
+        }
         if self.workshop_view_state.busy_label.is_some() {
             self.show_error_toast(self.t("Another Workshop action is still running."));
             return;
@@ -125,6 +125,10 @@ impl Foxy {
         self.workshop_view_state.busy_label = Some(task.busy_label());
         self.workshop_view_state.status = None;
         self.workshop_task_rx = Some(result_rx);
+        self.workshop_task_generation = self
+            .capture_worker_scope()
+            .map(|scope| scope.generation())
+            .unwrap_or(0);
         self.workshop_task_worker = Some(std::thread::spawn(move || {
             tasks::run_workshop_task(task, ctx, result_tx, repaint_ctx);
         }));
@@ -132,17 +136,21 @@ impl Foxy {
     }
 
     pub(crate) fn poll_workshop_task(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         let Some(rx) = self.workshop_task_rx.as_ref() else {
             return;
         };
         let outcome = match rx.try_recv() {
             Ok(outcome) => outcome,
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            // The worker died without reporting; clearing the busy flag is what
-            // keeps the view from waiting on a result that can never arrive.
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.workshop_task_rx = None;
-                self.workshop_task_worker = None;
+                crate::ui::app::reap_worker(
+                    &mut self.workshop_task_worker,
+                    "Workshop task worker failed.",
+                );
                 self.workshop_view_state.busy_label = None;
                 self.workshop_view_state.status =
                     Some(self.t("The Workshop action stopped unexpectedly."));
@@ -151,8 +159,18 @@ impl Foxy {
             }
         };
         self.workshop_task_rx = None;
-        self.workshop_task_worker = None;
+        crate::ui::app::reap_worker(
+            &mut self.workshop_task_worker,
+            "Workshop task worker failed.",
+        );
         self.workshop_view_state.busy_label = None;
+        if !self.scoped_result_applies(
+            &crate::core::game::spaces::active_game_space().space_id,
+            self.workshop_task_generation,
+        ) {
+            self.needs_repaint = true;
+            return;
+        }
         match outcome.message {
             Ok(message) => {
                 self.workshop_view_state.status = Some(message.clone());
@@ -167,9 +185,7 @@ impl Foxy {
         self.needs_repaint = true;
     }
 
-    /// The Steam Workshop tab of the game space settings view. The store is
-    /// keyed by the active game space, so another space can only be told to
-    /// open itself first.
+    /// Workshop data is keyed by the active game space; switch spaces before opening another space's tab.
     pub(crate) fn render_workshop_tab(&mut self, ui: &mut Ui, is_active_space: bool) {
         if !is_active_space {
             ui.label(
@@ -190,7 +206,6 @@ impl Foxy {
         });
     }
 
-    /// Rendered outside the settings card so the modals are not clipped by it.
     pub(crate) fn render_workshop_modals(&mut self, ui: &mut Ui) {
         self.render_workshop_import_modal(ui);
         self.render_workshop_remove_confirmation(ui);
@@ -595,9 +610,7 @@ impl Foxy {
         }
     }
 
-    /// Reordering rewrites every position, so a store that never had explicit
-    /// load order gets a complete one on the first move instead of a single
-    /// number nothing else can be compared against.
+    /// The first reorder assigns positions to every item so later moves have a complete order to update.
     fn move_workshop_item(&mut self, from: usize, to: usize) {
         let Some(app_id) = self.workshop_app_id() else {
             return;

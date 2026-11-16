@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Test Oracle Review"
+  short_description: "Check independent expectations and acceptance evidence"
+  default_prompt: "Use $foxy-test-oracle-review to review the changed tests and acceptance claims without silently weakening their behavioral contract."

@@ -7,12 +7,8 @@ use crate::core::utils::disk_space::{
 use crate::ui::app::Foxy;
 use crate::ui::i18n::fmt_bytes;
 
-/// How long the update modal trusts one free-space probe. Short enough that
-/// freeing space on the drive clears the notice while the modal stays open.
 const PROBE_TTL: Duration = Duration::from_secs(3);
 
-/// The last free-space probe the update modal ran, keyed by what it probed so
-/// a repaint reuses it instead of hitting the volume every frame.
 #[derive(Clone, Debug)]
 pub struct UpdateModalDiskSpaceProbe {
     pub repo_index: usize,
@@ -23,9 +19,7 @@ pub struct UpdateModalDiskSpaceProbe {
 }
 
 impl Foxy {
-    /// Shortfall the update modal shows for `repo_index` before the user
-    /// starts the download. Once the downloader has refused a run, its exact
-    /// numbers replace the modal's estimate until the next attempt.
+    /// Show the estimated shortfall before download; after refusal, keep the downloader's exact figures until the next attempt.
     pub(crate) fn update_modal_disk_space_shortfall(
         &mut self,
         repo_index: usize,
@@ -90,7 +84,6 @@ impl Foxy {
         )
     }
 
-    /// One line for the banner behind the modal and the activity log.
     pub(crate) fn disk_space_shortfall_message(&self, shortfall: &DiskSpaceShortfall) -> String {
         format!(
             "{}. {}",

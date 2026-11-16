@@ -1,19 +1,12 @@
-//! Launching child processes without the current process's elevated token.
-//!
-//! A game started from an elevated Foxy inherits the admin token, and Windows
-//! then blocks unelevated apps (Discord, TeamSpeak, OBS) from sending it input
-//! or capturing its window. Foxy no longer asks for elevation, but users who
-//! start it elevated themselves, or who still carry the old "Run as
-//! administrator" AppCompat flag, must not pay for it with a broken overlay.
+//! Launch child processes without inheriting Foxy's elevated token, preserving
+//! interaction with unelevated overlays and companion apps.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::Path;
 use std::process::Command;
 
-/// Whether this process runs with an elevated token.
-///
-/// `None` means the query itself failed, or the platform has no such concept.
+/// None means unsupported elevation queries or query failure, not verified unelevated status.
 pub fn is_process_elevated() -> Option<bool> {
     #[cfg(target_os = "windows")]
     {
@@ -26,8 +19,7 @@ pub fn is_process_elevated() -> Option<bool> {
     }
 }
 
-/// Start a process and return its pid, dropping elevation when this process is
-/// elevated. Falls back to a plain spawn whenever de-elevation is unavailable.
+/// Drop elevation when available; otherwise preserve the platform's plain-spawn fallback and return its PID.
 pub fn spawn_unelevated(program: &OsStr, args: &[OsString], cwd: Option<&Path>) -> io::Result<u32> {
     #[cfg(target_os = "windows")]
     {
@@ -147,8 +139,6 @@ mod windows_impl {
         }
     }
 
-    /// Start the process with a primary token duplicated from the desktop shell,
-    /// which runs at the interactive user's normal integrity level.
     pub(super) fn spawn_with_shell_token(
         program: &OsStr,
         args: &[OsString],

@@ -263,13 +263,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     }
 
     if !force_rehash {
-        // Safety net: filter out files where all parts AND the file-level hash
-        // already match their remote checksums, avoiding redundant disk I/O when
-        // multiple code paths request hashing for the same files within a single
-        // sync session.  We must check BOTH part-level and file-level checksums:
-        // after a manifest update that changes the part layout (e.g. fewer parts),
-        // all remaining parts may already match remote but the file-level hash
-        // still needs recomputation from the new set of parts.
+        // Require both part and file checksums; a changed manifest layout still needs a new file rollup.
         let pre_filter_count = file_indices.len();
         file_indices.retain(|&file_idx| {
             let Some(file_node) = data_tree.file_nodes.get(file_idx) else {
@@ -334,8 +328,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         .first()
         .map(|repository| repository.remote_url.clone())
         .unwrap_or_default();
-    // Download batches cover only part of the staged rows; the download flow
-    // drains the buffer for them.
+
     let mut background_part_insert = if freshly_downloaded_files {
         None
     } else {
@@ -388,7 +381,6 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
         single_part_files, heavy_files, avg_parts
     );
 
-    // --- Phase 1: Hash file parts ---
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::RecheckHashProgress {
             checked_files: 0,
@@ -592,7 +584,6 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     }
     let addon_metrics = collect_addon_hash_metrics("partial_hash", data_tree, &hash_results);
 
-    // --- Apply hash results to data_tree ---
     let apply_parts_started = Instant::now();
     let mut whole_file_checksums_by_file_idx: HashMap<usize, String> = HashMap::new();
     let mut fresh_content_hashes: Vec<(u64, String)> = Vec::new();
@@ -620,7 +611,6 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     );
     phase_timings.apply_part_hashes += apply_parts_started.elapsed();
 
-    // --- Phase 2: Persist part hashes (batched with progress) ---
     let (clean_part_marks, clean_part_indices): (Vec<CleanPartMark>, HashSet<usize>) =
         if clean_part_mark_downloaded_files && freshly_downloaded_files {
             let marks: Vec<CleanPartMark> = file_indices
@@ -685,11 +675,7 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     // keeping pages in cache instead of thrashing on random access.
     part_updates.sort_by_key(|p| p.id);
     let mut parts_persisted = 0;
-    // Scope this to the post-rebuild bootstrap (`!freshly_downloaded_files`): the
-    // bootstrap hashes the whole set of just-deferred files in one pass, so the tree
-    // covers the entire deferred buffer that the flush drains. Per-batch incremental
-    // download hashing covers only a subset of the deferred files at a time, so it
-    // must keep the inline persist path and let the download flow drain the buffer.
+    // Only the whole-tree bootstrap covers every deferred row; incremental batches must persist inline.
     if background_part_insert.is_some() {
         // The background insert wrote the remote rows; a clean file's parts take
         // their local state from its checksum when a tree loads.
@@ -829,7 +815,6 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     phase_timings.clean_part_mark_parts += committed_clean_parts;
     phase_timings.fallback_part_update_parts += part_updates.len();
 
-    // --- Phase 3: Update file hashes from parts ---
     let file_count = file_indices.len();
     let mut updated_file_ids: HashSet<u64> = HashSet::new();
     if let Some(tx) = progress_tx {
@@ -932,7 +917,6 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     );
     phase_timings.file_rollup_persist += file_persist_started.elapsed();
 
-    // --- Phase 4: Update addon(mod) hashes from files ---
     let mod_count = mod_indices.len();
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
@@ -983,7 +967,6 @@ pub(crate) async fn calculate_hashes_for_files_in_tree_with_profile_and_sticky_a
     );
     phase_timings.addon_rollup_persist += mod_persist_started.elapsed();
 
-    // --- Phase 5: Update repository hashes based on addons(mods) ---
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: format!("Updating repositories 0/{}", repo_indices.len()),
@@ -1221,9 +1204,6 @@ mod tests {
         blake3::hash(bytes).to_hex().to_uppercase()
     }
 
-    /// A repository with one file that hashes clean and one whose local bytes
-    /// differ, its part rows staged as a fresh load and the first of them
-    /// already committed by the part stream.
     async fn fresh_staged_repository(root: &std::path::Path) -> (Arc<FoxyContext>, HashSet<u64>) {
         use crate::core::db::params;
         use crate::core::models::context::DeferredPartInsert;

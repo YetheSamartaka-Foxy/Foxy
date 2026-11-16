@@ -1,6 +1,4 @@
-//! Processor thread count Foxy plans its CPU-bound fan-out around. Auto uses
-//! what the system reports; the user's CPU threads setting overrides it for
-//! the whole process (an app-global setting, so it survives space switches).
+//! CPU-thread planning is app-global and survives game-space switches; the explicit setting overrides detection.
 
 use std::num::NonZeroUsize;
 use std::sync::OnceLock;
@@ -8,15 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::info;
 
-/// Highest thread count the setting accepts with safe limits turned off. Every
-/// fan-out already clamps well below this, so larger values change nothing.
 pub const MAX_CPU_THREADS: u32 = 1024;
 
-/// Applied override; 0 means Auto.
 static CPU_THREAD_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 
-/// Logical processors the system reports, ignoring the user's setting. Read
-/// once: views and the CPU usage limit ask for it many times a second.
 pub fn detected_cpu_threads() -> Option<usize> {
     static DETECTED: OnceLock<Option<usize>> = OnceLock::new();
     *DETECTED.get_or_init(|| {
@@ -26,9 +19,7 @@ pub fn detected_cpu_threads() -> Option<usize> {
     })
 }
 
-/// Thread count CPU-bound work plans around: the applied setting, or the
-/// detected processors on Auto. `None` only when Auto cannot detect them, so
-/// each caller keeps its own fallback.
+/// None means Auto detection failed; callers retain their own fallback.
 pub fn cpu_threads() -> Option<usize> {
     match CPU_THREAD_OVERRIDE.load(Ordering::Relaxed) {
         0 => detected_cpu_threads(),
@@ -54,8 +45,6 @@ pub fn set_cpu_thread_limit(limit: Option<u32>, safe_limits: bool) {
     }
 }
 
-/// Largest value the settings control offers: the detected processors with
-/// safe limits on, otherwise [`MAX_CPU_THREADS`].
 pub fn cpu_thread_limit_max(safe_limits: bool, detected: Option<usize>) -> u32 {
     match detected {
         Some(detected) if safe_limits => u32::try_from(detected)

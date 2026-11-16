@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Builds the Foxy Linux installer using the same layout as the GitHub workflow.
-# Requirements:
-#   - Rust toolchain with the selected Linux target
-#   - Native Linux build dependencies listed in README.md
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

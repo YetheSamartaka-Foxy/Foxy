@@ -1,14 +1,10 @@
 use std::path::Path;
 
-/// Sanitize a filesystem path for logging.
-///
-/// Home-directory paths remain useful as `~`-relative paths. Other absolute
-/// paths keep their full structure with only username segments redacted.
+/// Keep useful path structure while redacting account names; home-relative paths use ~.
 pub(crate) fn sanitize_log_path(path: &std::path::Path) -> String {
     sanitize_log_path_str(&path.display().to_string())
 }
 
-/// Sanitize a string path for logging.
 pub(crate) fn sanitize_log_path_str(path: &str) -> String {
     let path = path.trim();
     if path.is_empty() {
@@ -20,7 +16,7 @@ pub(crate) fn sanitize_log_path_str(path: &str) -> String {
         if let Some(stripped) = path.strip_prefix(&home_str) {
             return format!("~{}", stripped);
         }
-        // Also try forward-slash variant for URLs
+
         let home_fwd = home_str.replace('\\', "/");
         if let Some(stripped) = path.strip_prefix(&home_fwd) {
             return format!("~{}", stripped);
@@ -38,22 +34,13 @@ pub(crate) fn sanitize_log_path_str(path: &str) -> String {
     clean_log_text(path)
 }
 
-/// Clean a URL before it enters logs or exported diagnostics.
-///
-/// Repository and other URLs are kept intact; only stray newlines are removed
-/// so a single log line cannot be split across rows.
+/// Preserve repository URLs but remove newlines so diagnostics remain one record per line.
 pub(crate) fn sanitize_log_url(raw: &str) -> String {
     clean_log_text(raw.trim())
 }
 
-/// Redact the current user's home directory (and account name) from arbitrary
-/// log text.
-///
-/// This is the last line of defense for sinks and exported historical logs.
-/// Only the local account name is removed; repository URLs and other paths are
-/// left intact. Replacing the full home-directory string keeps account names
-/// made of two or more words (e.g. `Daniel Elisak`) from being parsed
-/// incorrectly.
+/// Redact the full home path and local account name, including multi-word names.
+/// Repository URLs and unrelated paths remain intact.
 pub(crate) fn redact_log_text(text: &str) -> String {
     redact_home_paths(&clean_log_text(text))
 }
@@ -77,8 +64,6 @@ fn redact_home_paths(text: &str) -> String {
         return text.to_string();
     }
 
-    // Replace the full home path (handles multi-word account names) in both the
-    // native back-slash form and the normalized forward-slash form.
     let mut out = text.replace(&home_back, &replacement);
     if home_fwd != home_back {
         out = out.replace(&home_fwd, &replacement);
@@ -131,8 +116,6 @@ fn looks_absolute_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── sanitize_log_path_str ───────────────────────────────────────────
 
     #[test]
     fn sanitize_log_path_str_no_home_prefix_returns_original() {
@@ -199,7 +182,6 @@ mod tests {
 
     #[test]
     fn sanitize_log_url_keeps_repository_urls_intact() {
-        // Repository URL anonymization is disabled: the URL is returned as-is.
         assert_eq!(
             sanitize_log_url("https://user:token@example.test/private/repo?sig=abc#frag"),
             "https://user:token@example.test/private/repo?sig=abc#frag"
@@ -223,11 +205,10 @@ mod tests {
         );
         let redacted = redact_log_text(&text);
 
-        // The account name is removed, with the path structure preserved.
         assert!(redacted.contains("<redacted-user>"));
         assert!(redacted.contains("@ace"));
         assert!(!redacted.contains(&account));
-        // Repository / generic URLs are left intact.
+
         assert!(redacted.contains("url=https://token@example.test/a?sig=1"));
     }
 }

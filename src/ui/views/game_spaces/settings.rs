@@ -18,10 +18,7 @@ pub enum GameSpaceSettingsTab {
     Ts3Plugin,
 }
 
-/// State for the per-game-space settings view. When the target space is not
-/// the active one, edits go through `snapshot` and are written straight to
-/// that space's `game_settings.json`; the active space edits the live
-/// settings state and saves through the normal persistence queue.
+/// Edits to an inactive space use its snapshot and save directly to that space; the active space uses live settings and normal persistence.
 #[derive(Default)]
 pub struct GameSpaceSettingsViewState {
     pub space: Option<GameSpaceEntry>,
@@ -97,8 +94,6 @@ impl Foxy {
             .map_err(|err| format!("Failed to parse settings: {}", err))
     }
 
-    /// The space the game-space settings view is editing, falling back to the
-    /// active space so the edit helpers stay safe if the state was reset.
     pub(crate) fn game_space_settings_target(&self) -> GameSpaceEntry {
         if let Some(space) = &self.game_space_settings_view_state.space {
             return space.clone();
@@ -133,9 +128,6 @@ impl Foxy {
         }
     }
 
-    /// Persist the settings edited by the game-space settings view. Active
-    /// space goes through the normal settings save; other spaces write only
-    /// the game-space half into their own `game_settings.json`.
     pub(crate) fn save_edited_game_space_settings(&mut self) {
         if self.editing_active_game_space() {
             self.save_settings();
@@ -157,8 +149,6 @@ impl Foxy {
         }
     }
 
-    /// Apply the name typed in the settings view's rename field to the edited
-    /// space and keep every cached copy of the entry in step with the registry.
     pub(crate) fn rename_edited_game_space(&mut self) {
         let space = self.game_space_settings_target();
         let name = self
@@ -293,9 +283,7 @@ impl Foxy {
                 if capabilities.is_some_and(|caps| caps.teamspeak3_plugins) {
                     tabs.push((GameSpaceSettingsTab::Ts3Plugin, "TS3 Plugin"));
                 }
-                // A tab the active module does not expose must not stay
-                // selected (and silently keep rendering) when the view is
-                // pointed at a different game space.
+                // Clear tabs unsupported by the active module so switching spaces cannot leave an invalid tab selected.
                 if !tabs
                     .iter()
                     .any(|(tab, _)| *tab == self.game_space_settings_view_state.current_tab)

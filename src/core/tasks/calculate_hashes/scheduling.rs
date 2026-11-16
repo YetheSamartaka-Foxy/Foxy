@@ -13,18 +13,15 @@ use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use sysinfo::Disks;
 
-/// A hash job's parts: indices into the tree's part list, which every job of
-/// a pass shares instead of each holding a copy of its file's parts.
 #[derive(Clone)]
 pub(super) struct JobParts {
     all: Arc<Vec<FoxyModFilePart>>,
     indices: Vec<usize>,
-    /// `all[n]` is the part at `indices[n]` rather than at `indices[n]` itself.
+
     positional: bool,
 }
 
 impl JobParts {
-    /// Parts owned by this job alone, keyed by their tree index.
     #[cfg(test)]
     pub(super) fn owned(parts: Vec<(usize, FoxyModFilePart)>) -> Self {
         let (indices, parts): (Vec<usize>, Vec<FoxyModFilePart>) = parts.into_iter().unzip();
@@ -51,7 +48,6 @@ impl JobParts {
         self.indices.is_empty()
     }
 
-    /// Each part with its tree index, in the job's order.
     pub(super) fn iter(&self) -> impl Iterator<Item = (usize, &FoxyModFilePart)> + '_ {
         self.indices.iter().enumerate().map(|(position, &index)| {
             let slot = if self.positional { position } else { index };
@@ -68,8 +64,6 @@ impl JobParts {
     }
 }
 
-/// Move the tree's parts behind one `Arc` for the jobs of a hash pass; hand
-/// them back with [`return_tree_parts`] before anything reads the tree's parts.
 pub(super) fn lend_tree_parts(data_tree: &mut Tree) -> Arc<Vec<FoxyModFilePart>> {
     Arc::new(std::mem::take(&mut data_tree.parts))
 }
@@ -86,9 +80,9 @@ pub(super) struct FileHashJob {
     pub(super) file_remote_checksum: String,
     pub(super) indexed_parts: JobParts,
     pub(super) span_source: PartSpanSource,
-    /// The database already holds a local checksum for the file or a part.
+
     pub(super) has_local_baseline: bool,
-    /// Capture the file identity around the hash, for the verified-hash record.
+
     pub(super) capture_identity: bool,
 }
 
@@ -96,8 +90,7 @@ pub(super) struct FileHashResult {
     pub(super) file_idx: usize,
     pub(super) updated_parts: Vec<(usize, FoxyModFilePart)>,
     pub(super) whole_file_checksum: Option<String>,
-    /// Content fingerprint sampled while the file was hot; see
-    /// `PartHashCalculation::content_hash`.
+
     pub(super) content_hash: Option<String>,
     pub(super) file_path: String,
     pub(super) elapsed: std::time::Duration,
@@ -108,8 +101,7 @@ pub(super) struct FileHashResult {
     pub(super) read_identity: Option<super::verified_record::FileIdentity>,
     pub(super) manifest_signature: String,
     pub(super) part_metrics: super::part_hashes::PartHashMetrics,
-    /// Set when the file matched the remote and did not change while it was
-    /// read, for the verified-hash record.
+
     pub(super) verified: Option<super::verified_record::VerifiedFile>,
 }
 
@@ -221,8 +213,7 @@ impl HashProfileDecision {
 
 const MIN_AUTO_BENCHMARK_FILES: usize = 3;
 const MIN_AUTO_BENCHMARK_BYTES: u64 = 256 * 1024 * 1024;
-/// Most profiles the auto benchmark can try; the sample is sized for one
-/// disjoint group per profile.
+
 const MAX_BENCHMARK_GROUPS: usize = 3;
 const LOW_WAIT_AGGRESSIVE_THRESHOLD: f64 = 0.01;
 const PROFILE_SWITCH_MIN_IMPROVEMENT_PERCENT: f64 = 10.0;
@@ -260,8 +251,7 @@ fn cap_auto_hash_profile(
 pub(super) fn hash_cpu_budget() -> usize {
     let logical_cpus =
         crate::core::utils::cpu_threads::cpu_threads().unwrap_or(CONCURRENCY_LIMIT.max(1));
-    // Reserve ~25% of cores for the OS, UI thread, and other background work.
-    // Floor of 1 ensures at least one worker even on single-core machines.
+    // Reserve capacity for the OS and UI while keeping one worker on single-core systems.
     ((logical_cpus * 3) / 4).max(1)
 }
 
@@ -350,8 +340,7 @@ fn hash_scheduler_limits_for_environment(
         .clamp(1, MAX_FILE_JOB_CONCURRENCY)
         .min(resource_cap);
     let file_concurrency = job_count.min(file_io_budget).max(1);
-    // Global part concurrency is based on the full IO budget - this is the overall cap on
-    // in-flight spawn_blocking tasks across ALL files, controlled via a Semaphore.
+    // One semaphore caps all in-flight blocking hash tasks across files.
     let global_part_concurrency = (cpu_budget * file_oversubscription)
         .clamp(1, MAX_FILE_JOB_CONCURRENCY)
         .min(resource_cap);
@@ -447,17 +436,14 @@ fn detect_hash_storage_class(jobs: &[FileHashJob]) -> HashStorageClass {
     detect_storage_class_for_path(path)
 }
 
-/// How long a refreshed mount table is reused. Long enough that a per-file
-/// lookup is cheap, short enough that plugging a drive in is picked up.
+/// Refresh mount data often enough to detect newly attached drives without per-file queries.
 const STORAGE_CLASS_CACHE_TTL: Duration = Duration::from_secs(60);
 
 type StorageClassMounts = Vec<(PathBuf, HashStorageClass)>;
 
 static STORAGE_CLASS_MOUNTS: Mutex<Option<(Instant, StorageClassMounts)>> = Mutex::new(None);
 
-/// Snapshot of mount point -> storage class. Not space-derived (disk topology is
-/// process-global), but still invalidated on space switch so a space that lives
-/// on a freshly attached drive never inherits a stale classification.
+/// Invalidate mount classification on space switch so a new drive cannot inherit stale state.
 pub(crate) fn invalidate_storage_class_cache() {
     if let Ok(mut guard) = STORAGE_CLASS_MOUNTS.lock() {
         *guard = None;
@@ -497,7 +483,6 @@ fn refresh_storage_class_mounts() -> StorageClassMounts {
         .collect()
 }
 
-/// Storage class the user's setting forces for every drive; 0 means Auto.
 static STORAGE_CLASS_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 fn encode_storage_class(class: Option<HashStorageClass>) -> u8 {
@@ -518,8 +503,6 @@ fn decode_storage_class(encoded: u8) -> Option<HashStorageClass> {
     }
 }
 
-/// Classify every drive as `class` instead of detecting it, or detect again
-/// with `None`.
 pub(crate) fn set_storage_class_override(class: Option<HashStorageClass>) {
     let encoded = encode_storage_class(class);
     if STORAGE_CLASS_OVERRIDE.swap(encoded, Ordering::Relaxed) != encoded {
@@ -716,7 +699,6 @@ fn log_hash_scheduler_selection(
     );
 }
 
-/// `parts` is the tree's part list, lent by [`lend_tree_parts`].
 pub(super) fn build_file_hash_jobs(
     data_tree: &Tree,
     parts: &Arc<Vec<FoxyModFilePart>>,
@@ -756,8 +738,6 @@ pub(super) fn build_file_hash_jobs(
     jobs
 }
 
-/// The storage inputs a file's hash reads depend on, resolved once per run and
-/// carried down to every file.
 #[derive(Clone, Copy)]
 pub(super) struct WholeFileHashIo<'a> {
     storage_class: HashStorageClass,
@@ -792,8 +772,7 @@ impl<'a> WholeFileHashIo<'a> {
         )
     }
 
-    /// Existing files on a local disk are read around the cache: one file at a
-    /// time on rotational storage, a read ahead of the hasher on SSD.
+    /// Read one file at a time on rotational disks; read ahead on SSDs.
     fn direct_read_plan(&self) -> Option<DirectReadPlan> {
         if !cfg!(windows) {
             return None;
@@ -820,8 +799,7 @@ const ROTATIONAL_DIRECT_BLOCK: usize = 16 * 1024 * 1024;
 const ROTATIONAL_DIRECT_DEPTH: usize = 4;
 const SSD_DIRECT_BLOCK: usize = 4 * 1024 * 1024;
 const SSD_DIRECT_DEPTH: usize = 2;
-/// Below this a file is one read either way, and a cached copy may still
-/// answer it from memory.
+/// Below this threshold either path uses one read, and cache may satisfy it.
 const SSD_DIRECT_MIN_LEN: u64 = 1024 * 1024;
 
 async fn calculate_whole_file_checksum_monitored(
@@ -1133,7 +1111,6 @@ pub(super) async fn recalculate_parts_for_jobs(
     }
     let scope_root = scope_root.filter(|_| !root_missing);
 
-    // Shared semaphore limits the total in-flight spawn_blocking hash tasks across all files.
     let semaphore = Arc::new(Semaphore::new(global_part_concurrency));
     let game_formats = crate::core::game::registry().active().content_formats();
 
@@ -1394,8 +1371,6 @@ pub(super) async fn recalculate_parts_for_jobs(
                 _ => None,
             };
 
-            // Parts report their own bytes; whole-file jobs and part lists
-            // without lengths are counted here, once the file is done.
             let part_reported = if indexed_parts.is_empty() {
                 part_calculation.metrics.hashed_bytes
             } else if ptx.is_some() {
@@ -1453,13 +1428,10 @@ pub(super) async fn recalculate_parts_for_jobs(
     (results, was_cancelled)
 }
 
-/// Below this size a file costs about as much in seeking as in reading on a
-/// rotational disk.
+/// Below this size, rotational-disk seek cost approaches read cost.
 const SMALL_HASH_JOB_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Heavy files first so big archives are not starved behind many tiny files,
-/// then the small-file tail in path order, which keeps the files of one addon
-/// (downloaded together) next to each other on disk.
+/// Schedule large files early, then retain path order for the small-file tail.
 fn order_hash_jobs(jobs: &mut [FileHashJob]) {
     jobs.sort_by_cached_key(|job| {
         if job_estimated_bytes(job) >= SMALL_HASH_JOB_BYTES {
@@ -1470,9 +1442,7 @@ fn order_hash_jobs(jobs: &mut [FileHashJob]) {
     });
 }
 
-/// Rotational storage reads jobs in on-disk order, one sweep of the platter,
-/// so the two workers read neighbouring files and every move of the head is
-/// short. Resident and unlocatable files follow in path order.
+/// Order rotational reads by disk location to reduce head movement.
 async fn order_hash_jobs_physically(jobs: &mut Vec<FileHashJob>) {
     let started = Instant::now();
     let paths: Vec<String> = jobs.iter().map(|job| job.file_path.clone()).collect();
@@ -1543,17 +1513,12 @@ pub(super) fn missing_local_hash_pass_is_noop(data_tree: &Tree, file_indices: &[
 const MAX_BENCHMARK_FILES_PER_GROUP: usize = 12;
 const MAX_BENCHMARK_BYTES_PER_GROUP: u64 = 512 * 1024 * 1024;
 
-/// Take the calibration sample out of `jobs`: enough files and bytes for
-/// `groups` disjoint trial groups, so every trial hashes its own data and no
-/// byte is hashed twice or read warm from a previous trial.
 fn split_benchmark_jobs(jobs: &mut Vec<FileHashJob>, groups: usize) -> Vec<FileHashJob> {
     let groups = groups.max(1);
     if jobs.len() < MIN_AUTO_BENCHMARK_FILES {
         return Vec::new();
     }
 
-    // Layout-heavy PBOs can dominate real hashing time even when they are not
-    // the largest files. Prefer those first, then fill the byte budget.
     jobs.sort_by_key(|job| Reverse((job.indexed_parts.len(), job_estimated_bytes(job))));
     let min_files = MIN_AUTO_BENCHMARK_FILES.saturating_mul(groups);
     let max_files = MAX_BENCHMARK_FILES_PER_GROUP.saturating_mul(groups);
@@ -1596,9 +1561,6 @@ fn benchmark_group_load_score(group: &[FileHashJob], totals: (u64, usize, usize)
         + files * total_bytes * total_parts
 }
 
-/// Deal the sample into disjoint trial groups balanced by bytes, parts and
-/// file count. Groups that would be too small to judge are folded back until
-/// every remaining group is sufficient; the result has at least one group.
 fn deal_benchmark_groups(sample: Vec<FileHashJob>, groups: usize) -> Vec<Vec<FileHashJob>> {
     let mut groups = groups.clamp(1, sample.len().max(1));
     let totals = (
@@ -1763,8 +1725,6 @@ fn benchmark_metrics_are_sufficient(metrics: &HashRunMetrics) -> bool {
         && metrics.hashed_bytes >= MIN_AUTO_BENCHMARK_BYTES
 }
 
-/// The checksum algorithm the jobs verify against, for the `SOL op=hash`
-/// line: a BLAKE3 pass and an MD5 pass have different compute references.
 fn hash_algorithm_label(jobs: &[FileHashJob]) -> &'static str {
     let mut blake3 = false;
     let mut md5 = false;
@@ -1833,12 +1793,7 @@ fn log_hash_run_metrics(
         metrics.direct_files,
         metrics.direct_fallback_files
     );
-    // Speed-of-light accounting (see conventions/SPEED_OF_LIGHT.md, O3).
-    // No absolute light is computed in-app; compare this rate to the best
-    // demonstrated hash run for the same storage path. `compute_s` and
-    // `wait_s` are legacy names: they are the summed blocking-task elapsed
-    // (reads and scheduling included, not CPU service) and the summed
-    // semaphore wait, repeated under their accurate names.
+    // SOL rates compare only with the same storage path; `compute_s` includes read and scheduling time, not CPU service.
     let blocking_s = format!("{:.3}", metrics.blocking_hash_elapsed_sum.as_secs_f64());
     let permit_wait_s = format!("{:.3}", metrics.semaphore_wait_elapsed_sum.as_secs_f64());
     let mut extras = vec![
@@ -1954,8 +1909,6 @@ pub(super) fn log_addon_hash_metrics(label: &str, data_tree: &Tree, results: &[F
     }
 }
 
-/// Hashes `jobs`, restoring from the operation's verified-hash record the
-/// files it proves untouched, and refreshing the record from what was read.
 pub(super) async fn recalculate_parts_for_jobs_with_profile(
     mut jobs: Vec<FileHashJob>,
     context: &FoxyContext,
@@ -2333,9 +2286,7 @@ async fn hash_jobs_with_profile(
     );
     let benchmark_file_count = benchmark_jobs.len();
     let benchmark_started = Instant::now();
-    // Every profile hashes its own group of the sample, so the trials neither
-    // repeat work nor read data a previous trial pulled into the page cache.
-    // A sample too small to feed every profile tries the first ones only.
+
     let groups = deal_benchmark_groups(benchmark_jobs, benchmark_profiles.len());
     let group_count = groups.len();
     let trials: Vec<(HashIoProfilePreference, Vec<FileHashJob>)> =
@@ -2420,8 +2371,7 @@ async fn hash_jobs_with_profile(
             limits.global_part_concurrency,
             benchmark_wait_ratio(&metrics)
         );
-        // The group's hashes are real results whatever the trial says about
-        // the profile; they are never recomputed.
+
         let sufficient = benchmark_metrics_are_sufficient(&metrics);
         benchmark_hashed_bytes = benchmark_hashed_bytes.saturating_add(metrics.hashed_bytes);
         trial_progress.initial_files_done += group_files;
@@ -3226,8 +3176,6 @@ mod tests {
 
     #[test]
     fn benchmark_sample_scales_with_the_number_of_trial_groups() {
-        // 40 files of 128 MiB: one group stops at 12 files / 512 MiB, three
-        // groups take three times as much so each trial gets its own data.
         let mut jobs: Vec<FileHashJob> = (0..40).map(|_| test_job(1, 128 << 20)).collect();
         let one = split_benchmark_jobs(&mut jobs.clone(), 1);
         assert_eq!(one.len(), 4);
@@ -3258,13 +3206,11 @@ mod tests {
 
     #[test]
     fn benchmark_groups_fold_back_until_every_group_can_judge() {
-        // Four 96 MiB files: three groups would be one or two files each,
-        // below the minimum, so the sample folds to one group.
         let sample: Vec<FileHashJob> = (0..4).map(|_| test_job(1, 96 << 20)).collect();
         let groups = deal_benchmark_groups(sample, 3);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].len(), 4);
-        // Six such files feed two groups of three, not three of two.
+
         let sample: Vec<FileHashJob> = (0..6).map(|_| test_job(1, 96 << 20)).collect();
         let groups = deal_benchmark_groups(sample, 3);
         assert_eq!(groups.len(), 2);
@@ -3451,11 +3397,8 @@ mod tests {
     }
 
     fn severe_resources() -> ResourceProfile {
-        // available < 1536 MiB → severe pressure
         ResourceProfile::from_memory(16 * 1024 * 1024 * 1024, 1024 * 1024 * 1024, 0)
     }
-
-    // ── cap_auto_hash_profile matrix ────────────────────────────────────
 
     #[test]
     fn cap_auto_profile_normal_pressure_never_caps() {
@@ -3508,8 +3451,6 @@ mod tests {
         assert!(conservative_reason.is_none());
     }
 
-    // ── HashProfileDecision constructors ────────────────────────────────
-
     #[test]
     fn hash_profile_decision_manual_records_override() {
         let decision = HashProfileDecision::manual(HashIoProfilePreference::Aggressive);
@@ -3528,8 +3469,6 @@ mod tests {
         assert!(decision.sticky);
         assert_eq!(decision.reason, "sticky auto decision");
     }
-
-    // ── hash_cpu_budget ─────────────────────────────────────────────────
 
     #[test]
     fn storage_overrides_round_trip_and_unknown_means_auto() {
@@ -3554,8 +3493,6 @@ mod tests {
     fn hash_cpu_budget_is_at_least_one() {
         assert!(hash_cpu_budget() >= 1);
     }
-
-    // ── job_estimated_bytes ─────────────────────────────────────────────
 
     #[test]
     fn rotational_storage_reads_parts_in_larger_requests() {
@@ -3612,15 +3549,13 @@ mod tests {
         assert_eq!(job_estimated_bytes(&job), 4242);
     }
 
-    // ── benchmark_sample_is_sufficient boundaries ───────────────────────
-
     #[test]
     fn benchmark_sample_rejects_below_minimum_file_count() {
         let jobs = vec![
             test_job(1, 200 * 1024 * 1024),
             test_job(1, 200 * 1024 * 1024),
         ];
-        // Two big files easily clear the byte minimum but not the file minimum.
+
         assert!(!benchmark_sample_is_sufficient(&jobs));
     }
 
@@ -3631,7 +3566,7 @@ mod tests {
             test_job(1, 50 * 1024 * 1024),
             test_job(1, 50 * 1024 * 1024),
         ];
-        // Three files (meets count) but only ~150 MiB (< 256 MiB minimum).
+
         assert!(!benchmark_sample_is_sufficient(&jobs));
     }
 
@@ -3642,11 +3577,9 @@ mod tests {
             test_job(1, 90 * 1024 * 1024),
             test_job(1, 90 * 1024 * 1024),
         ];
-        // Three files, ~270 MiB total (>= 256 MiB minimum).
+
         assert!(benchmark_sample_is_sufficient(&jobs));
     }
-
-    // ── hash_scheduler_limits_for_resources under severe pressure ───────
 
     #[test]
     fn balanced_profile_severe_pressure_caps_to_two() {

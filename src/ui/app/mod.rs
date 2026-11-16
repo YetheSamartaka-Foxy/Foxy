@@ -12,6 +12,7 @@ pub(crate) mod profile_backups;
 mod repository;
 mod runtime;
 mod scheduling;
+pub(crate) mod server;
 mod state;
 mod ui_helpers;
 pub(crate) use ui_helpers::activity::{
@@ -51,10 +52,12 @@ pub(crate) use downloads::direct_download_managed_paths_problem;
 pub use repository::game_space_overview::{RepositoryGroupSummary, TeamSpeakSummary};
 pub(crate) use runtime::DatabaseLaunchContinuation;
 pub(crate) use runtime::LaunchRequest;
+pub(crate) use runtime::client_workers::{
+    admit_database_section, current_worker_result, reap_worker,
+};
 pub use scheduling::{HeldScheduledJob, PendingPostAction, ScheduledJobRun};
 pub use state::*;
 
-/// Last logged display metrics: (monitor resolution, app resolution, scale percent).
 pub type DisplayMetricsSnapshot = (Option<[i32; 2]>, Option<[i32; 2]>, i32);
 
 #[derive(Clone, Debug)]
@@ -104,6 +107,9 @@ pub struct Foxy {
     pub(crate) repaint_ctx: Option<egui::Context>,
     pub(crate) agent_gui: Option<AgentGuiRuntime>,
     pub current_view: FoxyView,
+    pub(crate) launch_mode_override: Option<crate::core::app_mode::AppMode>,
+    pub(crate) mode_navigation: runtime::AppModeNavigation,
+    pub(crate) server_view: server::ServerViewState,
     pub last_view: FoxyView,
     pub main_view_state: MainViewState,
     pub repository_view_state: RepositoryViewState,
@@ -123,11 +129,9 @@ pub struct Foxy {
     pub repository_space_detail_filter_space_id: Option<String>,
     pub show_add_repository_modal: bool,
     pub add_repository_input_address: String,
-    /// Optional repository name entered in the add-repository dialog. Empty
-    /// falls back to a name derived from the address.
+
     pub add_repository_input_name: String,
-    /// Optional local download path entered in the add-repository dialog. Empty
-    /// leaves the repository without a chosen folder (resolved later).
+
     pub add_repository_input_path: String,
     pub add_repository_input_error: Option<String>,
     pub pending_repository_duplicate_add: Option<PendingRepositoryDuplicateAddState>,
@@ -158,7 +162,7 @@ pub struct Foxy {
     pub delete_repository_delete_files: bool,
     pub show_force_redownload_confirmation: bool,
     pub show_wipe_db_confirmation: bool,
-    /// Opt-in on the wipe confirmation: also delete the saved benchmarks.
+
     pub wipe_db_include_benchmarks: bool,
     pub show_wipe_repo_db_confirmation: bool,
     pub benchmark_armed: Option<benchmarks::BenchmarkArm>,
@@ -167,44 +171,36 @@ pub struct Foxy {
     pub benchmarks_view: benchmarks::BenchmarksViewState,
     pub benchmark_channels: benchmarks::BenchmarkChannels,
     pub pending_renderer_fallback_notice: bool,
-    /// Outstanding repair requirement, retained while its warning is hidden.
+
     pub pending_db_schema_wipe: Option<crate::core::tasks::db_schema_version::DbSchemaWipePrompt>,
     pub(crate) show_db_schema_wipe_prompt: bool,
     pub(crate) pending_database_launch: Option<runtime::DatabaseLaunchContinuation>,
-    /// Opt-out on the schema wipe prompt: recheck every repository once the wipe lands.
+
     pub db_schema_wipe_recheck_all: bool,
     pub recheck_all_after_database_wipe: bool,
     pub(crate) database_wipe_in_flight: bool,
-    /// Set when another Foxy process already owns this game space's database.
-    /// Turso has no multi-process access, so this window must not touch the data
-    /// at all: the prompt it raises only offers closing Foxy. Carries the owning
-    /// PID when the lock's owner sidecar could be read.
-    pub db_lock_conflict: Option<Option<u32>>,
-    /// Set when a drive Foxy writes its own state through is below the free-space
-    /// floor. Raised once per launch as a toast; a drive that fills mid-sync
-    /// leaves partially written state rather than failing cleanly.
+    /// Turso forbids concurrent processes on one database; when another Foxy owns it, this window may only close.
+    pub db_lock_conflict: Option<crate::core::tasks::db_process_lock::LockOutcome>,
+    /// Warn when a drive Foxy writes through falls below the free-space floor; filling mid-sync can leave partial state.
     pub pending_low_space_notice: bool,
-    /// Storage-check findings waiting to be shown (paths on a filesystem Foxy
-    /// cannot use safely, files the destination cannot hold). Built from the
-    /// background startup report; `None` once dismissed or acknowledged.
+    /// Store startup storage findings until the user dismisses or acknowledges them.
     pub storage_compat_notice: Option<runtime::StorageCompatNotice>,
-    /// Unified selection: either a server or an editor mission in the repository view.
+
     pub repository_selection: Option<RepositorySelection>,
-    /// Cached list of detected Arma 3 profiles.
+
     pub detected_arma3_profiles: Vec<crate::core::arma3_profiles::Arma3Profile>,
     pub(crate) profile_backup_state: profile_backups::ProfileBackupState,
-    /// The auto-detected "currently active" Arma 3 profile name.
+
     pub detected_active_arma3_profile: Option<String>,
-    /// Pending rename/clone/delete action from the Arma 3 profile manager
-    /// in the application settings, awaiting confirmation in a modal.
+
     pub pending_arma3_profile_action: Option<crate::ui::views::settings::Arma3ProfileAction>,
-    /// Cached editor missions for the currently viewed repository.
+
     pub cached_missions: Option<CachedMissionList>,
-    /// In-flight background editor-mission scan. A profile with hundreds of
-    /// missions takes hundreds of milliseconds to walk, and the repository view
-    /// renders on the first frame, so the scan must never run on the UI thread.
-    pub(crate) mission_scan_rx: Option<StdReceiver<CachedMissionList>>,
-    /// Profile name the in-flight scan is for, so repeated frames coalesce.
+    /// Mission scans run off-thread because profiles with many missions can delay first paint.
+    pub(crate) mission_scan_rx: Option<StdReceiver<MissionScanDelivery>>,
+    /// Retained until the handoff joins it. Dropping the handle would detach the scan.
+    pub(crate) mission_scan_worker: Option<std::thread::JoinHandle<()>>,
+
     pub(crate) mission_scan_in_flight: Option<String>,
     pub previous_debug_mode: bool,
     pub stored_settings: Option<SettingsViewState>,
@@ -216,9 +212,7 @@ pub struct Foxy {
     pub repository_optional_addons_list_cache: RepositoryAddonListCache,
     pub repository_external_addons_list_cache: RepositoryExternalAddonsListCache,
     pub mission_row_galleys: MissionRowGalleyCache,
-    /// Per-row galley caches for the remaining virtualized / visibility-culled
-    /// list views, so scrolling does not re-shape newly revealed rows. See
-    /// [`ListGalleyCache`] and [`crate::ui::views::galley_cache`].
+
     pub activity_log_galleys: ListGalleyCache,
     pub repository_list_galleys: ListGalleyCache,
     pub update_detail_file_galleys: ListGalleyCache,
@@ -233,8 +227,9 @@ pub struct Foxy {
     pub(crate) repository_addon_size_load_rx: StdReceiver<RepositoryAddonSizeLoadResult>,
     pub(crate) repository_addon_size_load_tx: StdSender<RepositoryAddonSizeLoadResult>,
     pub(crate) repository_addon_size_load_pending: bool,
+    pub(crate) repository_addon_size_load_worker: Option<std::thread::JoinHandle<()>>,
     pub repository_addon_size_bytes_by_repo_and_addon: HashMap<(String, String), u64>,
-    // For repository settings
+
     pub selected_repository_for_settings: Option<usize>,
     pub current_repository_settings_tab: RepositorySettingsTab,
     pub current_help_tab: HelpTab,
@@ -259,62 +254,67 @@ pub struct Foxy {
     pub server_statuses: HashMap<(String, String), ServerStatusCache>,
     pub server_refresh_indicator_until: HashMap<(String, String), Instant>,
     pub pending_server_queries: HashSet<(String, String)>,
+    pub(crate) server_query_generation: runtime::ServerQueryGeneration,
+    /// Closed while a game-space handoff is draining client workers.
+    pub(crate) client_db_admission: runtime::DbAdmission,
+    pub(crate) client_worker_handoff_active: bool,
+    pub(crate) mode_ownership: runtime::ownership::ModeOwnership,
     pub pending_queries: Vec<std::thread::JoinHandle<()>>,
-    pub server_updates: StdReceiver<(String, String, ServerOnlineStatus)>,
-    pub updates_sender: StdSender<(String, String, ServerOnlineStatus)>,
+    pub(crate) server_updates: StdReceiver<runtime::ServerQueryResult>,
+    pub(crate) updates_sender: StdSender<runtime::ServerQueryResult>,
     pub join_preflight_worker: Option<std::thread::JoinHandle<()>>,
     pub join_preflight_result_rx: StdReceiver<JoinPreflightQueryResult>,
     pub join_preflight_result_tx: StdSender<JoinPreflightQueryResult>,
     image_result_rx: StdReceiver<ImageLoadResult>,
     image_result_tx: StdSender<ImageLoadResult>,
     pending_image_jobs: HashSet<(String, bool)>,
+    /// Capture the cache directory at dispatch so a late image fetch cannot write into the next space.
+    image_workers: Vec<std::thread::JoinHandle<()>>,
     repo_metadata_result_rx: StdReceiver<RepoMetadataFetchResult>,
     repo_metadata_result_tx: StdSender<RepoMetadataFetchResult>,
-    /// Repository addresses with an in-flight background metadata fetch, to
-    /// avoid dispatching duplicate concurrent fetches for the same repo.
+
     pending_repo_metadata_jobs: HashSet<String>,
-    /// Background repository-space manifest import (network fetch off the UI
-    /// thread). Results are applied by `poll_repository_space_import_results`.
+    repo_metadata_workers: Vec<std::thread::JoinHandle<()>>,
+
     repository_space_import_result_rx: StdReceiver<RepositorySpaceImportResult>,
     repository_space_import_result_tx: StdSender<RepositorySpaceImportResult>,
-    /// True while a repository-space manifest fetch is in flight, to disable
-    /// duplicate dispatches (e.g. repeated dialog submits) while it runs.
-    /// Read from view code to show progress; only mutated within app modules.
+
     pub(crate) repository_space_import_in_flight: bool,
-    /// In-flight refresh of space manifests (launch, periodic, or manual).
+
     pub(crate) repository_space_freshness_rx: Option<
         StdReceiver<crate::ui::app::repository::space_freshness::RepositorySpaceFreshnessResult>,
     >,
-    /// When the last refresh of every space started; drives the periodic recheck.
+    repository_space_freshness_worker: Option<std::thread::JoinHandle<()>>,
+
     pub(crate) repository_space_last_refresh: Option<Instant>,
-    /// Last idle metadata sweep in this game space.
+
     pub(crate) periodic_remote_check_last_run: Option<Instant>,
     pub(crate) dispatching_background_sync: bool,
     pub(crate) repository_space_remote_changes:
         crate::ui::app::repository::space_freshness::RepositorySpaceRemoteChanges,
-    /// Background addon hash recalculation (file hashing off the UI thread).
-    /// Results are applied by `poll_addon_hash_recalc_results`.
+
     addon_hash_recalc_result_rx: StdReceiver<AddonHashRecalcResult>,
     addon_hash_recalc_result_tx: StdSender<AddonHashRecalcResult>,
-    /// True while an addon hash recalculation worker is running.
+
     addon_hash_recalc_in_flight: bool,
-    /// Background addon deletion from repository settings.
+    addon_hash_recalc_worker: Option<std::thread::JoinHandle<()>>,
+
     addon_delete_result_rx: StdReceiver<AddonDeleteResult>,
     addon_delete_result_tx: StdSender<AddonDeleteResult>,
     pending_addon_deletes: HashSet<String>,
-    /// Background remote reachability probe that precedes an addon force
-    /// redownload. Results are applied by `poll_addon_force_redownload_results`.
+    maintenance_workers: Vec<std::thread::JoinHandle<()>>,
+
     addon_force_redownload_result_rx: StdReceiver<AddonForceRedownloadProbeResult>,
     addon_force_redownload_result_tx: StdSender<AddonForceRedownloadProbeResult>,
-    /// Normalized addon folders with a probe in flight.
+
     pending_addon_force_redownloads: HashSet<String>,
-    /// Background load of a repository's cached pending-update payload from the
-    /// database. Results are applied by `poll_cached_update_load_results`.
+    force_redownload_workers: Vec<std::thread::JoinHandle<()>>,
+
     cached_update_load_result_rx: StdReceiver<CachedUpdateLoadResult>,
     cached_update_load_result_tx: StdSender<CachedUpdateLoadResult>,
-    /// Repository URLs with an in-flight cached pending-update load, to avoid
-    /// dispatching duplicate concurrent reads for the same repository.
+
     pending_cached_update_loads: HashSet<String>,
+    cached_update_load_workers: Vec<std::thread::JoinHandle<()>>,
     pub quick_scan_rx: StdReceiver<QuickScanResult>,
     pub quick_scan_tx: StdSender<QuickScanResult>,
     pub quick_scan_progress_rx: StdReceiver<QuickScanProgressEvent>,
@@ -322,7 +322,7 @@ pub struct Foxy {
     pub quick_scan_worker: Option<std::thread::JoinHandle<()>>,
     startup_quick_scan_filter_rx: Option<StdReceiver<StartupQuickScanFilterResult>>,
     startup_quick_scan_filter_worker: Option<std::thread::JoinHandle<()>>,
-    /// Repositories whose launch probe got no answer. Retried off the paint path.
+
     startup_probe_unknown: Vec<crate::core::api::StartupRepositoryInstance>,
     startup_probe_retry_armed_at: Option<Instant>,
     startup_probe_retries_completed: u32,
@@ -332,35 +332,24 @@ pub struct Foxy {
     pub fs_watch_tx: StdSender<api::FsChangeEvent>,
     pub fs_watch_worker: Option<std::thread::JoinHandle<()>>,
     pub fs_watch_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// Set by the worker when it exited without ever watching (nothing to
-    /// index yet); the owner then waits for the index to be marked dirty or
-    /// for the retry interval instead of respawning it every frame.
+    /// Retry an empty watcher only after its index changes or the retry interval, not every frame.
     pub fs_watch_idle_exit: Arc<std::sync::atomic::AtomicBool>,
     pub fs_watch_idle_retry_at: Option<Instant>,
     pub fs_watch_suppressed_until_ms: Arc<AtomicU64>,
-    /// Watched repository folders of the running watcher, so a repository added
-    /// or removed after startup restarts it instead of being ignored for the
-    /// rest of the session.
+    /// Restart the watcher when configured folders change.
     pub fs_watch_signature: Option<String>,
     /// Set when the watcher's repository/addon index may be stale (a sync
     /// created or changed addon rows it was spawned without).
     pub fs_watch_index_dirty: bool,
     pub fs_watch_observed_repositories_revision: u64,
-    /// Repositories whose folder the watcher saw change since a download queue
-    /// was last prepared for them; the next queue-building sync rebuilds
-    /// instead of reusing the prepared queue.
+    /// Rebuild a prepared download queue when the watcher marks its repository folder changed.
     pub fs_changed_since_prepare: HashSet<String>,
-    /// Consecutive watcher-triggered quick scans that found nothing. A
-    /// read-only disk walk (an indexer, an antivirus pass, the app's own
-    /// inventory scan) can raise events for a minute straight; after the
-    /// second clean scan the next ones are held back for a growing window.
+    /// Back off after repeated clean watcher scans because unrelated disk walks can emit events continuously.
     pub fs_watch_clean_scan_streak: u32,
     pub fs_watch_backoff_until: Option<Instant>,
-    /// Repositories the watcher reported while the backoff window was open;
-    /// scanned once, together, when it closes.
+    /// Scan backoff events together when the window closes.
     pub fs_watch_backoff_urls: HashSet<String>,
-    /// Repositories whose queued quick scan was raised by the watcher, so its
-    /// outcome feeds the clean-scan streak.
+    /// Track watcher-triggered scans so their outcomes update the clean-scan streak.
     pub fs_watch_scan_urls: HashSet<String>,
     pub deferred_fs_scan: HashSet<String>,
     pub pending_quick_scan_urls: HashSet<String>,
@@ -375,12 +364,18 @@ pub struct Foxy {
     pending_repository_db_wipe_started_at: HashMap<String, Instant>,
     repository_db_wipe_rx: StdReceiver<RepositoryDbWipeResult>,
     repository_db_wipe_tx: StdSender<RepositoryDbWipeResult>,
-    /// Completion channel for the global settings database wipe.
-    database_wipe_rx: StdReceiver<Result<(), String>>,
-    pub(crate) database_wipe_tx: StdSender<Result<(), String>>,
+
+    database_wipe_rx: StdReceiver<DatabaseWipeDelivery>,
+    pub(crate) database_wipe_tx: StdSender<DatabaseWipeDelivery>,
+    pub(crate) database_wipe_worker: Option<std::thread::JoinHandle<()>>,
     addon_backup_task_rx: StdReceiver<AddonBackupTaskResult>,
     addon_backup_task_tx: StdSender<AddonBackupTaskResult>,
     pub addon_backup_worker: Option<std::thread::JoinHandle<()>>,
+    pending_update_clear_workers: Vec<std::thread::JoinHandle<()>>,
+    overview_worker: Option<std::thread::JoinHandle<()>>,
+    pub(crate) ts3_plugin_scan_worker: Option<std::thread::JoinHandle<()>>,
+    repository_space_import_worker: Option<std::thread::JoinHandle<()>>,
+    benchmark_workers: Vec<std::thread::JoinHandle<()>>,
     pub addon_backup_status: Option<AddonBackupTaskStatus>,
     pub addon_backup_notice: Option<AddonBackupNotice>,
     pub addon_backup_restore_state: Option<AddonBackupRestoreState>,
@@ -416,27 +411,28 @@ pub struct Foxy {
     direct_download_progress_rx: Option<StdReceiver<DirectDownloadProgressEvent>>,
     pub direct_download_worker: Option<std::thread::JoinHandle<()>>,
     pub direct_download_update_view: bool,
-    // TS3 plugin update prompt (shown after download when plugin was updated)
+
     pub ts3_plugin_update_prompt: Option<Ts3PluginUpdatePrompt>,
-    // TS3 plugin background scan state
+
     pub ts3_plugin_cache: Option<Vec<crate::core::ts3_plugin::Ts3PluginStatus>>,
     pub ts3_plugin_scan_rx: Option<StdReceiver<Ts3PluginScanResult>>,
     pub ts3_plugin_scanning: bool,
     pub ts3_running_cache: Option<bool>,
-    /// Whether the in-flight scan should raise the post-download update prompt.
+
     pub ts3_plugin_scan_prompt_on_update: bool,
-    /// A scan requested while one was already running; starts once that lands.
+
     pub ts3_plugin_scan_requeued: bool,
     pub(crate) prelaunch_process_checks: repository::prelaunch_checks::PrelaunchProcessChecks,
     pub(crate) launch_action: runtime::LaunchActionState,
     pub(crate) pending_installer_path: Option<std::path::PathBuf>,
     pub(crate) pending_installer_error: Option<String>,
+    pub(crate) installer_owner_check: runtime::InstallerOwnerCheck,
     pub(crate) shutdown_after_close: bool,
     pub(crate) configuration_recovery_error: Option<String>,
-    // Core sync
+
     pub backend_progress_rx: Option<BroadcastReceiver<ProgressEvent>>,
     pub backend_worker: Option<std::thread::JoinHandle<()>>,
-    startup_pending_restore_rx: Option<StdReceiver<Vec<StartupPendingUpdateRestoreRecord>>>,
+    startup_pending_restore_rx: Option<StdReceiver<StartupPendingUpdateRestoreBatch>>,
     startup_pending_restore_worker: Option<std::thread::JoinHandle<()>>,
     pub startup_repository_layout_logged: bool,
     pub startup_recheck_queue: VecDeque<(String, String, SyncMode)>,
@@ -444,28 +440,23 @@ pub struct Foxy {
     pub repository_visual_folder_sync_queue:
         VecDeque<repository::space_actions::QueuedRepositoryVisualFolderSync>,
     pub addon_hash_recalc_queue: VecDeque<(String, String)>,
-    /// The scheduled job currently executing its recheck/download pipeline, if
-    /// any. Runtime-only; never persisted. See `src/ui/app/scheduling/`.
+
     pub scheduler_active_run: Option<ScheduledJobRun>,
-    /// A pending post-action (close app / shut down PC) waiting out its
-    /// cancellable countdown before it fires. Runtime-only.
+
     pub scheduler_pending_post_action: Option<PendingPostAction>,
     pub(crate) scheduler_deferred_post_actions: Vec<PendingPostAction>,
-    /// Due occurrences held back while other work ran, by job id. Holding
-    /// does not age them toward the missed-grace window. Runtime-only.
+
     pub scheduler_held_jobs: HashMap<String, HeldScheduledJob>,
-    /// Wall-clock time of the previous scheduler tick, which tells a sleeping
-    /// computer apart from a job that is only waiting.
+
     pub scheduler_last_tick_at: Option<chrono::DateTime<chrono::Local>>,
-    /// Enabled-addon fingerprint per repository instance as its database last
-    /// stored it, so a changed selection can queue a quick local check.
+
     pub addon_selection_baseline: HashMap<String, u64>,
-    /// Repository instances waiting for that check, by instance key.
+
     pub pending_addon_selection_checks: HashSet<String>,
-    /// Open editor draft for the Scheduling tab (Add/Edit). Runtime-only.
+
     pub scheduling_editor: Option<ScheduleJobDraft>,
     pub syncing_repository: Option<usize>,
-    /// Repositories that need a repo.json metadata refresh on the next frame.
+
     pub pending_repo_metadata_refresh: Vec<usize>,
     pub pending_update_cache: HashMap<String, Vec<ModDiffSummary>>,
     pub mod_diff_cache: Vec<ModDiffSummary>,
@@ -513,8 +504,7 @@ pub struct Foxy {
     pub(crate) download_transfer_attempt: u32,
     pub download_finished_repo: Option<usize>,
     pub download_summary: Option<DownloadSummary>,
-    /// The downloader refused the last run for this repository index because
-    /// its volume is short of space; the update modal explains it in place.
+    /// Keep the last space-shortfall result so the update modal can explain the refused download.
     pub download_disk_space_shortfall:
         Option<(usize, crate::core::utils::disk_space::DiskSpaceShortfall)>,
     pub update_modal_disk_space_probe: Option<UpdateModalDiskSpaceProbe>,
@@ -543,14 +533,11 @@ pub struct Foxy {
     pub recheck_hash_counter: Option<(usize, usize)>,
     pub recheck_hash_part_counter: Option<(usize, usize)>,
     pub recheck_hash_byte_counter: Option<(u64, u64)>,
-    /// Highest hash fraction shown in this check, so the post-hash stages,
-    /// which carry their own lower percents, never move the bar backward.
+    /// Track the highest hash fraction so later stages with lower percentages do not move the bar backward.
     pub recheck_progress_peak: Option<f32>,
-    /// Where the bar stood when the hash pass began; the pass fills the rest,
-    /// so the bar does not fall from the remote stages' percent back to zero.
+    /// Continue from the progress reached before hashing so the bar never falls back to zero.
     pub recheck_progress_floor: Option<f32>,
-    /// `(remaining_bytes, bytes_per_sec)` from the hash benchmark sample, shown
-    /// as size and ETA next to the hash counter while a baseline runs.
+
     pub recheck_hash_estimate: Option<(u64, u64)>,
     pub last_hash_progress_repaint: Option<Instant>,
     pub download_hash_sample_at: Option<Instant>,
@@ -559,9 +546,7 @@ pub struct Foxy {
     pub completed_repository_check_banner: Option<RepositoryCheckCompletionState>,
     pub completed_repository_db_wipe_banner: Option<RepositoryDbWipeCompletionState>,
     pub repo_states: HashMap<String, RepoState>,
-    /// Bumped whenever a repository's sync state changes, so the repository list
-    /// filter cache knows to rebuild when filtering by installed/not-installed
-    /// state.
+    /// Invalidate repository-list filter results whenever sync state changes.
     pub repo_states_version: u64,
     pub repo_foxy_modes: HashMap<String, bool>,
     pub pending_repository_context_confirmation: Option<RepositoryContextConfirmAction>,
@@ -570,17 +555,13 @@ pub struct Foxy {
     pub pending_repository_visual_folder_delete: Option<RepositoryVisualFolderDeleteState>,
     pub startup_frame_rendered: bool,
     pub startup_tasks_started: bool,
-    /// Result of the background startup system summary: `true` when a drive
-    /// Foxy writes through is critically full. Building the summary costs
-    /// hundreds of milliseconds, so it never gates the first frame.
+    /// Build the startup storage summary off-thread because it can take hundreds of milliseconds.
     pub(crate) startup_diagnostics_rx: Option<StdReceiver<api::StartupDiagnosticsReport>>,
-    /// Process start to first painted frame; `None` until that frame lands.
+
     pub(crate) startup_first_frame_at: Option<Duration>,
-    /// Repositories the startup quick-scan plan was asked to consider. Held on
-    /// `Foxy` rather than in the tracker because the plan starts during
-    /// `Foxy::new`, before the tracker exists.
+
     pub(crate) startup_quick_scan_requested: usize,
-    /// O8 timeline for this launch; `None` until startup work is dispatched.
+
     pub(crate) startup_sync: Option<runtime::StartupSyncTracker>,
     pub close_requested_at: Option<Instant>,
     /// Set while a close waits for a cancelled sync to roll back its files.
@@ -603,11 +584,9 @@ pub struct Foxy {
     pub(crate) editor_launch_cooldown_until: Option<Instant>,
     pub(crate) last_incomplete_config_sync_toast_at: Option<Instant>,
     pub show_memory_diagnostics_window: bool,
-    /// Smoothed frames-per-second estimate driving the optional on-screen FPS
-    /// counter. Runtime-only; not persisted.
+
     pub fps_ema: f32,
-    /// Recent frame intervals in milliseconds while a frame probe keeps the
-    /// UI repainting, so the agent probe can report stalls, not only an average.
+
     pub frame_intervals_ms: VecDeque<f32>,
     pub memory_diagnostics_history: VecDeque<MemoryDiagnosticsSample>,
     pub memory_diagnostics_pinned_baseline: Option<MemoryDiagnosticsSample>,
@@ -622,13 +601,11 @@ pub struct Foxy {
     pub default_repo_image_texture_bytes: usize,
     pub last_applied_palette: Option<palette::PaletteColors>,
     pub cached_color32: Option<CachedPaletteColor32>,
-    /// Size of egui's font atlas the last time the persistent galley caches were
-    /// checked. A change signals an atlas recreation/growth that invalidates any
-    /// `Arc<Galley>` held across frames, so we drop those caches the frame it moves.
+    /// Drop cached galleys when the font atlas changes; their UVs no longer reference the current atlas.
     pub last_font_image_size: [usize; 2],
     pub last_font_pixels_per_point: f32,
     pub last_saved_window_state: Option<WindowState>,
-    /// Used to log monitor/app resolutions at startup and whenever they change.
+
     pub last_logged_display_metrics: Option<DisplayMetricsSnapshot>,
     pub tray_manager: Option<TrayManager>,
     pub hidden_to_tray: bool,
@@ -648,7 +625,7 @@ pub struct Foxy {
     backup_inventory_refresh_in_progress: bool,
     backup_inventory_request_id: u64,
     backup_inventory_in_flight_request_id: Option<u64>,
-    // App update system
+
     pub app_update_status: crate::core::tasks::app_update::UpdateCheckStatus,
     pub app_update_event_rx: Option<StdReceiver<crate::core::tasks::app_update::AppUpdateEvent>>,
     pub app_update_download_rx: Option<StdReceiver<crate::core::tasks::app_update::AppUpdateEvent>>,
@@ -659,35 +636,29 @@ pub struct Foxy {
     pub app_update_changelogs: Vec<crate::core::tasks::app_update::ChangelogVersion>,
     pub app_update_changelog_loading: HashSet<String>,
     pub app_update_changelogs_requested: bool,
-    /// Set when the launch update check found a newer release, so the blocking
-    /// update prompt is shown. Never persisted: dismissal only lasts for the
-    /// session, so the prompt returns on every launch until Foxy is updated.
+    /// Show the launch update prompt for this session only; it returns next launch until Foxy is updated.
     pub pending_app_update_prompt: bool,
     /// Armed by the launch update check so only that check can raise the
     /// prompt; a manual re-check from settings must not reopen it.
     pub app_update_prompt_armed: bool,
-    /// Startup modals forced open by `ui --debug-modal` for inspection. Their
-    /// real side effects stay disabled while a preview is active.
+    /// Debug-modal previews skip their real side effects.
     pub debug_modal_previews: Vec<debug_modals::DebugModal>,
-    // Swifty migration
+
     pub swifty_migration_state: crate::ui::views::swifty_migration::types::SwiftyMigrationState,
-    // Game spaces
+
     pub game_spaces_view_state: crate::ui::views::game_spaces::GameSpacesViewState,
     pub game_space_settings_view_state:
         crate::ui::views::game_spaces::settings::GameSpaceSettingsViewState,
-    /// Runtime game-space switch waiting for pending saves to drain before it
-    /// swaps the active space and reloads.
+
     pub pending_game_space_switch: Option<crate::core::game::spaces::GameSpaceEntry>,
-    /// When the pending switch was requested, for the `SOL op=space_switch`
-    /// record (request to the new space visible).
+    /// Record when a space-switch request becomes visible in the target state.
     pub game_space_switch_requested_at: Option<std::time::Instant>,
-    // Steam Workshop
+
     pub workshop_view_state: crate::ui::views::workshop::WorkshopViewState,
     pub(crate) addon_workshop_lookups: Vec<StdReceiver<Option<String>>>,
-    /// Result channel of the Workshop worker. Workshop actions download through
-    /// the Steam helper subprocess or copy whole mod folders, so none of them
-    /// may run on the frame loop.
+    /// Run Workshop downloads and folder copies off the frame loop.
     pub workshop_task_rx:
         Option<std::sync::mpsc::Receiver<crate::ui::views::workshop::tasks::WorkshopTaskOutcome>>,
     pub workshop_task_worker: Option<std::thread::JoinHandle<()>>,
+    pub(crate) workshop_task_generation: u64,
 }

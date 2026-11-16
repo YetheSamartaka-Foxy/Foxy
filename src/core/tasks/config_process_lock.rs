@@ -1,5 +1,3 @@
-//! One operational Foxy process per configuration root.
-
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};

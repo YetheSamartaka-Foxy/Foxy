@@ -1,11 +1,41 @@
 # Examples conventions
 
+- `examples/json/server_backend/server_consumer_cleanup_receipt.json` is a strict v1 cleanup receipt containing a context-bound v2 consumer with a valid canonical synthetic hash. `server_consumer_recovery_plan.json` illustrates reviewed eligible and retained legacy records. All identities and plan fingerprints are synthetic and grant no recovery authority. The existing v1 consumer example remains legacy-readable.
+- `examples/json/server_backend/server_scheduled_jobs.json` is a valid maintenance job catalog (a weekly local-time restart that requires an empty server and a one-time UTC restart), and `server_scheduled_occurrence.json` is an `unknown`/`owner_lost` occurrence of its first job whose id is the real derivation from instance, job, policy revision and trigger. A unit test parses both; change them together with the catalog or ledger schema. The older `server_maintenance_intent.json` and `server_maintenance_receipt.json` describe native installation maintenance, not scheduled jobs.
+
 - Use `examples/` for reference data, test fixtures, and reproducible sample configs.
 - Current JSON examples live in:
+  - `examples/json/server_backend/reforger_native_definition.json` (typed Reforger definition with explicit loopback game/A2S bind address and an official built-in scenario; compatibility still requires an accepted native executable)
+  - `examples/json/server_backend/arma3_mission_cycle.json` (ordered typed enabled/source/difficulty/Params entries; library IDs are unresolved placeholders, never bundled mission bytes)
+  - `examples/json/server_backend/arma3_headless_clients.json` (typed Arma draft with enabled, explicit-selection and disabled headless clients and their lifecycle policies, plus the frozen `headless_clients` entries a committed native runtime manifest carries; ids, sources and mods are placeholders)
+  - `examples/json/server_backend/arma3_headless_status.json` (owner-observed per-HC status as carried in `MonitoringSnapshot.headless` and printed by `server headless status` in `data.clients`: running and joined, restart-suspended after exhausting its budget, and a manual-start client; ids and times are placeholders)
   - `examples/json/appdata/` (`app_settings.json`, `games.json`, `window_state.json`)
   - `examples/json/appdata/games/arma3/` (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `repository_visual_folders.json`, `extra_files.json`, `workshop.json`)
   - `examples/json/appdata/games/twwh3/` (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `extra_files.json`, `workshop.json`)
   - `examples/json/appdata/games/reforger/` (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `extra_files.json`, `workshop.json`, `reforger_addons.json`)
+  - `examples/json/appdata/games/{arma3,reforger}/server/servers.json` (versioned typed dedicated-server draft catalogs; independent of the sync DB)
+  - `examples/json/appdata/games/{arma3,reforger}/server/content-sources.json` (schema-v1 folder/profile registry; empty templates do not claim acquired bytes)
+  - `examples/json/server_backend/content_plan_bindings.json` (ordered profile `source_id`, role and order inputs for content preview or reviewed binding save)
+  - `examples/json/appdata/games/{arma3,reforger}/server/instances/<id>/content-bindings.json` (schema-v1 saved empty selection with generation/review tokens; synthetic catalog fingerprint requires fresh review)
+  - `examples/json/server_backend/content_stage_manifest.json` (schema-v1 local stage manifest shape with synthetic paths and hashes; reference only, not a published stage)
+  - `examples/json/server_backend/acquired_content_stage_manifest.json` (schema-v1 stage manifest showing an acquisition snapshot with the original repository URL/local path, publication checksum and addon checksums; all paths and hashes are synthetic and reference-only)
+  - `examples/json/appdata/games/{arma3,reforger}/server/instances/<id>/configuration/state.json` (empty version-1 configuration revision selection; catalog instances use schema v2)
+  - `examples/json/appdata/games/{arma3,reforger}/server/instances/<id>/deployments/records/<record-id>/manifest.json` (schema-v1 offline record pinning retained configuration and content archives)
+  - `examples/json/appdata/games/{arma3,reforger}/server/instances/<id>/deployments/state.json` (schema-v1 offline record inventory and selection state)
+  - `examples/json/appdata/games/{arma3,reforger}/server/instances/<id>/deployments/pins.json` (schema-v1 pin generation with an empty record set; reference only)
+  - `examples/json/server_backend/deployment_preparation_manifest.json` (schema-v1/layout-v1 offline preparation manifest shape with synthetic hashes and empty candidate files; reference only, not a verifiable generation or accepted runtime layout)
+  - `examples/json/server_backend/native_runtime_manifest.json` (strict schema-v1 private native-runtime manifest shape with synthetic installation evidence and empty inventories; reference only, never a compatible or verified runtime)
+  - `examples/json/server_backend/native_steam_session_record.json` (synthetic schema-v1 encrypted-session record shape; placeholder context and ciphertext are not importable credentials)
+  - `examples/json/server_backend/managed_installation_manifest.json` (synthetic `foxy-installation.json` written at the root of a native Steam managed installation; build, manifest GIDs and hashes are placeholders and grant nothing)
+  - `examples/json/server_backend/reforger_experimental_installation_manifest.json` (same managed receipt with explicit experimental channel/app; its Steam branch is independently `public`, and build/depot/hash values are synthetic)
+  - `examples/json/appdata/games/arma3/server/workshop/workshop.json` (synthetic tracked-Workshop document: pinned manifest, retained revisions and the matching `workshop-<id>` content profile name)
+  - `examples/json/server_backend/workshop_revision_inventory.json` (synthetic `inventory.json` stored beside each verified Workshop revision; hashes are placeholders)
+  - `examples/json/server_backend/{arma3,reforger}_configuration_revision.json` (Rust-generated version-1 configuration archive manifests; compatibility fixtures validated against the renderer)
+  - `examples/json/server_backend/server_consumer_registration.json` (strict schema-v1 supervisor coordination record; synthetic physical identity and session IDs, no PID, paths or secrets)
+  - `examples/json/server_backend/activation_journal.json` (internal schema-v1 activation intent with nested active-reference state, optional immutable native-runtime reference and synthetic physical identity/hashes; reference only, never activation authority)
+  - `examples/json/server_backend/server_maintenance_intent.json` and `server_maintenance_receipt.json` (strict physical-installation coordination schema-v1 shapes; synthetic hashes and transaction evidence require real review, not usable coordination records)
+  - `examples/json/server_backend/activation_resolution.json` (internal schema-v1 resolution evidence shape; synthetic intent/journal hashes, not an accepted receipt or engine-readiness proof)
+  - `examples/json/server_backend/reconciliation_receipt.json` (strict schema-v1 quarantine-removal receipt shape with synthetic context and instance values; reference only, never deletion authority)
   - `examples/json/appdata/games/generic/` (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `extra_files.json`, `workshop.json`)
   - `examples/json/remote_repositories/` (`repository_space.json`, `repo.json`)
   - `examples/json/server_backend/` (`space.json`, the `foxy-server-backend-cli create-space` input; `reforger_config.json`, a `create` config with `"game": "reforger"`; `generic_config.json`, a custom game `create` config with `"game": "generic"`, `"chunking": "content"`, and a `gameBuild`; `reforger_server_mods.json`, an exported `game.mods` fragment)
@@ -18,3 +48,9 @@
 - `games/arma3/storage_targets.json` illustrates the space-local normalized-path to device-identity map. `extra_file_activations.json` records successful destination evidence and reviewed layer signatures; these machine-local records are not portable config-pack contents.
 - The settings examples must match the partition in `GAME_SPACE_SETTINGS_KEYS` (`src/core/game/spaces/settings_split.rs`): a key listed there belongs in a space's `game_settings.json`, never in `app_settings.json`. Moving a key between halves means moving it in the examples too.
 - Treat examples as non-production data: do not store secrets, tokens, or personal local paths.
+- `examples/json/server_backend/reforger_addon_lock.json` illustrates desired latest intent, exact realized provider versions and a retained optional omission. Its paths and identifiers are synthetic and grant no installation or content authority. `ContentStageManifest.reforger_addons` and `NativeRuntimeManifest.reforger_addons` are optional and omitted for existing Arma archives.
+- `examples/json/server_backend/arma3_instance_pack.json` is the version-1 standalone `foxy-server-instance` pack reference. It carries no installation/credential authority; canonical credential references and unresolved paths must stay explicit. It is separate from client `.foxypack` archives.
+- `examples/json/server_backend/arma3_managed_configuration.json` is a complete typed instance reference; `examples/arma3/` contains independent native-format rendering fixtures. Preserve the legacy configuration-revision examples so omitted new settings remain archive-compatible.
+- `examples/json/server_backend/arma3_key_trust_instance.json` shows an Arma instance with a reviewed `key_trust` policy for a disposable test public key. Never place real publisher keys, private keys or user key provenance in examples.
+- `examples/json/server_backend/server_instance_runtime_status.json` is a synthetic owner observation. Its process ID is diagnostic only; a running process does not establish readiness or cleanup authority.
+- `examples/json/server_backend/server_installation_build_observation.json` is an ephemeral inspection result with synthetic version/build values. It grants no layout, vendor or package verification and is never persisted in the server catalog.

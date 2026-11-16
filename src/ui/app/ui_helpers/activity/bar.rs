@@ -10,34 +10,29 @@ use super::map::{
 use super::triangles::{Tones, TriangleGrid, blink};
 use super::{Motion, bump, fade, mix, noise, particle_life};
 
-/// One bubble per this many filled triangles across, up to `MAX_BUBBLES`.
 const COLUMNS_PER_BUBBLE: usize = 5;
 const MAX_BUBBLES: usize = 48;
-/// One twinkle per this many filled triangles across, up to `MAX_TWINKLES`.
+
 const COLUMNS_PER_TWINKLE: usize = 3;
 const MAX_TWINKLES: usize = 64;
-/// How much a triangle's own blink lights it.
+
 const BLINK_LIGHT: f32 = 0.45;
-/// Sparkles drift off the frontier only once triangles are this tall.
+
 const DUST_MIN_CELL: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum BarMotion {
-    /// Work is moving: the filled triangles blink, bubbles of light climb
-    /// through them and the frontier glows.
     Forward,
-    /// Work is being undone, such as a cancel rolling changes back: the
-    /// bubbles sink.
+
     Backward,
-    /// Waiting on the user.
+
     Held,
-    /// Nothing is running.
+
     #[default]
     Still,
 }
 
-/// Triangles fill with mana while work runs; resting and completed bars use
-/// solid fills. Drop-in for `egui::ProgressBar`: same default size and track color.
+/// Use solid fills at rest/completion and mana triangles while active; matches `egui::ProgressBar` sizing and track color.
 #[must_use = "You should put this widget in a ui with `ui.add(widget);`"]
 pub(crate) struct ActivityBar {
     progress: Option<f32>,
@@ -50,7 +45,6 @@ pub(crate) struct ActivityBar {
 }
 
 impl ActivityBar {
-    /// `None` progress sweeps a beam during forward or backward motion.
     pub(crate) fn new(progress: Option<f32>) -> Self {
         Self {
             progress,
@@ -78,8 +72,6 @@ impl ActivityBar {
         self
     }
 
-    /// At most this many rows of triangles; a bar too short for them drops
-    /// rows.
     pub(crate) fn rows(mut self, rows: usize) -> Self {
         self.rows = rows.max(1);
         self
@@ -90,7 +82,6 @@ impl ActivityBar {
         self
     }
 
-    /// Text over the bar's left end, as `egui::ProgressBar::text` draws it.
     pub(crate) fn text(mut self, text: impl Into<String>) -> Self {
         self.text = Some(text.into());
         self
@@ -146,7 +137,6 @@ impl ActivityBar {
         }
     }
 
-    /// Returns whether anything in the mana moves with time.
     #[allow(clippy::too_many_arguments)]
     fn paint_mana(
         &self,
@@ -222,15 +212,12 @@ impl Widget for ActivityBar {
     }
 }
 
-/// A transfer's progress for its bar: unknown until the first bytes arrive, so
-/// a starting transfer sweeps a beam instead of showing empty triangles.
+/// Unknown transfer progress stays indeterminate until bytes arrive.
 pub(crate) fn transfer_progress(fraction: f32, motion: BarMotion) -> Option<f32> {
     let fraction = fraction.clamp(0.0, 1.0);
     (motion != BarMotion::Forward || fraction > 0.0).then_some(fraction)
 }
 
-/// Work with no known end: a beam of light sweeps along the triangles,
-/// lighting mana as it passes.
 fn paint_scan(
     ui: &Ui,
     grid: &TriangleGrid,
@@ -257,9 +244,6 @@ fn paint_scan(
     motion.animates()
 }
 
-/// Extra light on each triangle, indexed like the grid: every filled
-/// triangle blinks on its own rhythm, bubbles climb (or sink through) the
-/// filled columns row by row, and twinkles flash single triangles.
 fn mana_light(grid: &TriangleGrid, filled_columns: usize, time: f64, sinking: bool) -> Vec<f32> {
     let rows = grid.rows;
     let mut light = vec![0.0_f32; grid.count()];
@@ -285,21 +269,16 @@ fn mana_light(grid: &TriangleGrid, filled_columns: usize, time: f64, sinking: bo
     light
 }
 
-/// The row a bubble `life` of the way through its trip is in: rising from the
-/// floor to the top, or sinking the other way.
 fn bubble_row(life: f32, rows: usize, sinking: bool) -> usize {
     let travel = if sinking { life } else { 1.0 - life };
     ((travel.clamp(0.0, 1.0) * rows as f32) as usize).min(rows.saturating_sub(1))
 }
 
-/// A stable pick in `0..span` for one life of a particle.
 fn lane(index: u32, cycle: u32, seed: u32, span: usize) -> usize {
     let pick = noise(index.wrapping_mul(977).wrapping_add(cycle), seed);
     ((pick * span as f32) as usize).min(span.saturating_sub(1))
 }
 
-/// Empty triangles: the track tinted toward the fill, or a faint fill over a
-/// clear track.
 fn empty_color(track: Color32, fill: Color32) -> Color32 {
     if track.a() == 0 {
         fade(fill, 0.16)

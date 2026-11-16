@@ -7,6 +7,7 @@ pub mod help;
 pub mod main;
 pub mod repository;
 pub mod repository_settings;
+mod server;
 pub mod settings;
 pub mod swifty_migration;
 pub mod update;

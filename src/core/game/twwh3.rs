@@ -9,8 +9,7 @@ use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::types::{Repository, RepositoryServer, SettingsViewState};
 
 use super::generic::{
-    GenericRunScriptConfig, GenericRunScriptModule, ManifestEncoding,
-    ModsManifestConfig,
+    GenericRunScriptConfig, GenericRunScriptModule, ManifestEncoding, ModsManifestConfig,
 };
 use super::{
     GameCapabilities, GameDetectCtx, GameLaunchCtx, GameModule, GameSettingsSchema, LaunchCommand,
@@ -40,17 +39,13 @@ const TWWH3_CONFIG: GenericRunScriptConfig = GenericRunScriptConfig {
     executable_names: &[TWWH3_EXECUTABLE],
     default_steam_install_dirs: &["Total War WARHAMMER III"],
     capabilities: GameCapabilities {
-        // A repository syncs plain folders of .pack files, which is the
-        // server-hosted path; the Workshop store is the second source and both
-        // end up in the same used_mods.txt manifest.
         repository_sync: true,
         repository_launch: true,
         steam_workshop: true,
         client_side_addons: false,
         direct_download: true,
         extra_files: true,
-        // Profiles are still a repository-launch concept
-        // (`RepositoryProfile`); there is no game-space profile store yet.
+
         profiles: false,
         foxy_config_export: true,
         teamspeak3_plugins: false,
@@ -249,9 +244,7 @@ pub fn build_workshop_launch_plan(
     })
 }
 
-/// Turn a synced repository's enabled addons into a Warhammer launch plan.
-/// An addon is either a folder of `.pack` files or a single `.pack`, so a
-/// repository maintainer can publish either shape.
+/// Warhammer addons may be a single pack or a folder of packs; both published shapes must launch.
 pub fn build_repository_launch_plan(repo: &Repository) -> LaunchPlan {
     let repo_path = PathBuf::from(repo.path.trim());
     let mut mods = Vec::new();
@@ -320,7 +313,7 @@ fn resolve_addon_pack_files(base: &Path, addon: &str) -> Vec<PathBuf> {
     if let Some(dir) = resolve_child_dir_case_insensitive(base, addon) {
         return pack_files_in_item_dir(&dir);
     }
-    // An addon can also name one pack directly, with or without the extension.
+
     for candidate in [base.join(addon), base.join(format!("{}.pack", addon))] {
         if is_pack_file(&candidate) {
             return vec![candidate];

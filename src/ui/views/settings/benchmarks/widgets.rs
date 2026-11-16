@@ -1,6 +1,3 @@
-//! Small presentational pieces shared by the benchmark list, detail and
-//! comparison: kind badges, outcome dots, stat tiles and section cards.
-
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, TextStyle, Ui};
 
 use crate::core::benchmarks::{BenchmarkKind, BenchmarkOutcome};
@@ -8,8 +5,6 @@ use crate::ui::app::Foxy;
 
 pub const CARD_RADIUS: u8 = 6;
 
-/// Font sizes derived from the body text style so the tab follows the app's
-/// text scale instead of hardcoding pixel sizes.
 pub struct TextScale {
     pub body: f32,
     pub small: f32,
@@ -25,7 +20,6 @@ pub fn text_scale(ui: &Ui) -> TextScale {
     }
 }
 
-/// A rounded panel used for every grouped block of the tab.
 pub fn panel<R>(ui: &mut Ui, fill: Color32, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::NONE
         .fill(fill)
@@ -50,7 +44,6 @@ impl Foxy {
         ui.add_space(2.0);
     }
 
-    /// Pill naming the action of a benchmark.
     pub(crate) fn benchmark_kind_badge(&self, ui: &mut Ui, kind: BenchmarkKind) {
         let scale = text_scale(ui);
         let fill = if kind.transfers_files() {
@@ -72,7 +65,6 @@ impl Foxy {
             });
     }
 
-    /// Coloured dot summarising the outcome, with the message on hover.
     pub(crate) fn benchmark_outcome_dot(&self, ui: &mut Ui, outcome: &BenchmarkOutcome) {
         let (color, hover) = match outcome {
             BenchmarkOutcome::Success => (self.color_success(), self.t("Success")),
@@ -88,7 +80,6 @@ impl Foxy {
         response.on_hover_text(hover);
     }
 
-    /// Big number with a small caption, for the headline figures of a run.
     pub(super) fn benchmark_stat_tile(
         &self,
         ui: &mut Ui,
@@ -119,7 +110,6 @@ impl Foxy {
             });
     }
 
-    /// Compact `value label` chip used in list rows.
     pub(crate) fn benchmark_stat_chip(
         &self,
         ui: &mut Ui,
@@ -142,7 +132,6 @@ impl Foxy {
             });
     }
 
-    /// Letter tag used to mark record A or B of a comparison.
     pub(super) fn benchmark_letter_tag(&self, ui: &mut Ui, letter: &str, color: Color32) {
         let scale = text_scale(ui);
         egui::Frame::NONE

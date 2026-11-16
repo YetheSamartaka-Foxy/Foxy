@@ -6,13 +6,8 @@ use serde_json::{Map, Value};
 use crate::core::utils::format::sanitize_log_path;
 use crate::core::utils::fs_safety::atomic_write;
 
-/// Settings fields that belong to the active game space (`game_settings.json`).
-/// Everything else in the settings object is app-global (`app_settings.json`).
-/// Keys must match the serde field names on `SettingsViewState`.
-///
-/// Moving a key between halves needs no migration: reads merge both files and
-/// the next save re-partitions every key by this list, so a moved key leaves
-/// its old file automatically.
+/// Serde keys stored in `game_settings.json`; all other settings are app-global.
+/// Reads merge both files and saves re-partition keys, so moving a key needs no migration.
 pub const GAME_SPACE_SETTINGS_KEYS: &[&str] = &[
     "arma3_directory",
     "twwh3_directory",
@@ -46,9 +41,7 @@ pub const GAME_SPACE_SETTINGS_KEYS: &[&str] = &[
     // repositories, so they must not bleed into other spaces on a switch.
     "update_summary_notices",
     "active_update_sessions",
-    // Scheduled jobs target `(remote_url, local_path)` repository instances,
-    // which only exist inside one game space; cleanup folders list that game's
-    // addon directories. Both are meaningless against another space.
+    // Jobs use repository-instance identities and cleanup paths meaningful only inside their owning game space.
     "scheduled_jobs",
     "cleanup_folders",
 ];
@@ -57,7 +50,6 @@ fn is_game_space_key(key: &str) -> bool {
     GAME_SPACE_SETTINGS_KEYS.contains(&key)
 }
 
-/// Partition a full settings object into (app-global, game-space) objects.
 pub fn split_settings_value(value: &Value) -> (Value, Value) {
     let Some(object) = value.as_object() else {
         return (value.clone(), Value::Object(Map::new()));
@@ -127,9 +119,7 @@ fn read_optional_value(path: &Path) -> Result<Option<Value>, String> {
         .map_err(|err| format!("Failed to parse {}: {}", sanitize_log_path(path), err))
 }
 
-/// Read and merge the split settings files. `Ok(None)` means neither file
-/// exists (first run); parse and IO failures are errors so callers keep the
-/// existing "leave the broken file alone" behavior.
+/// Only missing files return Ok(None); parse/I/O failures preserve the existing broken files for recovery.
 pub fn read_merged_settings_value(
     app_path: &Path,
     game_path: &Path,
@@ -297,9 +287,7 @@ mod tests {
         );
     }
 
-    /// The key list is matched against serde field names at runtime, so a
-    /// rename (or a typo) would silently reclassify a setting as app-global and
-    /// bleed it across game spaces. Nothing else catches that.
+    /// Keep these keys aligned with serde field names; mismatches leak settings across spaces.
     #[test]
     fn every_game_space_key_exists_on_settings_view_state() {
         let defaults = serde_json::to_value(crate::ui::types::SettingsViewState::default())
@@ -326,6 +314,27 @@ mod tests {
         for key in GAME_SPACE_SETTINGS_KEYS {
             assert!(seen.insert(*key), "duplicate game-space settings key {key}");
         }
+    }
+
+    #[test]
+    fn app_mode_stays_global_across_game_space_saves() {
+        let root = tempfile::tempdir().unwrap();
+        let app_path = root.path().join("app_settings.json");
+        let first_game = root.path().join("first_game_settings.json");
+        let second_game = root.path().join("second_game_settings.json");
+        let settings = json!({"app_mode": "server", "generic_executable": "game"});
+        write_split_settings(&settings, &app_path, &first_game).unwrap();
+        write_game_settings_half(&json!({"app_mode": "client"}), &second_game).unwrap();
+        let app: Value = serde_json::from_slice(&std::fs::read(&app_path).unwrap()).unwrap();
+        let game: Value = serde_json::from_slice(&std::fs::read(&first_game).unwrap()).unwrap();
+        assert_eq!(app["app_mode"], "server");
+        assert!(game.get("app_mode").is_none());
+        assert_eq!(
+            read_merged_settings_value(&app_path, &second_game)
+                .unwrap()
+                .unwrap()["app_mode"],
+            "server"
+        );
     }
 
     #[test]

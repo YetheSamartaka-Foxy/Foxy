@@ -1,0 +1,94 @@
+{
+  "instance": {
+    "schema_version": 2,
+    "id": "server_00000000000000000000000000000003",
+    "game_space_id": "arma3",
+    "revision": 4,
+    "display_name": "MainServer",
+    "installation_id": null,
+    "definition": {
+      "game": "arma3",
+      "settings": {
+        "hostname": "MainServer",
+        "game_port": 2302,
+        "max_players": 64,
+        "persistent": false,
+        "auto_init": false,
+        "battleye": true,
+        "verify_signatures": "v2",
+        "mission_cycle": [],
+        "headless_clients": [
+          {
+            "id": "hc_00000000000000a1",
+            "name": "HC1",
+            "order": 0
+          },
+          {
+            "id": "hc_00000000000000a2",
+            "name": "HC2",
+            "order": 1,
+            "addons": {
+              "inherit_required": false,
+              "include": [
+                "RepoBeta"
+              ]
+            },
+            "process": {
+              "cpu_count": 2,
+              "ex_threads": 3,
+              "max_mem": 2048,
+              "limit_fps": 50
+            },
+            "lifecycle": {
+              "start_delay_seconds": 10,
+              "connect_timeout_seconds": 180,
+              "max_restarts": 5
+            }
+          },
+          {
+            "id": "hc_00000000000000a3",
+            "name": "Spare",
+            "order": 2,
+            "enabled": false,
+            "addons": {
+              "exclude": [
+                "RepoAlpha"
+              ]
+            },
+            "lifecycle": {
+              "auto_start": false,
+              "max_restarts": 0
+            }
+          }
+        ]
+      }
+    }
+  },
+  "native_runtime_headless_clients": [
+    {
+      "id": "hc_00000000000000a1",
+      "name": "HC1",
+      "mods": [
+        "foxy-content/@mod_01"
+      ]
+    },
+    {
+      "id": "hc_00000000000000a2",
+      "name": "HC2",
+      "mods": [
+        "foxy-content/@mod_02"
+      ],
+      "process": {
+        "cpu_count": 2,
+        "ex_threads": 3,
+        "max_mem": 2048,
+        "limit_fps": 50
+      },
+      "lifecycle": {
+        "start_delay_seconds": 10,
+        "connect_timeout_seconds": 180,
+        "max_restarts": 5
+      }
+    }
+  ]
+}

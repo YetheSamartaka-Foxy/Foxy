@@ -1,16 +1,12 @@
-//! Mod manifests kept beside `database.db` with the validators the server
-//! sent, so a check after a database wipe asks the server whether each
-//! manifest changed instead of downloading all of them again. The server
-//! answers ordinary reads; forced refreshes request a fresh body.
+//! Retain HTTP validators beside the database so a wipe need not redownload unchanged manifests.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const CACHE_DIR: &str = "manifest_cache";
-/// Entries the server has not confirmed or replaced for this long are dropped.
+
 const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(180 * 24 * 60 * 60);
 
-/// What the server sent to identify one version of a manifest.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Validators {
     pub(crate) etag: Option<String>,
@@ -67,7 +63,6 @@ impl ManifestCache {
         )
     }
 
-    /// The validators stored for `url`, when a body for it is on disk.
     pub(crate) fn validators(&self, url: &str) -> Option<Validators> {
         let (meta_path, body_path) = self.paths(url);
         let meta: Meta = serde_json::from_slice(&std::fs::read(meta_path).ok()?).ok()?;
@@ -75,7 +70,6 @@ impl ManifestCache {
             .then_some(meta.validators)
     }
 
-    /// The cached body for `url`, marking the entry as still in use.
     pub(crate) fn body(&self, url: &str) -> Option<Vec<u8>> {
         let (meta_path, body_path) = self.paths(url);
         let body = std::fs::read(body_path).ok()?;
@@ -85,7 +79,6 @@ impl ManifestCache {
         Some(body)
     }
 
-    /// Drop entries unused for [`STALE_AFTER`] and bodies no entry points at.
     pub(crate) fn prune(&self) -> usize {
         self.prune_older_than(std::time::SystemTime::now() - STALE_AFTER)
     }
@@ -112,14 +105,11 @@ impl ManifestCache {
         dropped
     }
 
-    /// Drop the entry for `url`, so the next request downloads it in full.
     pub(crate) fn forget(&self, url: &str) {
         let _ = std::fs::remove_file(self.paths(url).0);
     }
 
-    /// Replace the entry for `url`. The body lands before the validators that
-    /// point at it, so a crash between the two leaves an entry that only ever
-    /// costs a full download.
+    /// Publish the body before its validators so interrupted writes can cost only a full download, never a false 304.
     pub(crate) fn store(
         &self,
         url: &str,

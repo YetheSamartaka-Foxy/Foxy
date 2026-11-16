@@ -74,7 +74,6 @@ impl Foxy {
         self.needs_repaint = true;
     }
 
-    /// The addons a sync of `repo` treats as enabled, after its selected profile.
     pub(crate) fn addon_selection_fingerprint(repo: &Repository) -> u64 {
         let profile = repo
             .selected_profile
@@ -167,8 +166,7 @@ impl Foxy {
             .collect();
     }
 
-    /// A starting sync stores the repository's selection in the database, which
-    /// makes a queued selection check for it redundant.
+    /// A sync persists selection, so a queued check for that repository is redundant.
     pub(in crate::ui::app) fn note_addon_selection_synced(&mut self, repo_idx: usize) {
         let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
             return;
@@ -240,8 +238,7 @@ impl Foxy {
         }
     }
 
-    /// Background checks read the selection stored in the database, which only
-    /// a sync updates, so a changed selection gets its own quick local check.
+    /// Only sync updates persisted selection; check changed choices locally in the background.
     pub(in crate::ui::app) fn queue_checks_for_changed_addon_selections(&mut self) {
         for (repo_idx, repo) in self
             .repository_view_state
@@ -289,9 +286,7 @@ impl Foxy {
             || self.update_modal_open
     }
 
-    /// Start the next queued selection check once nothing else needs the sync
-    /// slot. A repository whose status is still unknown waits for its first
-    /// check or restored result.
+    /// Wait for the sync slot before starting the next selection check; unknown repositories wait for their first result.
     pub(in crate::ui::app) fn process_addon_selection_checks(&mut self) {
         if self.pending_addon_selection_checks.is_empty() || self.addon_selection_check_blocked() {
             return;

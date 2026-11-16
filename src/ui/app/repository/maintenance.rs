@@ -97,7 +97,7 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 }
 
 impl Foxy {
-    /// Avoid deleting a folder that another configured repository still owns.
+    /// Keep a folder while another configured repository owns it.
     pub(crate) fn delete_files_kept_reason(
         repositories: &[Repository],
         repo_idx: usize,
@@ -168,6 +168,9 @@ impl Foxy {
         }
 
         let delete_key = Self::normalize_path_for_addon_match(addon_path);
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
         if !self.pending_addon_deletes.insert(delete_key) {
             debug!("Addon delete skipped for {} (already running)", addon_name);
             return;
@@ -180,12 +183,19 @@ impl Foxy {
         let thread_name = addon_name.to_string();
         let thread_path = addon_path.to_string();
         let repaint_ctx = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
-            let purge_result = match Runtime::new() {
-                Ok(rt) => rt
-                    .block_on(purge_addon_by_local_path(&thread_path))
-                    .map_err(|err| err.to_string()),
-                Err(err) => Err(err.to_string()),
+        let admission = self.client_db_admission.clone();
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
+        let handle = std::thread::spawn(move || {
+            let purge_result = if !crate::ui::app::admit_database_section(&admission) {
+                Err("Database admission is closed".to_string())
+            } else {
+                match Runtime::new() {
+                    Ok(rt) => rt
+                        .block_on(purge_addon_by_local_path(&thread_path))
+                        .map_err(|err| err.to_string()),
+                    Err(err) => Err(err.to_string()),
+                }
             };
 
             if let Err(err) = &purge_result {
@@ -194,6 +204,8 @@ impl Foxy {
 
             if addon_delete_result_tx
                 .send(AddonDeleteResult {
+                    space_id,
+                    generation,
                     addon_name: thread_name,
                     addon_path: thread_path,
                     outcome: purge_result,
@@ -205,10 +217,10 @@ impl Foxy {
                 warn!("Failed to report addon delete completion");
             }
         });
+        self.maintenance_workers.push(handle);
     }
 
-    /// `forget_hash_record` also drops the folder's verified-hash record, so the
-    /// next check reads every file; the user wipe does, a measurement may not.
+    /// A user wipe drops the verified-hash record so the next check reads every file; measurement-only cleanup may preserve it.
     pub fn wipe_repository_database_entries(&mut self, repo_idx: usize, forget_hash_record: bool) {
         if self.repository_sync_active() || self.is_direct_download_running() {
             warn!("Repository database wipe ignored: sync worker is currently active");
@@ -231,8 +243,7 @@ impl Foxy {
             }
         };
 
-        // A scan finishing after the wipe would restore the verdict and hashes
-        // the user just asked to drop.
+        // Discard scans that finish after a wipe so they cannot restore the verdict and hashes the user removed.
         if self
             .active_quick_scan_instance_keys
             .contains(&Self::repo_instance_key(&repo.address, &repo.path))
@@ -246,9 +257,7 @@ impl Foxy {
         }
 
         let normalized_url = Self::normalize_repo_url(&repo.address);
-        // Scope the wipe to this repository's own download folder so a sibling
-        // repository that shares the same remote URL but a different folder keeps
-        // its cached metadata and local hashes.
+        // Wipe only this folder so same-URL instances elsewhere retain metadata and local hashes.
         self.wipe_repository_database_entries_by_url_and_path(
             &normalized_url,
             &repo.path,
@@ -257,9 +266,7 @@ impl Foxy {
         );
     }
 
-    /// Address and folder identify the instance that running work writes to.
-    /// Changing them mid-flight lands the work's results on the new identity
-    /// and wipes the old folder's rows while the worker still writes them.
+    /// Do not change repository URL or folder while work is active; results and cleanup are scoped to that identity.
     pub fn repository_identity_locked(&self, repo_idx: usize) -> bool {
         let Some(repo) = self.repository_view_state.repositories.get(repo_idx) else {
             return false;
@@ -300,8 +307,7 @@ impl Foxy {
         }
         self.pending_update_cache.remove(&instance_key);
 
-        // Foxy mode is a property of the URL, shared by every folder instance, so
-        // only forget it once no other configured repository still uses the URL.
+        // Forget URL-level FoxyMode only after no configured folder instance still uses that URL.
         let url_key = Self::normalize_repo_url(repository_url);
         let url_still_used = self
             .repository_view_state
@@ -313,7 +319,6 @@ impl Foxy {
         }
     }
 
-    /// (e.g. when a freshly added repository that never had a folder is given one).
     pub fn wipe_repository_database_entries_by_url_and_path(
         &mut self,
         repository_url: &str,
@@ -333,6 +338,12 @@ impl Foxy {
             );
         }
 
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
+        let maintenance_space_id = scope.space_id().to_string();
+        let maintenance_generation = scope.generation();
+        let maintenance_admission = self.client_db_admission.clone();
         if self.pending_repository_db_wipes.contains(&normalized_url) {
             debug!(
                 "Repository database wipe skipped for {} (already running)",
@@ -358,19 +369,23 @@ impl Foxy {
         let thread_path = sanitize_user_path(local_path);
         let thread_name = repo_name.to_string();
         let repaint_ctx = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let started_at = Instant::now();
             if forget_hash_record {
                 crate::core::tasks::calculate_hashes::forget_verified_hashes_under(&thread_path);
             }
-            let purge_result = match Runtime::new() {
-                Ok(rt) => rt
-                    .block_on(purge_repository_db_only_by_url_and_path(
-                        &thread_url,
-                        &thread_path,
-                    ))
-                    .map_err(|err| err.to_string()),
-                Err(err) => Err(err.to_string()),
+            let purge_result = if !crate::ui::app::admit_database_section(&maintenance_admission) {
+                Err("Database admission is closed".to_string())
+            } else {
+                match Runtime::new() {
+                    Ok(rt) => rt
+                        .block_on(purge_repository_db_only_by_url_and_path(
+                            &thread_url,
+                            &thread_path,
+                        ))
+                        .map_err(|err| err.to_string()),
+                    Err(err) => Err(err.to_string()),
+                }
             };
             let elapsed = started_at.elapsed();
 
@@ -391,6 +406,8 @@ impl Foxy {
 
             if repository_db_wipe_tx
                 .send(RepositoryDbWipeResult {
+                    space_id: maintenance_space_id,
+                    generation: maintenance_generation,
                     repository_url: thread_url,
                     local_path: thread_path,
                     repository_name: thread_name,
@@ -405,6 +422,7 @@ impl Foxy {
                 warn!("Failed to report repository database wipe completion");
             }
         });
+        self.maintenance_workers.push(handle);
     }
 
     fn next_cloned_repository_name(&self, original_name: &str) -> String {
@@ -735,8 +753,7 @@ impl Foxy {
             return false;
         }
 
-        // The worker would otherwise keep hashing or downloading into a folder
-        // nobody tracks any more, contending with the next sync for the disk.
+        // Cancel work targeting a deleted repository folder so it cannot contend with the next sync.
         if self.syncing_repository == Some(repo_idx) {
             self.cancel_sync();
         }
@@ -869,6 +886,12 @@ impl Foxy {
     ) {
         let normalized_url = Self::normalize_repo_url(repository_url);
 
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
+        let maintenance_space_id = scope.space_id().to_string();
+        let maintenance_generation = scope.generation();
+        let maintenance_admission = self.client_db_admission.clone();
         if self.pending_repository_db_wipes.contains(&normalized_url) {
             debug!(
                 "Repository file purge skipped for {} (already running)",
@@ -894,16 +917,20 @@ impl Foxy {
         let thread_url = normalized_url;
         let thread_name = repo_name.to_string();
         let repaint_ctx = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let started_at = Instant::now();
-            let purge_result = match Runtime::new() {
-                Ok(rt) => rt
-                    .block_on(purge_repository_by_url_and_path(
-                        &thread_url,
-                        &thread_local_path,
-                    ))
-                    .map_err(|err| err.to_string()),
-                Err(err) => Err(err.to_string()),
+            let purge_result = if !crate::ui::app::admit_database_section(&maintenance_admission) {
+                Err("Database admission is closed".to_string())
+            } else {
+                match Runtime::new() {
+                    Ok(rt) => rt
+                        .block_on(purge_repository_by_url_and_path(
+                            &thread_url,
+                            &thread_local_path,
+                        ))
+                        .map_err(|err| err.to_string()),
+                    Err(err) => Err(err.to_string()),
+                }
             };
             let elapsed = started_at.elapsed();
 
@@ -924,6 +951,8 @@ impl Foxy {
 
             if repository_db_wipe_tx
                 .send(RepositoryDbWipeResult {
+                    space_id: maintenance_space_id,
+                    generation: maintenance_generation,
                     repository_url: thread_url,
                     local_path: thread_local_path,
                     repository_name: thread_name,
@@ -938,6 +967,7 @@ impl Foxy {
                 warn!("Failed to report repository file purge completion");
             }
         });
+        self.maintenance_workers.push(handle);
     }
 
     pub fn delete_repository_space_by_id(&mut self, space_id: &str) -> bool {

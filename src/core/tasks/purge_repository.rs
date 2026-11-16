@@ -103,9 +103,7 @@ fn remove_repository_files(base_path: &str, file_paths: &[String], mod_paths: &[
         }
     }
 
-    // Prune empty descendants bottom-up without following symlinks. Never use a
-    // recursive delete here: the addon tree may still contain files owned by
-    // another repository (or untracked user files).
+    // Never recursively delete addon trees; they may contain another repository's or user's files.
     for p in mod_paths {
         let Some(candidate) = resolve_mod_path(base, p) else {
             continue;
@@ -153,15 +151,11 @@ fn remove_addon_directory(path: &Path) -> Result<()> {
         .map_err(Into::into)
 }
 
-/// Execute a parameterized statement inside a seam transaction (purge helper).
 async fn execute_sql(tx: &DbTxn<'_>, sql: &str, values: Vec<DbValue>) -> Result<(), DbErr> {
     tx.execute(sql, values).await?;
     Ok(())
 }
 
-/// Statements and rows a purge touched, for its `SOL op=db_purge` record.
-/// A delete that affects zero rows can still scan many, so the row count is
-/// the affected count, not the work model.
 #[derive(Default)]
 struct PurgeWork {
     steps: std::sync::atomic::AtomicU64,
@@ -226,10 +220,6 @@ impl PurgeWork {
     }
 }
 
-/// Like [`execute_sql`] but times the statement and logs how long it took, so the
-/// purge transaction is no longer a silent multi-second black box in the logs
-/// (the force-redownload "~18s gap with nothing logged" report). Steps ≥50ms log
-/// at INFO; faster ones at DEBUG to avoid noise on small repos.
 async fn timed_step(
     tx: &DbTxn<'_>,
     work: &PurgeWork,
@@ -312,7 +302,10 @@ async fn query_exclusive_paths(
     ))
 }
 
-pub async fn purge_repository_by_url_and_path(repository_url: &str, local_path: &str) -> Result<()> {
+pub async fn purge_repository_by_url_and_path(
+    repository_url: &str,
+    local_path: &str,
+) -> Result<()> {
     let context = create_context().await;
     purge_repository_instance(context, repository_url, local_path).await
 }
@@ -589,10 +582,7 @@ pub async fn purge_addon_by_local_path_with_context(
     Ok(deleted_count)
 }
 
-/// Wipe cached database rows for a SINGLE repository instance, identified by its
-/// remote URL *and* local download folder. Sibling repositories that share the
-/// same remote URL but live in a different folder (an independent install, or a
-/// different entry in another repository space) are left untouched.
+/// Scope row deletion by `(remote_url, local_path)` so same-URL sibling installs remain intact.
 pub async fn purge_repository_db_only_by_url_and_path(
     repository_url: &str,
     local_path: &str,
@@ -610,10 +600,6 @@ pub async fn purge_repository(
     purge_repository_internal(context, repository_url, repo_path, true, None).await
 }
 
-/// Purge exactly one installed repository instance, identified by its remote URL
-/// and local folder. This is used by force redownload inside the sync pipeline so
-/// the following remote refresh/download sees the same missing-file state as the
-/// old pre-Turso purge-first flow.
 pub async fn purge_repository_instance(
     context: Arc<FoxyContext>,
     repository_url: &str,
@@ -643,7 +629,7 @@ async fn purge_repository_internal(
     );
 
     let db = context.db();
-    // (id, local_path) per repository instance for this URL, ordered by id.
+
     let repositories: Vec<(i64, String)> = db
         .query_all(
             "SELECT id, local_path FROM repositories WHERE remote_url = ? ORDER BY id ASC",
@@ -664,10 +650,6 @@ async fn purge_repository_internal(
         return Ok(());
     }
 
-    // Restrict the purge to a single repository instance when a local path is
-    // given. Two repositories can share one remote URL while pointing at
-    // different download folders; wiping by URL alone would destroy the sibling's
-    // cached addon/file/part rows (and its computed local hashes).
     let scoped_repo_ids: Vec<i64> = match scope_local_path {
         Some(path) => {
             let target_key = normalize_path_for_compare(Path::new(path));
@@ -704,14 +686,6 @@ async fn purge_repository_internal(
         remove_repository_files(base, &file_paths, &mod_paths);
     }
 
-    // Whole-table-wipe fast path (analysis4 P1-a): when the scoped repositories
-    // are *every* repository in the database, all addons/files/subfiles become
-    // orphaned, so the per-row `… WHERE … IN (SELECT … FROM temp.orphan_ids)`
-    // deletes can be replaced by unqualified `DELETE FROM <table>`. That skips
-    // the 66k-row `subfiles` subquery materialization (the production purge's two
-    // dominant steps - `delete download_target_file_part` 13.4s over zero rows
-    // and `delete subfiles` 14.9s - are both that scan). Strictly gated on
-    // "these are all the repos" so a sibling repo's rows are never wiped.
     let total_repo_count: i64 = db
         .query_all("SELECT COUNT(*) AS count FROM repositories", vec![])
         .await?
@@ -730,23 +704,13 @@ async fn purge_repository_internal(
     let db_purge_started_at = Instant::now();
     let db_work_baseline = crate::core::tasks::init_database::sqlite_perf_snapshot();
     let work = Arc::new(PurgeWork::default());
-    // Exclusive: a force-redownload purge holds this ~17s bulk-delete transaction
-    // (66k+ subfiles) and Turso (beta) hard-wedges if any read/write on another
-    // connection/runtime overlaps it - the production force-redownload hang. The
-    // write gate only serializes writers; the UI list-cache pending-update
-    // workers and quick scans issue ungated reads on their own runtimes. See
-    // DB_EXCLUSIVE and `repro_purge_wedge_under_concurrency`.
+    // Turso can wedge if this bulk write overlaps any access on another connection/runtime.
     db.transaction_exclusive("purge repository", |tx| {
         let work = work.clone();
         let scoped_repo_ids = scoped_repo_ids.clone();
         Box::pin(async move {
             if whole_wipe {
-                // Child-first order so the no-cascade `subfiles → files` FK (and
-                // the others) never blocks the delete. download_target_file* have
-                // no FK; the rest cascade, but we delete them explicitly anyway.
-                // `subfiles` is special-cased to DROP+recreate (P0-a) and must come
-                // AFTER download_target_file_part is emptied (its rows reference
-                // subfiles.id) and BEFORE `files` (subfiles' FK target).
+                // Delete children first; `download_target_file_part` references `subfiles`, which references `files`.
                 for (label, table) in [
                     (
                         "delete download_target_file_part",
@@ -763,15 +727,6 @@ async fn purge_repository_internal(
                     ("delete repositories", "repositories"),
                 ] {
                     if table == "subfiles" {
-                        // P0-a (after_turso_regression_analysis5.md): a 66k-row
-                        // `DELETE FROM subfiles` costs ~9s at that scale even on a
-                        // freshly-compacted file - intrinsic Turso ~0.14ms/row over
-                        // 4 B-trees. Since a whole wipe is dropping every repo, the
-                        // table can be DROPped (O(1) page dealloc) and recreated
-                        // empty instead. Recreated WITH all indexes so the table is
-                        // always in a consistent shape even if no rebuild follows;
-                        // the deferred-index bulk load (P0-b) manages its own
-                        // drop/rebuild around the subsequent insert.
                         timed_step(
                             tx,
                             &work,
@@ -1065,9 +1020,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// Statement runner used to seed the Turso test databases (the seam's typed
-    /// params; replaces the old SeaORM `execute_sql`). Each call takes a fresh
-    /// tuned connection, which is enough for the autocommit seeding here.
     async fn execute_sql(
         db: &turso::Database,
         sql: &str,
@@ -1084,8 +1036,6 @@ mod tests {
     }
 
     async fn create_test_db() -> (tempfile::TempDir, Arc<turso::Database>) {
-        // The temp dir holds the addon file tree; the database file is managed
-        // (and leaked) by `build_test_database`.
         let temp = tempfile::tempdir().expect("temp dir");
         let db = crate::core::tasks::db_turso::build_test_database().await;
         (temp, db)
@@ -1245,10 +1195,6 @@ mod tests {
 
     #[tokio::test]
     async fn purge_repository_whole_wipe_when_sole_repo_clears_all_tables() {
-        // When the purged repo is the ONLY repo in the database, the whole-wipe
-        // fast path (analysis4 P1-a) runs unqualified `DELETE FROM <table>` and
-        // must clear every graph table - equivalent to the scoped path but without
-        // the 66k-row subfiles subquery scans.
         let (temp, db) = create_test_db().await;
         let local_root = temp.path().join("mods");
         std::fs::create_dir_all(local_root.join("@only")).expect("create addon dir");
@@ -1348,10 +1294,6 @@ mod tests {
             );
         }
 
-        // P0-a: subfiles was DROP+recreated, not DELETEd. Confirm it is a usable,
-        // empty table whose `(file_id, path)` unique index was restored - a second
-        // insert of the same (file_id, path) must be rejected, so the post-purge
-        // `ON CONFLICT` upsert path still resolves against the index.
         execute_sql(
             db.as_ref(),
             "INSERT INTO files
@@ -1478,19 +1420,12 @@ mod tests {
 
     #[tokio::test]
     async fn purge_db_only_scoped_preserves_sibling_with_same_url_other_folder() {
-        // Two repositories share one remote URL but download into different
-        // folders (e.g. an independent install plus the same repo inside a
-        // repository space). Each instance owns its own addon/file/part rows
-        // because those are keyed by local path. A path-scoped DB wipe of the
-        // first instance must not touch the second.
         let (temp, db) = create_test_db().await;
         let folder_a = temp.path().join("install_a");
         let folder_b = temp.path().join("install_b");
         let shared_url = "https://example.invalid/repo/";
 
-        // The bootstrap schema already keys repositories on the composite
-        // (remote_url, local_path) identity, so one URL can have several folder
-        // instances without any table rebuild.
+        // Repository rows use `(remote_url, local_path)` identity, allowing same-URL installs in separate folders.
         execute_sql(
             db.as_ref(),
             "INSERT INTO repositories
@@ -1508,7 +1443,7 @@ mod tests {
         )
         .await
         .expect("insert repositories");
-        // Per-instance addon rows (distinct local_path per folder).
+
         execute_sql(
             db.as_ref(),
             "INSERT INTO addons
@@ -1576,13 +1511,11 @@ mod tests {
         .await
         .expect("scoped purge of install A");
 
-        // Install A's rows are gone…
         assert_eq!(count_rows(db.as_ref(), "repositories", "id = 1").await, 0);
         assert_eq!(count_rows(db.as_ref(), "addons", "id = 11").await, 0);
         assert_eq!(count_rows(db.as_ref(), "files", "id = 21").await, 0);
         assert_eq!(count_rows(db.as_ref(), "subfiles", "id = 31").await, 0);
-        // …while the sibling install B (same URL, other folder) is untouched,
-        // including its computed local hashes.
+
         assert_eq!(count_rows(db.as_ref(), "repositories", "id = 2").await, 1);
         assert_eq!(count_rows(db.as_ref(), "addons", "id = 12").await, 1);
         assert_eq!(count_rows(db.as_ref(), "files", "id = 22").await, 1);
@@ -1601,8 +1534,6 @@ mod tests {
             "CONTENT_B"
         );
     }
-
-    // ── normalize_url ───────────────────────────────────────────────────
 
     #[tokio::test]
     async fn purge_addon_removes_selected_addon_and_orphan_files_only() {
@@ -1746,8 +1677,6 @@ mod tests {
         );
     }
 
-    // ── normalize_path_for_compare ──────────────────────────────────────
-
     #[test]
     fn normalize_path_for_compare_backslash_to_forward() {
         let result = normalize_path_for_compare(Path::new("C:\\mods\\addon"));
@@ -1759,8 +1688,6 @@ mod tests {
         let result = normalize_path_for_compare(Path::new("/mods/addon/"));
         assert!(!result.ends_with('/'));
     }
-
-    // ── is_safe_child ───────────────────────────────────────────────────
 
     #[test]
     fn is_safe_child_valid_child() {
@@ -1815,8 +1742,6 @@ mod tests {
         ));
     }
 
-    // ── resolve_mod_path ────────────────────────────────────────────────
-
     #[test]
     fn resolve_mod_path_relative() {
         let result = resolve_mod_path(Path::new("/base"), "@my_mod");
@@ -1845,15 +1770,12 @@ mod tests {
         assert_eq!(result, Some(PathBuf::from("/base/@mod")));
     }
 
-    // ── remove_repository_files (filesystem interaction) ────────────────
-
     #[test]
     fn remove_repository_files_skips_unsafe_paths() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
         let sibling = tempfile::tempdir().unwrap();
 
-        // Create a file in the sibling directory
         let sibling_file = sibling.path().join("important.txt");
         std::fs::write(&sibling_file, b"do not delete").unwrap();
 
@@ -1906,12 +1828,6 @@ mod tests {
         assert!(addon_dir.exists());
     }
 
-    /// Full-scale reproducer for the force-redownload purge hang. Seeds the
-    /// complete graph at a real large-repository scale (1515 files / 66,336 subfiles /
-    /// parts) and runs the purge's exact statement sequence inside one
-    /// transaction with per-statement timing, to pinpoint which delete wedges on
-    /// Turso's beta planner. Run:
-    /// `cargo test -p Foxy bench_purge_part_delete_strategies -- --ignored --nocapture`
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn bench_purge_part_delete_strategies() {
@@ -1921,9 +1837,6 @@ mod tests {
         const SUBS: i64 = 66_336;
         const ADDONS: i64 = 41;
 
-        // Turso (beta) has no recursive CTE / generate_series, so seed via
-        // chunked multi-row VALUES inserts with inlined integer literals (no
-        // bound params → no 999-variable limit). Test-only data, no injection risk.
         async fn seed(db: &turso::Database) {
             const CHUNK: i64 = 2000;
             let mut files_vals = Vec::new();
@@ -1988,7 +1901,6 @@ mod tests {
             }
         }
 
-        // Seed the rest of the graph the purge transaction walks.
         async fn seed_graph(db: &turso::Database) {
             execute_sql(
                 db,
@@ -2065,7 +1977,6 @@ mod tests {
             seed_started.elapsed().as_secs_f64()
         );
 
-        // Replicate the purge transaction statement-by-statement with timing.
         let conn = connect_tuned(db.as_ref()).await.expect("connect");
         let step = |label: &'static str, sql: &'static str| {
             let conn = &conn;
@@ -2141,8 +2052,6 @@ mod tests {
             txn_started.elapsed().as_secs_f64()
         );
 
-        // Fast-path candidate: whole-table DELETE (truncate-style) vs the scoped
-        // WHERE-IN deletes above. Re-seed then measure.
         seed(db.as_ref()).await;
         let conn2 = connect_tuned(db.as_ref()).await.expect("connect2");
         let t = Instant::now();

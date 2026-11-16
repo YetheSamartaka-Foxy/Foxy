@@ -232,7 +232,6 @@ impl Foxy {
         })
     }
 
-    /// Shown while startup database maintenance still holds the database.
     pub(super) fn active_database_maintenance_banner(&self) -> Option<RepositoryCheckStatusBanner> {
         let elapsed = crate::core::tasks::db_turso::db_startup_compaction_elapsed()?;
         Some(RepositoryCheckStatusBanner {
@@ -293,8 +292,6 @@ impl Foxy {
         })
     }
 
-    /// Progress of the work running on a repository (`None` while its end is
-    /// unknown), and whether it moves or a paused download holds it.
     pub(super) fn repository_operation_activity(
         &self,
         repo_index: usize,
@@ -405,21 +402,12 @@ impl Foxy {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(title).size(banner_font_size).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        // Keep the buttons' geometry stable across hover/press.
-                        // egui derives a button's inner margin from
-                        // `button_padding - bg_stroke.width`, and the default
-                        // `bg_stroke` width differs per state (0 inactive, 1
-                        // hovered/active). That made the dismiss button shrink by
-                        // 1px per side on hover and shifted the neighbouring action
-                        // button. We paint our own constant borders, so pin the
-                        // stroke width across the interactive states.
+                        // Pin stroke width across button states because egui derives padding from it; otherwise hover shrinks the button and shifts its neighbor.
                         let widgets = &mut ui.visuals_mut().widgets;
                         widgets.inactive.bg_stroke.width = 1.0;
                         widgets.hovered.bg_stroke.width = 1.0;
                         widgets.active.bg_stroke.width = 1.0;
-                        // In a right-to-left layout the first widget sits at the
-                        // far right, so render the dismiss control first to keep
-                        // it pinned to the edge with the action button to its left.
+                        // Render the dismiss control first in RTL so it remains at the far edge.
                         if let Some(dismiss_label) = dismiss_label {
                             ui.push_id("banner_dismiss", |ui| {
                                 let dismiss_button = ui.add(
@@ -548,14 +536,10 @@ impl Foxy {
                         &notice.local_path,
                         &normalized_repo_url,
                         &repo.path,
-                    )
-                        && notice.summary.has_meaningful_content()
+                    ) && notice.summary.has_meaningful_content()
                 })
         {
-            // `pending_ack_count` is how many completed downloads for this repo
-            // have not been reviewed yet. Surface that count only when several
-            // updates have stacked up; for the common single update the bare
-            // label is clearer and the per-update totals live in `detail`.
+            // Show an acknowledgment count only when several downloads await review; a single update is clearer with its per-update details.
             let unreviewed_count = notice.pending_ack_count.max(1);
             let button_label = if unreviewed_count > 1 {
                 self.t_fmt(
@@ -625,15 +609,12 @@ impl Foxy {
         repo_index: usize,
     ) {
         *open_pending_update_action = Some(Box::new(move |app| {
-            // Fast path: pending updates are already available in memory.
             let has_updates_in_memory = (app.update_ready_repo == Some(repo_index)
                 && app.mod_diff_cache.iter().any(|m| m.needs_update))
                 || app.apply_pending_update_cache_for_repo(repo_index);
             if has_updates_in_memory {
                 app.open_pending_update_modal_for_repo(repo_index);
             } else {
-                // Not cached in memory; load the payload off the UI thread and
-                // open the modal once it arrives (if it still has updates).
                 app.load_cached_updates_for_repo_and_open_modal(repo_index);
             }
         }));
@@ -740,8 +721,7 @@ impl Foxy {
 }
 
 impl Foxy {
-    /// "M min" or "S s" for the hash benchmark ETA; coarse on purpose, the
-    /// rate is a sample and the number is a hint, not a countdown.
+    /// Show a coarse ETA from sampled hash rate; it is a hint, not a countdown.
     pub(crate) fn format_hash_eta(remaining_bytes: u64, bytes_per_sec: u64) -> String {
         let seconds = remaining_bytes.div_ceil(bytes_per_sec.max(1));
         if seconds >= 90 {
@@ -751,8 +731,6 @@ impl Foxy {
         }
     }
 
-    /// Fraction of the running hash pass, for the check banner and the
-    /// benchmark progress sample.
     pub(crate) fn recheck_hash_progress_fraction(&self) -> Option<f32> {
         hash_progress_fraction(
             self.recheck_hash_byte_counter,
@@ -766,8 +744,6 @@ impl Foxy {
             .map(|fraction| above_floor(self.recheck_progress_floor, fraction))
     }
 
-    /// The check banner's bar: the hash pass over what the stages before it
-    /// left, else the stage percent, never below the highest value already shown.
     pub(crate) fn recheck_progress_fraction(&self) -> Option<f32> {
         held_progress(
             self.floored_recheck_hash_fraction().or_else(|| {
@@ -779,7 +755,6 @@ impl Foxy {
     }
 }
 
-/// Parts when the scan reports them, else files, else the stage percent.
 fn quick_scan_progress(state: &QuickScanProgressState) -> Option<f32> {
     let ratio = |done: usize, total: usize| {
         (total > 0).then(|| (done as f32 / total as f32).clamp(0.0, 1.0))
@@ -805,8 +780,6 @@ fn held_progress(current: Option<f32>, peak: Option<f32>) -> Option<f32> {
     }
 }
 
-/// Bytes when the hasher reports them, else parts, else files: heavy
-/// archives hash first, so a parts count runs far ahead of the work done.
 fn hash_progress_fraction(
     bytes: Option<(u64, u64)>,
     parts: Option<(usize, usize)>,

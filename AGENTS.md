@@ -19,7 +19,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Never add AI attribution or co-author trailers to commit messages, PR descriptions, or changelog entries. No `Co-Authored-By: Claude ...`, no `Generated with Claude Code`, and no equivalent line for any other assistant or tool, even when a harness default asks for one.
 - Rust only. Never write Python or any other scripting-language helper, scratch script, audit, or batch tool for this repo, not even as a throwaway. Extend the Rust tools in `tools/` (for example `tools/i18n-checker/`) when a capability is missing, and never leave scratch files in the repository root.
 - Keep private reviews, implementation plans, audit notes, and other local working documents under the git-ignored `.local/` directory. Never stage or commit them unless the user explicitly asks to publish a specific document.
-- Default to writing no comment. Add one only to explain a non-obvious *why* (a safety invariant, an ordering constraint, a subtle edge case) that the code cannot state itself, and keep it to one or two lines. Never add narrative bug-history, dated regression stories, benchmark anecdotes, decorative separators, restated-code, or "what this obvious line does" comments; put operational context in logs, tests, commit messages, or conventions docs instead. When editing existing code, do not leave behind comments that narrate the change you just made.
+- Minimize comments. Do not explain what code does; only document non-obvious business constraints or external API limits. Retain necessary safety and ordering invariants, concise public API/type contracts, legal notices and documentation consumed by macros such as CLI help. Keep rationale to one or two lines. Remove commented-out code, stale or speculative TODOs, decorative separators, narrative bug history and benchmark anecdotes; put operational context in tests, logs or conventions docs. Prefer clearer names and types when code is opaque.
 - Do not edit runtime `database.db`, logs, caches, backups, temp patch artifacts, or user config files unless explicitly requested.
 - Use `rg`/`rg --files` for discovery, inspect the nearest `mod.rs`, and confirm behavior in code before changing it.
 - Check for nested `AGENTS.md` files before editing a subtree; more-specific instructions apply to files under that directory.
@@ -34,11 +34,12 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Core code lives in `src/core/`: API/sync orchestration in `src/core/api/`, the Turso DB seam in `src/core/db/` (engine init/bootstrap in `src/core/tasks/db_turso.rs`), query/domain models in `src/core/models/`, task pipelines in `src/core/tasks/`, shared utilities in `src/core/utils/`, and saved benchmarks (record format, folder store, DB index, log slicing, ZIP export) in `src/core/benchmarks/`; the UI half (capture, save prompt, Benchmarks settings tab with charts) is `src/ui/app/benchmarks/` and `src/ui/views/settings/benchmarks/`.
 - Game modules live in `src/core/game/`: the `GameModule` trait and `GameCapabilities` in `mod.rs`, the static `GameRegistry` in `registry.rs`, per-game modules (`arma3/`, `twwh3.rs`, `reforger.rs`, `generic.rs`), the Steam Workshop backend in `workshop/`, managed extra files in `extra_files.rs`, `.foxypack` config packs in `foxypack.rs`, and the game-space layout/settings-split/migration in `spaces/`.
 - Content-format parsers (PBO, PAC1) live in the shared `foxy-formats` workspace crate behind `ContentFormat`/`FormatRegistry`, consumed by both `Foxy` and `foxy-server-backend-cli`. Shared speed-of-light aggregation lives in `foxy-sol`, consumed by the app and `foxy-testkit` so their service time, interval coverage, makespan, work, reference and outcome semantics stay identical.
+- Game-independent foreground process containment, physical-installation leases, persistent consumer barriers and generation-scoped session events live in `foxy-supervisor/`; read its `AGENTS.md` before editing it. These primitives do not enable dedicated-game Start/Stop, detached ownership or automatic orphan recovery.
 - The authoritative schema is the folded bootstrap file `sql/turso_schema.sql`; `migrations/` holds the historical SQLite migrations (no longer applied). Data/manifest references live in `sql/` and `examples/`.
 - Server-side repository generator lives in `foxy-server-backend-cli/`; standalone helper tools live in `tools/`.
 - The developer-machine test kit lives in `testkit/`: three Rust workspace members (`runner/` = `foxy-testkit`, `oracle/` = `foxy-testkit-oracle`, `mutator/` = `foxy-testkit-mutate`) plus `cases/`, `ledger/`, `runs/`, and `origin/data/` (those four git-ignored; the crates, docs, and examples are tracked). The kit crates are covered by workspace clippy and `cargo test`, but the *cases* never run from `cargo test`, CI, or a hook.
 - User-facing documentation is `README.md`, `wiki/User-Guide.md` (desktop app and client CLI), `wiki/Server-Admin-Guide.md` (`foxy-server-backend-cli`, hosting, app update manifests), and the in-app Help page (`src/ui/views/help.rs`, strings in `src/ui/locales/`).
-- Shareable agent workflows live in `skills/`; Codex discovery loaders in `.agents/skills/` and Claude Code loaders in `.claude/skills/` point back there. Paired roles live in `.codex/agents/` and `.claude/agents/`.
+- Shareable agent workflows live in `skills/`; Codex discovery loaders in `.agents/skills/` and Claude Code loaders in `.claude/skills/` point back there. Paired roles live in `.codex/agents/`, `.claude/agents/`, and `.cursor/agents/`.
 - Runtime data defaults to `%APPDATA%\Foxy` on Windows and can be overridden with `FOXY_CONFIG_DIR` or CLI `--config-dir`. Only app-global files (`app_settings.json`, `games.json`, logs, backups, window state) live at that root; everything else is per game space under `games/<space_id>/`.
 
 ---
@@ -46,6 +47,8 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 ## Load when needed
 - Product-intent gap reviews or questionnaires: `conventions/BEHAVIOR_CONTRACTS.md`, the Q contracts in `conventions/CORE_CONVENTIONS.md`, and `conventions/HASH_CHECK_CONTRACTS.md`. Treat settled choices as requirements; target new areas and failure boundaries instead of repeating their questions.
 - Rust implementation and compiler feedback: `skills/foxy-rust-change/SKILL.md`, then the domain conventions below.
+- Multi-step feature delivery or an existing milestone: `skills/foxy-milestone-execution/SKILL.md` for scope, acceptance mapping and bounded iteration. Small fixes do not need a milestone workflow.
+- Test expectation, snapshot, fixture or acceptance-claim review: `skills/foxy-test-oracle-review/SKILL.md`. Native external-process/platform acceptance: `skills/foxy-native-acceptance/SKILL.md`.
 - Agent instructions, skill discovery, subagent roles, or their structural checker: `skills/foxy-agent-maintenance/SKILL.md` and `conventions/AGENT_WORKFLOWS.md`.
 - Specialized workflows are indexed by category in `skills/README.md`: diagnosis/reproduction, sync/database integrity, performance, desktop interaction, and platform/release work. Select the matching skill for its evidence and verification contract; keep the shared driver and testkit mechanics in their existing skills.
 - UI layout, app state, widgets, palette, fonts, or egui interaction: `conventions/UI_CONVENTIONS.md` and `src/ui/AGENTS.md`.
@@ -95,8 +98,10 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Triage scope first: UI, core, CLI, DB/schema, examples, tooling, or build.
 - Locate the source of truth before adding behavior or abstractions.
 - For non-trivial work, keep a terse scratch plan with goal, files to touch, risks/invariants, and validation steps.
+- Fix the observable acceptance criteria before implementation; preserve existing behavior during structural changes. Keep review and test expectations independent of the implementation where practical.
 - Ship a thin end-to-end slice when possible, then iterate with focused follow-ups.
 - Prefer targeted checks while developing; broaden to full checks before final handoff when feasible.
+- Batch coherent edits before compiling, keep builds serial, and rerun checks for changed behavior or unresolved failures. Stop when acceptance and applicable checks pass; extra review rounds or test counts are not completion criteria.
 - For docs-only changes, no build/test run is required; say that in the final response.
 
 ---
@@ -106,7 +111,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 Use the paired roles and brief/handoff contract in `conventions/AGENT_WORKFLOWS.md` when delegating. Both clients expose `explorer` (source mapping), `worker` (owned-file implementation), `reviewer` (correctness), and `async-safety-reviewer` (task/lock/cancellation safety).
 
 - Delegate independent bounded work when parallel investigation or separate context materially helps. Keep small, sequential, and overlapping work in the main agent; do not spawn just to fill a quota.
-- Give each child a self-contained brief with scope, relevant nested instructions/conventions, invariants, expected evidence, and a stopping condition. In Codex prefer `fork_turns: "none"`; in Claude Code use the role as `subagent_type`. Inherit session models and permissions unless the user requests otherwise.
+- Give each child a self-contained brief with scope, relevant nested instructions/conventions, invariants, expected evidence, and a stopping condition. In Codex prefer `fork_turns: "none"`; in Claude Code and Cursor use the role as `subagent_type`. Codex and Claude Code inherit the session model. Cursor uses the Grok 4.7 pins in `conventions/AGENT_WORKFLOWS.md` and omits `model` on launch.
 - Assign writes only across disjoint files and preserve user changes. Keep schema/DB changes, dependencies/lockfiles, shared module wiring, broad formatting, and runtime state in the main agent. Reuse agents for related follow-ups; avoid nested delegation by default.
 - The main agent owns integration, primary-source verification of consequential findings, final checks once after integration, and the answer. Wait for required results. Say when a conclusion relies on unverified subagent findings.
 - Follow the client's actual availability and session limits. If delegation is unavailable, complete the work single-agent and note the limitation only when relevant.
@@ -130,6 +135,7 @@ Use the paired roles and brief/handoff contract in `conventions/AGENT_WORKFLOWS.
 - Run `cargo run` only when the change affects UI startup, CLI behavior, app bootstrapping, or user-facing runtime flows.
 - If clippy reports warnings, fix safe straightforward ones. Skip only when fixing would change semantics or require risky refactoring, and note it explicitly.
 - New or changed pure functions, parsers, helpers, and self-contained algorithms need focused unit tests. See `conventions/TESTING_CONVENTIONS.md`.
+- Never weaken assertions, freshness checks, platform gates or compatibility baselines just to get green results. Correct a faulty fixture against independent evidence and record the reason; distinguish changed expectations from an implementation fix.
 
 ---
 

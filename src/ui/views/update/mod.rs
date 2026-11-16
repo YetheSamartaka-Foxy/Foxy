@@ -19,8 +19,7 @@ use rfd::FileDialog;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
-/// How a download bar moves: forward while transferring, held while paused,
-/// backward while a cancel rolls changes back.
+/// Progress moves forward during transfer, holds while paused, and moves backward during rollback.
 fn update_bar_motion(transferring: bool, paused: bool, cancelling: bool) -> BarMotion {
     if !transferring {
         BarMotion::Still

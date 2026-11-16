@@ -338,8 +338,6 @@ fn upsert_stored_item(
     })
 }
 
-/// Sort key for the order Foxy hands mods to the game: explicit load order
-/// first, then by id so an unordered store stays stable.
 pub fn launch_order_key(item: &SteamWorkshopItem) -> (u32, u64) {
     (
         item.load_order.unwrap_or(u32::MAX),
@@ -608,10 +606,7 @@ pub fn workshop_content_path(steam_directory: &str, app_id: u32, item_id: &str) 
     None
 }
 
-/// Deletion-grade check that `path` is exactly a
-/// `steamapps/workshop/content/<app_id>/<item_id>` directory. Stricter than
-/// `workshop_item_id_from_path`, which also accepts looser layouts for launch
-/// resolution.
+/// Deletion requires an exact Steam Workshop app/item directory; looser launch-path recognition grants no delete authority.
 fn is_steam_workshop_item_dir(path: &Path, app_id: u32, item_id: &str) -> bool {
     let components: Vec<&str> = path
         .components()
@@ -871,7 +866,6 @@ pub fn run_steam_helper_remove(
     run_steam_helper_command("remove", app_id, item_id, timeout_secs)
 }
 
-/// File name of the Steamworks redistributable for this platform.
 pub const STEAMWORKS_LIBRARY_NAME: &str = if cfg!(target_os = "windows") {
     "steam_api64.dll"
 } else if cfg!(target_os = "macos") {
@@ -880,13 +874,8 @@ pub const STEAMWORKS_LIBRARY_NAME: &str = if cfg!(target_os = "windows") {
     "libsteam_api.so"
 };
 
-/// Refuse before spawning the helper when the Steamworks redistributable is not
-/// beside the executable.
-///
-/// The import is delay-loaded, so the helper process would otherwise die inside
-/// the loader (`0xC06D007E` on Windows) with no output for the parent to report,
-/// surfacing as a bare "download failure". A packaging mistake should say what is
-/// actually wrong.
+/// Refuse to spawn when the Steamworks redistributable is missing; delay-load
+/// failure would otherwise terminate the helper before it can report an error.
 fn steamworks_library_available(exe: &Path) -> Result<(), String> {
     let Some(dir) = exe.parent() else {
         return Ok(());

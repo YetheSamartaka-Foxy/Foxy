@@ -1,6 +1,3 @@
-//! Expanded view of one benchmark: headline tiles, grouped metadata and
-//! metrics, stage bars, charts, notes and the log slice.
-
 use eframe::egui::{self, RichText, ScrollArea, TextEdit, Ui};
 
 use super::charts::{ChartTheme, bar_chart, fmt_duration, line_chart};
@@ -163,8 +160,6 @@ pub fn fmt_sol(sol: f64) -> String {
     format!("{:.0}%", (sol.clamp(0.0, 1.0) * 100.0).round())
 }
 
-/// Translation callback for pure formatting helpers: `key` plus its
-/// `{placeholder}` replacements, the shape of `Foxy::t_fmt`.
 pub type Translate<'a> = &'a dyn Fn(&str, &[(&str, String)]) -> String;
 
 /// The percentage and its kind for the action's headline operation:
@@ -186,9 +181,7 @@ pub fn headline_sol_text(record: &BenchmarkRecord, t: Translate<'_>) -> String {
     }
 }
 
-/// How the record's elapsed time compares with the fastest compatible
-/// saved run: "best of 3", "+0.30 s (0.8% slower than best of 3)", or why
-/// there is nothing to compare with.
+/// Compare elapsed time with the fastest compatible saved run, or explain why no comparison is available.
 pub fn versus_best_text(best: Option<&BestComparison>, t: Translate<'_>) -> String {
     let Some(best) = best else {
         return t("not comparable", &[]);
@@ -213,8 +206,6 @@ pub fn versus_best_text(best: Option<&BestComparison>, t: Translate<'_>) -> Stri
     )
 }
 
-/// The figures worth a headline tile for this record, operation and ratio
-/// first: caption key, value text and whether it is a rate (accent coloured).
 pub fn headline_stats(
     record: &BenchmarkRecord,
     best: Option<&BestComparison>,
@@ -299,10 +290,6 @@ impl Foxy {
         }
     }
 
-    /// Charts of one record, or only the `only`th of them; returns the key
-    /// and rect of every chart drawn so the export can crop them out of a
-    /// screenshot. On screen the line charts sit in two columns; a single
-    /// requested chart is drawn full width.
     pub(super) fn render_benchmark_charts(
         &self,
         ui: &mut Ui,
@@ -386,8 +373,6 @@ impl Foxy {
             + charts_for(record, "", &palette::BENCHMARK_SERIES).len()
     }
 
-    /// Power source, battery, plan and power mode, or `None` for a record
-    /// saved before they were stored.
     fn benchmark_power_text(
         &self,
         power: &crate::core::utils::power::PowerStatus,
@@ -438,8 +423,7 @@ impl Foxy {
             });
     }
 
-    /// Fill colour of a speed-of-light bar: green near the light, amber
-    /// with headroom, red when most of the time was not the work.
+    /// Color speed-of-light bars green near the target, amber with headroom, and red when work accounts for little elapsed time.
     pub(super) fn sol_color(&self, sol: f64) -> egui::Color32 {
         if sol >= 0.85 {
             self.color_success()
@@ -450,7 +434,6 @@ impl Foxy {
         }
     }
 
-    /// Percentage with a proportion bar; `None` renders as `n/a`.
     pub(super) fn sol_cell(&self, ui: &mut Ui, sol: Option<f64>, hover: &str) {
         let scale = text_scale(ui);
         ui.horizontal(|ui| {
@@ -532,10 +515,6 @@ impl Foxy {
         }
     }
 
-    /// One resource row of the speed-of-light table: its work, its light,
-    /// the ratio, what kind of comparison that is, and where the light came
-    /// from. The kind is text in its own column so it reads without colour
-    /// or a tooltip.
     #[allow(clippy::too_many_arguments)]
     fn sol_part_row(
         &self,
@@ -584,8 +563,7 @@ impl Foxy {
         ui.end_row();
     }
 
-    /// Why an operation's ratio cannot stand for the whole operation, as a
-    /// short sentence under its table; `None` when nothing needs saying.
+    /// Explain when an operation ratio cannot represent the whole operation; return `None` when no note is needed.
     fn sol_caveat(&self, summary: &crate::core::benchmarks::SolOpSummary) -> Option<String> {
         if summary.malformed_lines > 0
             || summary.mixed_metric_versions
@@ -625,8 +603,6 @@ impl Foxy {
         None
     }
 
-    /// One block per operation: its convention category and totals, a row
-    /// per resource it was judged against, and the category's own figures.
     fn render_benchmark_sol(&self, ui: &mut Ui, record: &BenchmarkRecord, id: &str) {
         let summaries = record.sol_summaries();
         if summaries.is_empty() {

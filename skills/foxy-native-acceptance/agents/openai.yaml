@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Native Acceptance"
+  short_description: "Preflight and verify real native integration evidence"
+  default_prompt: "Use $foxy-native-acceptance to prepare the required native acceptance run, diagnose failures and report only the demonstrated behavior."

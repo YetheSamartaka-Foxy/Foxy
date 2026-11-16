@@ -19,24 +19,12 @@ pub fn graphics_backend_path() -> PathBuf {
     app_paths::foxy_data_dir().join(GRAPHICS_BACKEND_FILE)
 }
 
-/// The graphics backend a previous launch reached a window with.
-///
-/// wgpu creates an instance per backend it is allowed to consider, and each one
-/// loads its driver stack, so enumerating three backends costs a launcher that
-/// draws a font atlas and a few images the memory of three. Remembering the one
-/// that worked lets the next launch ask for that one alone; the full list is
-/// still what a first launch, an unknown answer, or a failed narrowed launch
-/// uses, so no machine loses a backend it needs.
+/// Backend used by the last launch that reached a window. Reuse it to avoid
+/// loading every driver stack; unknown or failed records use the full list.
 pub fn remembered_graphics_backend() -> Option<String> {
     parse_graphics_backend_record(&std::fs::read_to_string(graphics_backend_path()).ok()?)
 }
 
-/// Read a backend name out of the record file's contents.
-///
-/// A leading BOM is stripped: an editor or a shell redirect can add one, and a
-/// record that silently fails to parse costs a launch the narrowing it earned
-/// without saying so. Anything that is not a bare alphanumeric token is
-/// rejected, which is what keeps a corrupt file from reaching the backend map.
 fn parse_graphics_backend_record(raw: &str) -> Option<String> {
     let value = raw
         .trim_start_matches('\u{feff}')
@@ -65,7 +53,6 @@ pub fn remember_graphics_backend(backend: &str) {
     }
 }
 
-/// Drop the record so the next launch enumerates every backend again.
 pub fn forget_graphics_backend() {
     let path = graphics_backend_path();
     if path.exists()
@@ -81,20 +68,14 @@ pub fn ui_launch_attempt_path() -> PathBuf {
     app_paths::foxy_data_dir().join(UI_LAUNCH_ATTEMPT_FILE)
 }
 
-/// How far down the graphics fallback ladder a UI launch starts.
-///
-/// A launch that dies inside the driver stack (an access violation in a Vulkan
-/// ICD or an injected overlay layer) takes the whole process with it: no panic
-/// hook runs and nothing reaches the log. The only evidence is the attempt
-/// marker written just before eframe starts and cleared once the app is
-/// constructed, so each launch that leaves it behind moves one rung down.
+/// Select the fallback rung from the prior launch marker; driver crashes leave
+/// no log, so an uncleared marker advances the next launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphicsLaunchStage {
-    /// wgpu on every supported backend, or the remembered one.
     Full,
-    /// wgpu narrowed to the platform's most conservative single backend.
+
     SafeBackend,
-    /// The Glow (OpenGL) renderer, persisted into the renderer setting.
+
     Glow,
 }
 
@@ -117,9 +98,7 @@ impl GraphicsLaunchStage {
     }
 }
 
-/// The rung a launch starts on given the stage of a previous launch that never
-/// reached the app. Glow is the last rung; a launch that dies there stays on it
-/// so the failure keeps being logged instead of cycling back into wgpu.
+/// Stay on Glow after a Glow startup failure so diagnostics persist instead of cycling back into failed wgpu drivers.
 pub fn next_launch_stage(previous: Option<GraphicsLaunchStage>) -> GraphicsLaunchStage {
     match previous {
         None => GraphicsLaunchStage::Full,
@@ -130,7 +109,6 @@ pub fn next_launch_stage(previous: Option<GraphicsLaunchStage>) -> GraphicsLaunc
     }
 }
 
-/// The stage of a previous UI launch that died before constructing the app.
 pub fn previous_launch_attempt() -> Option<GraphicsLaunchStage> {
     parse_launch_attempt_record(&std::fs::read_to_string(ui_launch_attempt_path()).ok()?)
 }

@@ -20,8 +20,7 @@ const REVIEWABLE_JSON_FILES: [&str; 3] = [
     "repository_visual_folders.json",
 ];
 
-/// Data files that move into the game space dir with a small backup copy left
-/// at the legacy location so a rollback to an older build keeps working.
+/// Retain small legacy copies so an older Foxy build can still read the migrated configuration.
 const MOVED_WITH_BACKUP: [&str; 3] = [
     "repositories.json",
     "repository_spaces.json",
@@ -38,10 +37,7 @@ const MOVED_WITHOUT_BACKUP: [&str; 3] = [
 
 const MOVED_DIRECTORIES: [&str; 1] = ["images"];
 
-/// One-shot move of the legacy flat data layout into `games/<id>/`.
-/// Idempotent: files already at the destination are skipped (with the legacy
-/// copy left in place); user data is never deleted. Returns whether anything
-/// was migrated.
+/// Migration retries must preserve existing destination and legacy files; never delete user data.
 pub(super) fn migrate_legacy_layout(root: &Path, space_dir: &Path) -> Result<bool, String> {
     let mut migrated = false;
     let mut review_files = Vec::new();
@@ -236,13 +232,8 @@ fn move_rebuild_backups(root: &Path, space_dir: &Path) -> Result<bool, String> {
     Ok(migrated)
 }
 
-/// Split the legacy `settings.json` into `app_settings.json` (data root) and
-/// `game_settings.json` (game space dir), then rename the original to the
-/// `.pre-gamespaces.bak` backup. Each half is written only when it is still
-/// missing, so a run interrupted between the two writes finishes on retry
-/// without overwriting the half that already landed. An unparseable legacy
-/// file is backed up without splitting; the app then starts from default
-/// settings, matching the pre-split behavior for a corrupt settings.json.
+/// Split legacy settings into app and game-space files, writing only missing
+/// halves so retries preserve completed writes; keep the original as a backup.
 fn migrate_legacy_settings(root: &Path, space_dir: &Path) -> Result<bool, String> {
     let legacy = root.join(LEGACY_SETTINGS_FILE);
     if !legacy.exists() {
@@ -488,7 +479,7 @@ mod tests {
             &root.join("settings.json"),
             &json!({"locale": "cs", "arma3_directory": "C:\\Arma3"}).to_string(),
         );
-        // Simulate a crash after the app half landed but before the game half.
+
         write(
             &root.join("app_settings.json"),
             &json!({"locale": "en"}).to_string(),

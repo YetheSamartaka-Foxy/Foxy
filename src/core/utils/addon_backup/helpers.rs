@@ -299,8 +299,6 @@ pub(super) fn calculate_addon_folder_content_hash(path: &Path) -> Result<String>
 mod tests {
     use super::*;
 
-    // ── addon_directory_name ───────────────────────────────────────────
-
     #[test]
     fn addon_directory_name_extracts_last_component() {
         let path = Path::new("/mods/@ace");
@@ -317,12 +315,9 @@ mod tests {
 
     #[test]
     fn addon_directory_name_root_path_errors() {
-        // Root path has no file_name component
         let result = addon_directory_name(Path::new("/"));
         assert!(result.is_err());
     }
-
-    // ── backup_folder_name ─────────────────────────────────────────────
 
     #[test]
     fn backup_folder_name_format() {
@@ -335,8 +330,6 @@ mod tests {
         let result = backup_folder_name("@mod", "  def456  ");
         assert_eq!(result, "DEF456_@mod");
     }
-
-    // ── parse_backup_folder_name ───────────────────────────────────────
 
     #[test]
     fn parse_backup_folder_name_valid() {
@@ -362,13 +355,10 @@ mod tests {
 
     #[test]
     fn parse_backup_folder_name_multiple_underscores() {
-        // Only splits on first underscore
         let (hash, name) = parse_backup_folder_name("ABC_mod_extra").unwrap();
         assert_eq!(hash, "ABC");
         assert_eq!(name, "mod_extra");
     }
-
-    // ── sanitize_backup_component ──────────────────────────────────────
 
     #[test]
     fn sanitize_backup_component_normal_name() {
@@ -411,8 +401,6 @@ mod tests {
         assert_eq!(sanitize_backup_component("  test  "), "test");
     }
 
-    // ── unique_staging_path ────────────────────────────────────────────
-
     #[test]
     fn unique_staging_path_contains_folder_name() {
         let path = unique_staging_path(Path::new("/backups"), "ABC_@mod");
@@ -424,10 +412,9 @@ mod tests {
     #[test]
     fn unique_staging_path_different_each_call() {
         let p1 = unique_staging_path(Path::new("/tmp"), "test");
-        // Small delay to ensure different timestamp
+
         let p2 = unique_staging_path(Path::new("/tmp"), "test");
-        // They might be the same if called in the same nanosecond, but usually different
-        // Just verify they are valid paths
+
         assert!(!p1.to_string_lossy().is_empty());
         assert!(!p2.to_string_lossy().is_empty());
     }

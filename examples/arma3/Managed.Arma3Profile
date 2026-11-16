@@ -1,0 +1,39 @@
+version = 1;
+class DifficultyPresets
+{
+class CustomDifficulty
+{
+class Options
+{
+reducedDamage = 0;
+groupIndicators = 1;
+friendlyTags = 0;
+enemyTags = 0;
+detectedMines = 1;
+commands = 1;
+waypoints = 1;
+tacticalPing = 3;
+weaponInfo = 1;
+stanceIndicator = 1;
+staminaBar = 1;
+weaponCrosshair = 0;
+visionAid = 0;
+thirdPersonView = 2;
+cameraShake = 1;
+scoreTable = 1;
+deathMessages = 1;
+vonID = 1;
+mapContentFriendly = 1;
+mapContentEnemy = 0;
+mapContentMines = 1;
+autoReport = 0;
+multipleSaves = 1;
+};
+aiLevelPreset = 3;
+};
+class CustomAILevel
+{
+skillAI = 0.5;
+precisionAI = 0.25;
+};
+};

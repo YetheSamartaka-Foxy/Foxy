@@ -31,22 +31,16 @@ impl Foxy {
         launch_debug_mode: bool,
         agent_gui: AgentGuiLaunchConfig,
         debug_modal_previews: Vec<crate::ui::app::debug_modals::DebugModal>,
+        mode_override: Option<crate::core::app_mode::AppMode>,
     ) -> Self {
         info!("Initializing Foxy UI state");
         let mut visuals = Self::base_visuals(true);
         visuals.override_text_color = Some(palette::TEXT_NORMAL);
         cc.egui_ctx.set_theme(egui::Theme::Dark);
-        // egui 0.36 would otherwise push the theme into the native window after
-        // the first frame (SetWindowTheme + SetWindowCompositionAttribute on
-        // Windows). Foxy draws its own chrome, and that call has left the glow
-        // surface black on some hybrid-GPU machines.
+        // Avoid the native theme call: egui 0.36 has turned Foxy's Glow surface black on some hybrid-GPU systems.
         cc.egui_ctx.options_mut(|o| o.sync_window_theme = false);
         cc.egui_ctx.set_visuals(visuals);
 
-        // Use Roboto as the default proportional typeface. It is inserted at
-        // the front of the Proportional family so it takes priority over
-        // egui's built-in font, while the Noto fonts below remain fallbacks
-        // for scripts Roboto does not cover.
         let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert(
             "roboto".to_owned(),
@@ -60,7 +54,6 @@ impl Foxy {
             .or_default()
             .insert(0, "roboto".to_owned());
 
-        // Load Arabic font as a fallback for RTL text rendering
         fonts.font_data.insert(
             "noto_sans_arabic".to_owned(),
             std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
@@ -133,7 +126,6 @@ impl Foxy {
             .or_default()
             .push("noto_sans_cjk_sc".to_owned());
 
-        // Load Hebrew font as a fallback for Hebrew text rendering
         fonts.font_data.insert(
             "noto_sans_hebrew".to_owned(),
             std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
@@ -150,7 +142,7 @@ impl Foxy {
 
         api::ensure_logger();
         let (updates_sender, server_updates) =
-            std::sync::mpsc::channel::<(String, String, ServerOnlineStatus)>();
+            std::sync::mpsc::channel::<crate::ui::app::runtime::ServerQueryResult>();
         let (join_preflight_result_tx, join_preflight_result_rx) =
             std::sync::mpsc::channel::<JoinPreflightQueryResult>();
         let (image_result_tx, image_result_rx) = std::sync::mpsc::channel::<ImageLoadResult>();
@@ -182,7 +174,8 @@ impl Foxy {
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (repository_db_wipe_tx, repository_db_wipe_rx) =
             std::sync::mpsc::channel::<RepositoryDbWipeResult>();
-        let (database_wipe_tx, database_wipe_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (database_wipe_tx, database_wipe_rx) =
+            std::sync::mpsc::channel::<crate::ui::app::DatabaseWipeDelivery>();
         let (addon_backup_task_tx, addon_backup_task_rx) =
             std::sync::mpsc::channel::<AddonBackupTaskResult>();
         let (backup_cleanup_task_tx, backup_cleanup_task_rx) =
@@ -242,10 +235,13 @@ impl Foxy {
             pending_low_space_notice: false,
             storage_compat_notice: None,
             current_view: FoxyView::RepositoryList,
+            launch_mode_override: mode_override,
+            mode_navigation: Default::default(),
+            server_view: Default::default(),
             last_view: FoxyView::None,
             main_view_state: MainViewState {
                 use_window_decorations: false,
-            }, // So it works on Windows
+            },
             repository_view_state: RepositoryViewState::default(),
             repository_list_cache: RepositoryListCache::default(),
             repository_list_data_version: 1,
@@ -311,6 +307,7 @@ impl Foxy {
             repository_addon_size_load_rx,
             repository_addon_size_load_tx,
             repository_addon_size_load_pending: false,
+            repository_addon_size_load_worker: None,
             repository_addon_size_bytes_by_repo_and_addon: HashMap::new(),
             repository_selection: None,
             detected_arma3_profiles: Vec::new(),
@@ -319,6 +316,7 @@ impl Foxy {
             pending_arma3_profile_action: None,
             cached_missions: None,
             mission_scan_rx: None,
+            mission_scan_worker: None,
             mission_scan_in_flight: None,
             selected_repository_for_settings: None,
             current_repository_settings_tab: RepositorySettingsTab::Configuration,
@@ -343,6 +341,10 @@ impl Foxy {
             server_refresh_indicator_until: HashMap::new(),
             pending_server_queries: HashSet::new(),
             pending_queries: Vec::new(),
+            server_query_generation: Default::default(),
+            client_db_admission: Default::default(),
+            mode_ownership: Default::default(),
+            client_worker_handoff_active: false,
             server_updates,
             updates_sender,
             join_preflight_worker: None,
@@ -351,13 +353,16 @@ impl Foxy {
             image_result_rx,
             image_result_tx,
             pending_image_jobs: HashSet::new(),
+            image_workers: Vec::new(),
             repo_metadata_result_rx,
             repo_metadata_result_tx,
             pending_repo_metadata_jobs: HashSet::new(),
+            repo_metadata_workers: Vec::new(),
             repository_space_import_result_rx,
             repository_space_import_result_tx,
             repository_space_import_in_flight: false,
             repository_space_freshness_rx: None,
+            repository_space_freshness_worker: None,
             repository_space_last_refresh: None,
             periodic_remote_check_last_run: None,
             dispatching_background_sync: false,
@@ -365,15 +370,19 @@ impl Foxy {
             addon_hash_recalc_result_rx,
             addon_hash_recalc_result_tx,
             addon_hash_recalc_in_flight: false,
+            addon_hash_recalc_worker: None,
             addon_delete_result_rx,
             addon_delete_result_tx,
             pending_addon_deletes: HashSet::new(),
+            maintenance_workers: Vec::new(),
             addon_force_redownload_result_rx,
             addon_force_redownload_result_tx,
             pending_addon_force_redownloads: HashSet::new(),
+            force_redownload_workers: Vec::new(),
             cached_update_load_result_rx,
             cached_update_load_result_tx,
             pending_cached_update_loads: HashSet::new(),
+            cached_update_load_workers: Vec::new(),
             quick_scan_rx,
             quick_scan_tx,
             quick_scan_progress_rx,
@@ -416,9 +425,15 @@ impl Foxy {
             repository_db_wipe_tx,
             database_wipe_rx,
             database_wipe_tx,
+            database_wipe_worker: None,
             addon_backup_task_rx,
             addon_backup_task_tx,
             addon_backup_worker: None,
+            pending_update_clear_workers: Vec::new(),
+            overview_worker: None,
+            ts3_plugin_scan_worker: None,
+            repository_space_import_worker: None,
+            benchmark_workers: Vec::new(),
             addon_backup_status: None,
             addon_backup_notice: None,
             addon_backup_restore_state: None,
@@ -463,6 +478,7 @@ impl Foxy {
             launch_action: Default::default(),
             pending_installer_path: None,
             pending_installer_error: None,
+            installer_owner_check: Default::default(),
             shutdown_after_close: false,
             configuration_recovery_error: None,
             backend_progress_rx: None,
@@ -637,7 +653,7 @@ impl Foxy {
             backup_inventory_refresh_in_progress: false,
             backup_inventory_request_id: 0,
             backup_inventory_in_flight_request_id: None,
-            // App update system
+
             app_update_status: crate::core::tasks::app_update::UpdateCheckStatus::Idle,
             app_update_event_rx: None,
             app_update_download_rx: None,
@@ -650,37 +666,61 @@ impl Foxy {
             pending_app_update_prompt: false,
             app_update_prompt_armed: false,
             debug_modal_previews,
-            // Swifty migration
+
             swifty_migration_state:
                 crate::ui::views::swifty_migration::types::SwiftyMigrationState::default(),
-            // Game spaces
+
             game_spaces_view_state: crate::ui::views::game_spaces::GameSpacesViewState::default(),
             game_space_settings_view_state:
                 crate::ui::views::game_spaces::settings::GameSpaceSettingsViewState::default(),
             pending_game_space_switch: None,
             game_space_switch_requested_at: None,
-            // Steam Workshop
+
             workshop_view_state: crate::ui::views::workshop::WorkshopViewState::default(),
             addon_workshop_lookups: Vec::new(),
             workshop_task_rx: None,
             workshop_task_worker: None,
+            workshop_task_generation: 0,
         };
-        app.db_lock_conflict = app.claim_active_space_database();
+        match crate::core::app_mode::read_saved_app_mode(&Self::get_app_settings_path()) {
+            Ok(mode) => app.settings_view_state.app_mode = mode,
+            Err(error) => log::warn!("{error}"),
+        }
+        let server_bootstrap = app
+            .settings_view_state
+            .app_mode
+            .effective(app.launch_mode_override)
+            == crate::core::app_mode::AppMode::Server;
+        if server_bootstrap {
+            app.begin_client_worker_handoff();
+            if let Err(error) = crate::core::tasks::init_database::close_active_database_sync() {
+                app.mode_ownership.error = Some(error);
+            }
+        }
+        app.db_lock_conflict = if server_bootstrap {
+            None
+        } else {
+            app.claim_active_space_database()
+        };
         if app.db_lock_conflict.is_some() {
             return app;
         }
-        if let Err(error) = crate::core::game::launch_preparation::recover(
-            &crate::core::game::spaces::active_game_space_dir(),
-        )
-        .and_then(|()| {
-            crate::core::game::foxypack::recover_pending_import(
+        if !server_bootstrap
+            && let Err(error) = crate::core::game::launch_preparation::recover(
                 &crate::core::game::spaces::active_game_space_dir(),
             )
-        }) {
+            .and_then(|()| {
+                crate::core::game::foxypack::recover_pending_import(
+                    &crate::core::game::spaces::active_game_space_dir(),
+                )
+            })
+        {
             app.configuration_recovery_error = Some(error);
             return app;
         }
-        crate::core::tasks::init_database::check_and_wipe_database();
+        if !server_bootstrap {
+            crate::core::tasks::init_database::check_and_wipe_database();
+        }
         app.load_settings();
         app.legacy_migration_review_files =
             crate::core::game::spaces::pending_legacy_migration_review(
@@ -689,8 +729,10 @@ impl Foxy {
             .unwrap_or_default();
         app.pending_renderer_fallback_notice =
             crate::core::utils::renderer_fallback::renderer_fallback_notice_path().exists();
-        let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
-        app.refresh_database_repair_requirement();
+        if !server_bootstrap {
+            let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
+            app.refresh_database_repair_requirement();
+        }
         app.apply_debug_modal_previews();
         if app.settings_view_state.debug_mode && !app.launch_debug_mode {
             info!("Ignoring persisted debug mode; launch with `ui --debug-mode` to enable");
@@ -703,19 +745,20 @@ impl Foxy {
         let rollback_cleanup_root = std::path::PathBuf::from(app.effective_temp_directory());
         let recovery_space = Self::get_game_space_directory();
         let (recovery_tx, recovery_rx) = std::sync::mpsc::channel();
-        app.startup_recovery_rx = Some(recovery_rx);
-        std::thread::spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(err) => {
-                    log::warn!("Failed to create rollback startup cleanup runtime: {}", err);
-                    return;
-                }
-            };
-            if let Err(err) = runtime.block_on(
+        if !server_bootstrap {
+            app.startup_recovery_rx = Some(recovery_rx);
+            std::thread::spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(err) => {
+                        log::warn!("Failed to create rollback startup cleanup runtime: {}", err);
+                        return;
+                    }
+                };
+                if let Err(err) = runtime.block_on(
                 crate::core::tasks::download_files::UpdateRollbackSession::cleanup_stale_sessions(
                     rollback_cleanup_root,
                     None,
@@ -725,16 +768,16 @@ impl Foxy {
                 let _ = recovery_tx.send(Err(err.to_string()));
                 return;
             }
-            let _ = recovery_tx.send(Ok(
-                crate::core::tasks::download_files::UpdateRollbackSession::recovery_notices(
-                    &recovery_space,
-                ),
-            ));
-        });
+                let _ = recovery_tx.send(Ok(
+                    crate::core::tasks::download_files::UpdateRollbackSession::recovery_notices(
+                        &recovery_space,
+                    ),
+                ));
+            });
+        }
         app.apply_runtime_palette_visuals(&cc.egui_ctx);
         app.apply_runtime_ui_scale(&cc.egui_ctx);
-        // Capture the renderer eframe actually created so `health` can report
-        // it (wgpu vs the glow fallback path).
+
         let active_renderer = if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             // Reaching here means the instance, adapter and device all came up on
             // this backend, so it is safe to pin the next launch to it.
@@ -747,6 +790,11 @@ impl Foxy {
         };
         app.initialize_agent_gui(&cc.egui_ctx, &agent_gui, active_renderer);
         app.i18n.set_language(&app.settings_view_state.locale);
+        if server_bootstrap {
+            app.start_server_bootstrap();
+            app.sync_app_mode_navigation();
+            return app;
+        }
         app.load_repositories();
         if app.load_repository_spaces() {
             app.reconcile_repository_space_paths();
@@ -865,7 +913,6 @@ impl Foxy {
             }
         }
 
-        // Detect Arma 3 profiles on startup
         let custom_profiles_dir = app.settings_view_state.arma3_profiles_directory.trim();
         let custom_profiles_dir = if custom_profiles_dir.is_empty() {
             None
@@ -877,7 +924,6 @@ impl Foxy {
         app.detected_active_arma3_profile =
             crate::core::arma3_profiles::detect_active_profile(&app.detected_arma3_profiles);
 
-        // First-run Swifty migration: if not yet offered, repos are empty, and Swifty data exists
         if !app.settings_view_state.swifty_migration_offered
             && app.repository_view_state.repositories.is_empty()
             && crate::ui::views::swifty_migration::scanner::swifty_data_exists()

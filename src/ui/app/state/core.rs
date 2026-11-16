@@ -110,11 +110,9 @@ pub struct RepositorySpaceSettingsState {
 pub enum PendingRepositoryDuplicateAddAction {
     FromAddressInput {
         address_input: String,
-        /// Optional name override from the add-repository dialog (empty = derive
-        /// from address).
+
         name: String,
-        /// Optional local path override from the add-repository dialog (empty =
-        /// no chosen folder).
+
         path: String,
     },
     FromSpaceEntry {
@@ -164,9 +162,7 @@ pub struct PendingMissionEditorLaunchWarningState {
     pub effective_repository: Repository,
     pub mission: crate::core::arma3_missions::EditorMission,
     pub external_addons: Vec<String>,
-    /// Enabled external addons whose files are missing, so the editor launch
-    /// would silently drop them. Surfaced as a warning regardless of the
-    /// general "warn about editor external addons" setting.
+
     pub unavailable_enabled: Vec<super::JoinPreflightUnavailableAddon>,
 }
 
@@ -274,6 +270,8 @@ pub struct RepositorySpaceManifest {
 
 #[derive(Debug)]
 pub struct StartupQuickScanFilterResult {
+    pub space_id: String,
+    pub generation: u64,
     pub requested_repositories: usize,
     pub eligible_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
     pub prevalidated_repositories: Vec<crate::core::api::StartupRepositoryInstance>,
@@ -286,16 +284,14 @@ pub struct StartupQuickScanFilterResult {
 pub struct StartupPendingUpdateRestoreRequest {
     pub repo_name: String,
     pub repo_url: String,
-    /// Download folder of this repository instance; the cached pending-update row
-    /// is keyed by `(repo_url, local_path)`.
+    /// Route pending-update state by repository URL and download folder.
     pub repo_path: String,
     pub verify_with_quick_scan: bool,
 }
 
 #[derive(Debug)]
 pub struct StartupPendingUpdateRestoreRecord {
-    /// Download folder of the instance; with `repo_url` it re-resolves the
-    /// repository, whose list position may have moved while the restore ran.
+    /// Use URL and folder to re-resolve the repository if its list position changed.
     pub repo_path: String,
     pub repo_url: String,
     pub state: RepoState,
@@ -304,12 +300,24 @@ pub struct StartupPendingUpdateRestoreRecord {
     pub is_foxy: Option<bool>,
 }
 
+pub struct StartupPendingUpdateRestoreBatch {
+    pub space_id: String,
+    pub generation: u64,
+    pub records: Vec<StartupPendingUpdateRestoreRecord>,
+}
+
+pub struct DatabaseWipeDelivery {
+    pub space_id: String,
+    pub generation: u64,
+    pub outcome: Result<(), String>,
+}
+
 #[derive(Debug)]
 pub struct RepositoryDbWipeResult {
+    pub space_id: String,
+    pub generation: u64,
     pub repository_url: String,
-    /// Download folder of the wiped instance; empty for a URL-wide wipe (e.g.
-    /// repository deletion). Used to clear the matching `(url, local_path)`
-    /// status entry.
+    /// An empty folder marks a URL-wide wipe; otherwise clear only the matching `(url, local_path)` status.
     pub local_path: String,
     pub repository_name: String,
     pub elapsed: Duration,
@@ -325,7 +333,6 @@ pub struct RepositoryDbWipeCompletionState {
     pub error_message: Option<String>,
 }
 
-/// Prompt shown after a sync/download when an updated TS3 plugin is detected.
 #[derive(Clone, Debug)]
 pub struct Ts3PluginUpdatePrompt {
     pub plugin_path: std::path::PathBuf,
@@ -333,13 +340,13 @@ pub struct Ts3PluginUpdatePrompt {
     pub file_hash: String,
 }
 
-/// Payload delivered by the background TS3 plugin scan worker.
 #[derive(Debug)]
 pub struct Ts3PluginScanResult {
+    pub space_id: String,
+    pub generation: u64,
     pub statuses: Vec<crate::core::ts3_plugin::Ts3PluginStatus>,
     pub ts3_running: bool,
-    /// Mirrors the request flag so a prompt request cannot be lost when the
-    /// user starts an unrelated recheck while the scan is running.
+
     pub prompt_on_update: bool,
 }
 
@@ -351,26 +358,30 @@ pub struct DecodedImagePayload {
 
 #[derive(Debug)]
 pub struct ImageLoadResult {
+    pub space_id: String,
+    pub generation: u64,
     pub checksum_hex: String,
     pub is_icon: bool,
     pub payload: Result<DecodedImagePayload, String>,
 }
 
-/// Successfully fetched repo.json (and, for FoxyMode repos, foxy_addons.json)
-/// payload produced by the background repository-metadata fetch worker.
+pub struct MissionScanDelivery {
+    pub space_id: String,
+    pub generation: u64,
+    pub list: CachedMissionList,
+}
+
 #[derive(Debug)]
 pub struct RepoMetadataPayload {
     pub repo_json: serde_json::Value,
     pub addon_manifest: serde_json::Value,
 }
 
-/// Result of a background repository-metadata refresh, delivered to the UI
-/// thread for application. Network I/O happens off the UI thread so a slow or
-/// unreachable server can no longer freeze the app.
 #[derive(Debug)]
 pub struct RepoMetadataFetchResult {
-    /// Index the refresh was dispatched for; re-validated against `repo_address`
-    /// on apply since the list may have changed while the fetch was in flight.
+    pub space_id: String,
+    pub generation: u64,
+    /// Revalidate the dispatched index against its address because the repository list may change during fetch.
     pub repo_index: usize,
     pub repo_address: String,
     pub repo_name: String,
@@ -379,32 +390,32 @@ pub struct RepoMetadataFetchResult {
     pub outcome: Result<RepoMetadataPayload, String>,
 }
 
-/// Result of a background addon hash recalculation, applied on the UI thread.
-/// Hashing reads and digests every file in the addon, so it runs off the UI
-/// thread to keep the draw loop responsive.
+/// Apply addon hash results on the UI thread after hashing every file off-thread.
 #[derive(Debug)]
 pub struct AddonHashRecalcResult {
+    pub space_id: String,
+    pub generation: u64,
     pub repo_url: String,
     pub addon_name: String,
     pub repo_name: String,
-    /// `Ok(true)` = hashes recalculated, `Ok(false)` = addon not found,
-    /// `Err` = recalculation failed.
+
     pub outcome: Result<bool, String>,
 }
 
-/// Result of an addon delete request from repository settings.
 #[derive(Debug)]
 pub struct AddonDeleteResult {
+    pub space_id: String,
+    pub generation: u64,
     pub addon_name: String,
     pub addon_path: String,
     pub outcome: Result<usize, String>,
 }
 
-/// Result of the remote reachability probe that guards an addon force
-/// redownload. The probe runs off the UI thread; the local folder is removed
-/// on the UI thread only after `outcome` is `Ok`.
+/// Probe reachability off-thread and remove local files only after success.
 #[derive(Debug)]
 pub struct AddonForceRedownloadProbeResult {
+    pub space_id: String,
+    pub generation: u64,
     pub repo_address: String,
     pub repo_path: String,
     pub repo_name: String,
@@ -413,42 +424,34 @@ pub struct AddonForceRedownloadProbeResult {
     pub outcome: Result<(), String>,
 }
 
-/// Disposition of a background cached pending-update load. Mirrors the branches
-/// of the previous synchronous loader so UI-thread state transitions are
-/// preserved exactly.
 #[derive(Debug)]
 pub enum CachedUpdateLoadOutcome {
-    /// Cached payload present and still has updates.
     Pending(Vec<ModDiffSummary>),
     NeedsLocalCheck,
-    /// Cached payload present but no updates remain (stale; the worker cleared
-    /// the database row).
+
     Synced,
-    /// No cached payload exists in the database.
+
     NoPayload,
-    /// Cached payload could not be parsed (corrupt); state resets to Unknown.
+
     Corrupt,
-    /// The database read itself failed.
+
     ReadError(String),
+    /// If admission closed before the read, clear the pending flag without changing repository state.
+    Skipped,
 }
 
-/// Result of a background load of a repository's cached pending-update payload
-/// from SQLite, applied on the UI thread. Reading runs off the UI thread so a
-/// busy database (e.g. mid-sync) can no longer stall the draw loop.
 #[derive(Debug)]
 pub struct CachedUpdateLoadResult {
+    pub space_id: String,
+    pub generation: u64,
     pub repo_url: String,
-    /// Download folder this load targeted; results are routed back to the
-    /// matching `(repo_url, local_path)` instance.
+    /// Route results to the repository instance that owns the captured download folder.
     pub local_path: String,
-    /// When the payload still has updates, open the repository update modal once
-    /// the result is applied (used by the pending-updates banner action).
+    /// Open the update modal after applying results only when updates remain.
     pub open_modal_when_pending: bool,
     pub outcome: CachedUpdateLoadOutcome,
 }
 
-/// Repository-space manifest fetched off the UI thread, ready to be merged into
-/// app state on the UI thread by `apply_fetched_repository_space`.
 #[derive(Debug)]
 pub struct FetchedRepositorySpace {
     pub source_address: String,
@@ -465,35 +468,28 @@ pub struct FetchedRepositorySpace {
     pub entries: Vec<RepositorySpaceEntry>,
 }
 
-/// What to do on the UI thread once a background repository-space manifest
-/// fetch completes.
 #[derive(Debug)]
 pub enum RepositorySpaceImportContinuation {
-    /// Triggered from the add-repository dialog. If no manifest is found, fall
-    /// back to adding the input as a plain repository, applying the optional
-    /// name/path overrides (empty = derive name from address / no chosen folder).
+    /// If no space manifest exists, add the input as a plain repository with the optional name/path overrides.
     AddRepositoryDialog {
         address_input: String,
         name: String,
         path: String,
     },
-    /// Triggered from the Swifty migration wizard. Continues the import with the
-    /// snapshot of selected Swifty repositories taken when Import was clicked.
+    /// Continue Swifty import using the repository selection captured when Import was clicked.
     SwiftyMigration { selected: Vec<SwiftyDetectedRepo> },
 }
 
-/// Result of a background repository-space manifest fetch, delivered to the UI
-/// thread for application. The previous timeout-less `reqwest::blocking::get`
-/// here could hang the UI for many seconds against a dead server.
+/// Fetch repository-space manifests off-thread; blocking HTTP here could freeze the UI against an unreachable server.
 #[derive(Debug)]
 pub struct RepositorySpaceImportResult {
+    pub space_id: String,
+    pub generation: u64,
     pub continuation: RepositorySpaceImportContinuation,
-    /// `Ok(Some(space))` = manifest found, `Ok(None)` = no manifest at any
-    /// candidate URL, `Err` = fetch/parse failure.
+    /// Distinguish a found manifest, no manifest at candidate URLs, and a fetch/parse error.
     pub outcome: Result<Option<FetchedRepositorySpace>, String>,
 }
 
-/// Cached aggregated backup view data to avoid per-frame clone/sort/group.
 #[derive(Clone, Debug)]
 pub struct BackupManagerViewCache {
     pub records_version: u64,
@@ -507,8 +503,6 @@ pub struct BackupManagerViewCache {
     >,
 }
 
-/// Pre-computed Color32 values for the current palette, avoiding per-frame
-/// `RgbColor::to_color32()` conversions and blend computations.
 #[derive(Clone, Debug)]
 pub struct CachedPaletteColor32 {
     pub primary_accent: egui::Color32,

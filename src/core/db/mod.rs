@@ -1,14 +1,3 @@
-//! Database seam over the Turso engine (plan.md §5.1).
-//!
-//! A thin facade over the handful of operations the codebase performs:
-//! `execute`, `query_all`, `query_one`, and retrying `transaction`/`execute_retry`
-//! That keeps the ~40 DB call sites independent of the concrete engine type.
-//! Originally introduced (Phase 1) to decouple call sites from `sea_orm::*`; the
-//! Phase-4 cutover removed the SeaORM storage layer, so this now wraps `turso`
-//! directly.
-//!
-//! Call sites read with `db.query_one("SELECT ... WHERE ... = ?", params![..])` +
-//! a [`DbRow`] getter, and write with `db.execute("INSERT ...", params![..])`.
 #![allow(dead_code)] // Seam surface intentionally exposes a few unused conveniences.
 
 use std::future::Future;
@@ -25,12 +14,8 @@ pub(crate) use value::{DbValue, params};
 
 use crate::core::tasks::db_turso::{PooledConnection, TunedConnection};
 
-/// The concrete connection-handle type stored in
-/// [`crate::core::models::context::FoxyContext`] and returned by
-/// `init_database()` (plan.md §5.1).
 pub(crate) type DbHandle = Arc<turso::Database>;
 
-/// The shared database handle.
 #[derive(Clone)]
 pub(crate) struct FoxyDb {
     db: Arc<turso::Database>,
@@ -41,21 +26,16 @@ impl FoxyDb {
         FoxyDb { db }
     }
 
-    /// Wrap a storage-native handle (the kind `init_database()` returns) in the
-    /// seam. Kept as a distinct name from [`FoxyDb::from_turso`] for the
-    /// standalone `init_database()` call sites and `FoxyContext::db()`.
     pub(crate) fn from_handle(db: DbHandle) -> Self {
         FoxyDb { db }
     }
 
-    /// Run a write/DDL statement; returns the number of affected rows.
     pub(crate) async fn execute(&self, sql: &str, params: Vec<DbValue>) -> Result<u64, DbErr> {
         let _shared = crate::core::tasks::init_database::acquire_db_shared().await;
         let conn = connect_turso(&self.db).await?;
         turso_execute(&conn, sql, params).await
     }
 
-    /// Run an INSERT; returns the rowid of the inserted row.
     pub(crate) async fn execute_insert(
         &self,
         sql: &str,
@@ -66,11 +46,8 @@ impl FoxyDb {
         turso_execute_insert(&conn, sql, params).await
     }
 
-    /// Execute a single write statement with transient-error retry, returning the
-    /// number of affected rows. WAL runs the statement in autocommit (it is already
-    /// atomic); an explicit `BEGIN CONCURRENT` is used only when MVCC is on, so a
-    /// conflict can roll back. The statement may re-run after a retryable error, so
-    /// it must be idempotent.
+    /// Writes must be idempotent because transient errors can retry them.
+    /// WAL uses atomic autocommit; MVCC uses BEGIN CONCURRENT so conflicts can roll back.
     pub(crate) async fn execute_retry(
         &self,
         label: &'static str,
@@ -78,21 +55,14 @@ impl FoxyDb {
         params: Vec<DbValue>,
     ) -> Result<u64, DbErr> {
         const MAX_RETRIES: usize = 5;
-        // Shared barrier: coexists with other readers/writers but yields to an
-        // exclusive purge (see `DB_EXCLUSIVE`). Acquired before the connection so
-        // a running purge drains this call too.
+        // Acquire the shared barrier before a connection so exclusive purge drains this call too.
         let _shared = crate::core::tasks::init_database::acquire_db_shared().await;
         let conn = connect_turso(&self.db).await?;
         let mvcc = crate::core::tasks::db_turso::mvcc_enabled();
         // Release the write gate before retry backoff, then re-acquire it.
         let (mut gate, mut gate_wait) =
             crate::core::tasks::init_database::acquire_db_write_gate().await;
-        // Per-category write instrumentation (plan.md §5.4) so this label shows up
-        // in the final write-category report again. The timer starts after the gate,
-        // so it measures the transaction window (`txn_ms`), not the work: Turso has
-        // one internal writer, so past a gate of 1 the waiters block inside
-        // `conn.execute` and that queue time lands here rather than in
-        // `permit_wait_ms`.
+        // txn_ms starts after the write gate and includes Turso's internal single-writer wait, unlike permit_wait_ms.
         let metric_baseline = crate::core::tasks::init_database::sqlite_perf_snapshot();
         let metric_started = std::time::Instant::now();
         let mut attempt = 0;
@@ -150,7 +120,6 @@ impl FoxyDb {
         }
     }
 
-    /// Run a query and collect all rows.
     pub(crate) async fn query_all(
         &self,
         sql: &str,
@@ -161,7 +130,6 @@ impl FoxyDb {
         turso_query_all(&conn, sql, params).await
     }
 
-    /// Run a query and return the first row, if any.
     pub(crate) async fn query_one(
         &self,
         sql: &str,
@@ -175,10 +143,7 @@ impl FoxyDb {
             .next())
     }
 
-    /// Run `work` inside a **read** transaction for a consistent snapshot. Takes
-    /// no write permit and does not retry - the seam equivalent of a bare
-    /// `BEGIN` used by multi-query read paths so concurrent reads are not
-    /// serialized.
+    /// Consistent read snapshots take no write permit and do not retry, so independent readers remain concurrent.
     pub(crate) async fn read_transaction<T, F>(&self, work: F) -> Result<T, DbErr>
     where
         F: for<'a> FnOnce(
@@ -202,18 +167,12 @@ impl FoxyDb {
         }
     }
 
-    /// Begin a transaction and return an **owned** handle the caller drives
-    /// explicitly (`commit`/`rollback`). The seam equivalent of a bare `BEGIN`
-    /// used by the bulk hash-persist path, which hand-rolls its own
-    /// begin/insert/update/commit loop with fine-grained perf instrumentation.
+    /// The caller owns commit/rollback; retain the write permit until the owned transaction settles.
     pub(crate) async fn begin(&self) -> Result<OwnedDbTxn, DbErr> {
         // Shared barrier first so a running purge drains this writer too; rides in
         // the returned handle and releases with the permit on commit/rollback/drop.
         let shared = crate::core::tasks::init_database::acquire_db_shared().await;
-        // Hold the write gate for the whole caller-driven begin→commit window so
-        // this transaction serializes with the seam's other writers on Turso's
-        // single internal writer (after_turso_regression_analysis2.md). The permit
-        // rides inside the returned handle and releases on commit/rollback/drop.
+        // Hold the write gate through commit/rollback/drop so caller-driven transactions share Turso's single writer safely.
         let (permit, _gate_wait) = crate::core::tasks::init_database::acquire_db_write_gate().await;
         let conn = connect_turso(&self.db).await?;
         turso_execute(&conn, "BEGIN", Vec::new()).await?;
@@ -224,9 +183,7 @@ impl FoxyDb {
         })
     }
 
-    /// Begin an owned transaction while holding the exclusive DB barrier. Use this
-    /// for schema-level bulk operations that must not overlap readers, while still
-    /// keeping normal foreign key enforcement on.
+    /// Schema bulk operations require exclusive reader/writer admission while retaining normal foreign-key enforcement.
     pub(crate) async fn begin_exclusive(&self) -> Result<OwnedDbTxn, DbErr> {
         let exclusive = crate::core::tasks::init_database::acquire_db_exclusive().await;
         let (permit, _gate_wait) = crate::core::tasks::init_database::acquire_db_write_gate().await;
@@ -239,21 +196,17 @@ impl FoxyDb {
         })
     }
 
-    /// Run idempotent work inside a transaction with transient-error retry.
     pub(crate) async fn transaction<F>(&self, label: &str, work: F) -> Result<(), DbErr>
     where
         F: for<'a> Fn(
             &'a DbTxn<'a>,
         ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>>,
     {
-        // Shared barrier: coexists with other readers/writers, yields to a purge.
         let _shared = crate::core::tasks::init_database::acquire_db_shared().await;
         turso_transaction(&self.db, label, false, false, false, work).await
     }
 
-    /// Like [`FoxyDb::transaction`] but on its own connection with
-    /// `foreign_keys=OFF` and a large page cache, for bulk inserts whose parents
-    /// the caller verifies inside the transaction before it commits.
+    /// Bulk inserts disable foreign keys on a dedicated connection; the caller must verify parents before commit.
     pub(crate) async fn bulk_insert_transaction<F>(&self, label: &str, work: F) -> Result<(), DbErr>
     where
         F: for<'a> Fn(
@@ -264,11 +217,7 @@ impl FoxyDb {
         turso_transaction(&self.db, label, true, false, true, work).await
     }
 
-    /// Like [`FoxyDb::transaction`] but for the repository purge: runs with
-    /// `foreign_keys=OFF` (the purge's real hang - see `turso_transaction`) AND
-    /// with **exclusive** DB access (no other seam read/write proceeds until it
-    /// commits) as defense-in-depth against Turso wedging a long delete overlapped
-    /// from another connection/runtime (see [`DB_EXCLUSIVE`]).
+    /// Repository purge requires exclusive DB access and a dedicated foreign_keys=OFF connection.
     pub(crate) async fn transaction_exclusive<F>(&self, label: &str, work: F) -> Result<(), DbErr>
     where
         F: for<'a> Fn(
@@ -276,15 +225,11 @@ impl FoxyDb {
         ) -> Pin<Box<dyn Future<Output = Result<(), DbErr>> + Send + 'a>>,
     {
         let _exclusive = crate::core::tasks::init_database::acquire_db_exclusive().await;
-        // FK enforcement OFF: the purge deletes children before parents, so it is
-        // redundant, and ON it makes Turso scan surviving sibling child tables per
-        // deleted parent row (the force-redownload wedge). See `turso_transaction`.
+        // Purge deletes children first; FK enforcement would redundantly scan surviving child tables for each deleted parent.
         turso_transaction(&self.db, label, true, true, false, work).await
     }
 }
 
-/// A transaction handle passed to [`FoxyDb::transaction`]'s closure. Statements
-/// run on the enclosing connection so they share its atomic scope.
 pub(crate) struct DbTxn<'a>(&'a TunedConnection);
 
 impl DbTxn<'_> {
@@ -319,7 +264,6 @@ impl DbTxn<'_> {
             .next())
     }
 
-    /// Stream a query's rows through `visit` instead of collecting them.
     pub(crate) async fn query_each<F>(
         &self,
         sql: &str,
@@ -333,16 +277,12 @@ impl DbTxn<'_> {
     }
 }
 
-/// An owned transaction handle returned by [`FoxyDb::begin`]. The caller drives
-/// `commit`/`rollback` explicitly; dropping without committing leaves the
-/// connection's transaction to be rolled back when the connection drops.
+/// Uncommitted owned transactions roll back when their connection drops; callers drive commit/rollback explicitly.
 pub(crate) struct OwnedDbTxn {
     conn: PooledConnection,
-    /// Write-gate permit held for the life of the transaction; released on
-    /// commit/rollback (which consume `self`) or on drop. `None` only if the gate
-    /// semaphore was closed (never in practice).
+    /// Retain the permit until commit/rollback/drop; None is possible only after semaphore closure.
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    /// DB barrier guard (see [`DB_EXCLUSIVE`]); released with the txn.
+
     _barrier: OwnedDbBarrierGuard,
 }
 
@@ -376,8 +316,6 @@ enum OwnedDbBarrierGuard {
     Shared(tokio::sync::OwnedRwLockReadGuard<()>),
     Exclusive(tokio::sync::OwnedRwLockWriteGuard<()>),
 }
-
-// --- Turso storage layer --------------------------------------------------------
 
 fn map_turso_err(e: turso::Error) -> DbErr {
     DbErr::from(e)
@@ -452,13 +390,7 @@ async fn turso_query_all(
     Ok(out)
 }
 
-/// Run a query and hand each row to `visit` as it arrives.
-///
-/// The engine streams rows; [`turso_query_all`] then holds every one of them in
-/// a `Vec<DbRow>` while the caller builds its own structs from them, so a large
-/// read pays for both representations at once. A read that only needs to build
-/// something per row - the model tree's part rows are the largest such read
-/// Foxy performs - streams instead and never materializes the second copy.
+/// Stream mapped rows to avoid retaining a second full raw-row representation during large reads.
 async fn turso_query_each<F>(
     conn: &TunedConnection,
     sql: &str,
@@ -492,8 +424,6 @@ fn dberr_is_retryable(e: &DbErr) -> bool {
     crate::core::tasks::db_turso::db_error_message_is_retryable(&e.to_string())
 }
 
-/// A 433k-row part insert spends about a tenth less time at 256 MiB than at
-/// the pooled 16 MiB (`bench_subfiles_bulk_knobs`); the connection is retired.
 const BULK_INSERT_PAGE_CACHE_KIB: u32 = 262_144;
 
 async fn turso_transaction<F>(
@@ -509,15 +439,8 @@ where
 {
     const MAX_RETRIES: usize = 5;
     let mut conn = connect_turso(db).await?;
-    // The purge deletes child rows before their parents, so FK enforcement is
-    // redundant - and catastrophic: with `foreign_keys=ON`, deleting a repo's
-    // ~1.5k `files`/`addons` while sibling repos' rows survive makes Turso scan
-    // the ~400k-row `subfiles` (and other child) tables ONCE PER DELETED PARENT
-    // ROW, wedging `delete files` for minutes (the force-redownload "hang";
-    // proven single-connection by `diag_scoped_purge_fk`: FK=ON wedges, FK=OFF
-    // = 0.3s). Must be set OUTSIDE any transaction (a no-op inside BEGIN) and
-    // before the retry loop; the pragma rides this connection only (connections
-    // are per-transaction), so it never weakens other writers' enforcement.
+    // Disable redundant FK scans before BEGIN; changing the pragma inside a transaction is a no-op.
+    // Retire this dedicated connection so disabled enforcement never reaches other writers.
     if disable_foreign_keys {
         // The pragma is connection-scoped, so this connection must not go back to
         // the pool with enforcement still off.
@@ -533,15 +456,7 @@ where
         )
         .await?;
     }
-    // Stage B (plan.md §5.2): under MVCC, independent write transactions run
-    // concurrently via `BEGIN CONCURRENT` - write–write conflicts abort at COMMIT
-    // and are retried by this loop (`dberr_is_retryable` matches the conflict
-    // variants). Falls back to plain `BEGIN` (single-writer WAL) when MVCC is off.
-    //
-    // An exclusive transaction always uses plain `BEGIN`: it holds `DB_EXCLUSIVE`,
-    // so there is no concurrency for `BEGIN CONCURRENT` to buy, and the purge runs
-    // DDL (the `subfiles` DROP/CREATE, the temp id tables) which Turso rejects
-    // outside an exclusive transaction.
+    // MVCC conflicts retry BEGIN CONCURRENT; exclusive operations use plain BEGIN because they run DDL without concurrency.
     let begin_sql = if exclusive || !crate::core::tasks::db_turso::mvcc_enabled() {
         "BEGIN"
     } else {
@@ -613,10 +528,6 @@ mod tests {
         FoxyDb::from_turso(build_test_database().await)
     }
 
-    /// The gated `transaction` write path commits, and the gate is released after
-    /// the transaction so a follow-up acquisition does not block. (If the gate
-    /// leaked, the `acquire_db_write_gate()` below would hang under the default
-    /// 1-permit gate while other parallel tests hold it.)
     #[tokio::test]
     async fn gated_transaction_commits_and_releases_gate() {
         let db = test_db().await;
@@ -641,7 +552,6 @@ mod tests {
             .expect("inserted row present");
         assert_eq!(row.get_string("name").unwrap(), "n");
 
-        // Gate is free again.
         let (permit, _wait) = acquire_db_write_gate().await;
         assert!(
             permit.is_some(),
@@ -649,9 +559,6 @@ mod tests {
         );
     }
 
-    /// An owned transaction from `begin()` holds the gate and releases it on
-    /// rollback - the second `begin()` proceeds (it would deadlock on a 1-permit
-    /// gate if the permit leaked) and the rolled-back insert leaves no row.
     #[tokio::test]
     async fn owned_txn_releases_gate_on_rollback() {
         let db = test_db().await;
@@ -665,7 +572,6 @@ mod tests {
         .unwrap();
         txn.rollback().await.unwrap();
 
-        // Must not block on the gate; rollback must have undone the insert.
         let txn2 = db.begin().await.unwrap();
         txn2.commit().await.unwrap();
         let row = db

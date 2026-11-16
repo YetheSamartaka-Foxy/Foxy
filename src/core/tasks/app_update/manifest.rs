@@ -2,11 +2,6 @@ use super::types::*;
 use crate::core::utils::format::sanitize_log_url;
 use anyhow::{Context, Result};
 
-// ---------------------------------------------------------------------------
-// Platform detection
-// ---------------------------------------------------------------------------
-
-/// Returns the platform key for the current OS+arch (e.g. "windows-x86_64").
 pub fn current_platform_key() -> &'static str {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
@@ -20,7 +15,7 @@ pub fn current_platform_key() -> &'static str {
     {
         "linux-aarch64"
     }
-    // Fallback for unsupported platforms
+
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
         all(target_os = "linux", target_arch = "x86_64"),
@@ -31,11 +26,6 @@ pub fn current_platform_key() -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Core update functions
-// ---------------------------------------------------------------------------
-
-/// Fetch the update manifest from `{base_url}/foxy-app-updater.json`.
 pub async fn fetch_manifest(base_url: &str) -> Result<UpdateManifest> {
     let url = format!("{}/foxy-app-updater.json", base_url.trim_end_matches('/'));
     log::info!("Fetching update manifest from {}", sanitize_log_url(&url));
@@ -69,7 +59,6 @@ pub async fn fetch_manifest(base_url: &str) -> Result<UpdateManifest> {
     Ok(manifest)
 }
 
-/// Check if the manifest's latest version is newer than `current_version`.
 pub fn is_newer(manifest_latest: &str, current_version: &str) -> bool {
     let Ok(remote) = semver::Version::parse(manifest_latest) else {
         log::warn!(
@@ -88,7 +77,6 @@ pub fn is_newer(manifest_latest: &str, current_version: &str) -> bool {
     remote > local
 }
 
-/// Fetch a single changelog JSON from `{base_url}/{changelog_path}`.
 pub async fn fetch_changelog(base_url: &str, changelog_path: &str) -> Result<ChangelogVersion> {
     let url = format!(
         "{}/{}",
@@ -120,8 +108,6 @@ pub async fn fetch_changelog(base_url: &str, changelog_path: &str) -> Result<Cha
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── is_newer ───────────────────────────────────────────────────────
 
     #[test]
     fn is_newer_true_for_higher_version() {
@@ -165,7 +151,6 @@ mod tests {
 
     #[test]
     fn is_newer_prerelease_comparison() {
-        // Semver: 1.0.0-alpha < 1.0.0
         assert!(is_newer("1.0.0", "1.0.0-alpha"));
         assert!(!is_newer("1.0.0-alpha", "1.0.0"));
     }
@@ -177,8 +162,6 @@ mod tests {
         assert!(!is_newer("1.2.1", "1.2.2-pre"));
     }
 
-    // ── current_platform_key ───────────────────────────────────────────
-
     #[test]
     fn current_platform_key_is_not_empty() {
         let key = current_platform_key();
@@ -188,7 +171,7 @@ mod tests {
     #[test]
     fn current_platform_key_contains_os() {
         let key = current_platform_key();
-        // Should contain either "windows", "linux", or "unknown"
+
         assert!(
             key.contains("windows") || key.contains("linux") || key == "unknown",
             "Unexpected platform key: {}",

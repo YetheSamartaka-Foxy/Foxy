@@ -1,30 +1,25 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Parts of `Foxy::update` timed on every frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrameSection {
-    /// Channel polls, background results and queues before any drawing.
     Polls,
-    /// The window chrome: title bar, navigation, footer.
+
     MainView,
-    /// The current view's content.
+
     Content,
-    /// Toasts, notices and prompts drawn over the view.
+
     Overlays,
 }
 
 const SECTIONS: usize = 4;
 
-/// Running totals of the UI thread's frames since launch; the difference
-/// between two snapshots is what a span of frames cost.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct FrameCostTotals {
     frames: u64,
-    /// Frames each repaint request site caused, keyed by file and line.
+
     causes: HashMap<(&'static str, u32), u64>,
-    /// UI thread CPU at the start of the latest frame, which also covers the
-    /// tessellation and painting eframe does between two `update` calls.
+
     ui_thread_cpu: Duration,
     sections: [Duration; SECTIONS],
 }
@@ -71,7 +66,6 @@ impl FrameCostTotals {
     }
 }
 
-/// Times one section of a frame and adds it to the totals when dropped.
 pub(crate) struct SectionTimer {
     section: FrameSection,
     started: Instant,
@@ -90,9 +84,6 @@ impl SectionTimer {
     }
 }
 
-/// Frame count, rate, UI-thread CPU, `update` sections and the five repaint
-/// request sites that caused the most frames, between `start` and `end`,
-/// `wall` apart.
 pub(crate) fn describe(start: &FrameCostTotals, end: &FrameCostTotals, wall: Duration) -> String {
     let span = end.since(start);
     let frames = span.frames.max(1) as f64;

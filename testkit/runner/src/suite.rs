@@ -12,11 +12,6 @@ pub struct SuiteOptions {
     pub validate_only: bool,
 }
 
-/// A filter is one or more comma-separated glob patterns; a case matches
-/// when any pattern does, so a fixed lane list such as the flagship trio
-/// (`perf-redownload-small-ssd,perf-startup-arma3-live`)
-/// runs as one suite without tagging the case files (tags are part of the
-/// case hash and would start a new history).
 fn matches(name: &str, pattern: &str) -> bool {
     if pattern.contains(',') {
         return pattern

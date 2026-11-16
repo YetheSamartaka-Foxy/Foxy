@@ -11,9 +11,7 @@ pub(crate) struct PatchedSegment {
     pub(crate) checksum: String,
 }
 
-/// The per-part checksums a successful delta-patch apply produced, in
-/// `data_order`. They describe bytes the apply just wrote, so they can stand
-/// in for a from-disk re-read of the file when they match the remote layout.
+/// Reuse apply-time checksums only when they match the remote part layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PatchedFileSegments {
     pub(crate) file_id: u64,
@@ -29,10 +27,7 @@ pub(crate) struct SegmentVerifiedOutcome {
     pub(crate) rejected: HashSet<u64>,
 }
 
-/// Whether `segments` can be trusted as the file's local part state: every
-/// part must sit at the remote offset with the remote length and checksum, and
-/// the ordered rollup must equal the file's remote checksum. Anything else
-/// falls back to the from-disk re-read.
+/// Trust patched segments only when offsets, lengths, checksums, and ordered rollup match remote metadata.
 pub(crate) fn segments_match_remote_layout(
     tree: &Tree,
     file_idx: usize,
@@ -76,10 +71,7 @@ pub(crate) fn segments_match_remote_layout(
     calculate_hash_from_items(&mut rollup_parts).eq_ignore_ascii_case(file.remote_checksum.trim())
 }
 
-/// Record the delta-patched files whose segments pass
-/// [`segments_match_remote_layout`] as verified in `tree` and in the database:
-/// part local state, file checksum, and the owning addons' rollups. Rejected
-/// files are left untouched for the from-disk hash.
+/// Record only segments matching the remote layout; reject others for a disk reread.
 pub(crate) async fn apply_segment_verified_files(
     context: Arc<FoxyContext>,
     tree: &mut Tree,
@@ -328,7 +320,7 @@ mod tests {
                 && part.local_start == part.remote_start
                 && part.local_length == part.remote_length
         }));
-        // The only file matches remote, so the addon rollup takes the remote value.
+
         assert_eq!(tree.mods[0].local_checksum, "MOD_REMOTE");
     }
 

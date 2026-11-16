@@ -4,23 +4,18 @@ use crate::core::db::{DbErr, FoxyDb, params};
 use crate::core::models::repository::normalize_repository_local_path_identity;
 use crate::core::tasks::init_database::init_database;
 
-/// Size and path extremes of one repository instance's manifest, for checking
-/// the destination filesystem without loading the tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RepositoryPathLimits {
     pub file_count: u64,
     pub largest_file_bytes: u64,
-    /// Files strictly larger than the `size_limit` passed to the query.
+
     pub files_over_size_limit: u64,
-    /// Longest resolved local path in characters.
+
     pub longest_path_chars: u64,
-    /// Files whose resolved local path has `path_chars_limit` characters or
-    /// more (the caller folds the sidecar reserve into that limit).
+
     pub paths_at_or_over_limit: u64,
 }
 
-/// One aggregate pass over the instance's file rows in the shared database.
-/// Returns `Ok(None)` when the `(remote_url, local_path)` instance has no row.
 pub async fn repository_path_limits(
     remote_url: &str,
     local_path: &str,
@@ -157,8 +152,6 @@ mod tests {
         assert_eq!(limits.longest_path_chars, LONG_FILE.len() as u64);
         assert_eq!(limits.paths_at_or_over_limit, 1);
 
-        // The same URL in another folder is a different instance; the folder
-        // matches through the identity normalization, not byte equality.
         let twin = repository_path_limits_in(&db, "http://r/", "Y:/mods/", 4_294_967_295, 50)
             .await
             .unwrap()

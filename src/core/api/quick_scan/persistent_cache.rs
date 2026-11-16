@@ -30,7 +30,7 @@ pub(super) struct PersistentAddonHashEntry {
     pub(super) fingerprint: AddonRootFingerprint,
     pub(super) content_hash: String,
     pub(super) updated_unix_ms: u64,
-    /// Last scan hit/write time used for save-time eviction.
+
     #[serde(default)]
     pub(super) last_seen_unix_ms: u64,
 }
@@ -43,7 +43,6 @@ impl PersistentAddonHashEntry {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct PersistentAddonHashCacheFile {
-    /// Content-hash format generation for cached `content_hash` values.
     #[serde(default)]
     format: u32,
     entries: HashMap<String, PersistentAddonHashEntry>,
@@ -191,12 +190,7 @@ pub(super) fn save_persistent_addon_hash_cache(
     );
 }
 
-/// Root fingerprint plus the addon content hash from the same walk.
-///
-/// The two digests read identical metadata, so computing them together turns a
-/// persistent-cache miss from two recursive directory walks into one
-/// (`conventions/SPEED_OF_LIGHT.md` O4). `content_hash` is `None` only when the
-/// folder is missing, is not a directory, or could not be walked.
+/// Compute both digests in one walk; `content_hash` is absent only when the folder cannot be walked.
 pub(super) struct AddonRootProbe {
     pub(super) fingerprint: AddonRootFingerprint,
     pub(super) content_hash: Option<String>,
@@ -324,16 +318,8 @@ fn addon_root_fingerprint_stable_match(
     cached: &AddonRootFingerprint,
     current: &AddonRootFingerprint,
 ) -> bool {
-    // Persistent addon hash cache key:
-    // - path identity, existence, and directory bit
-    // - recursive counts, aggregate file size, newest relevant file mtime
-    // - BLAKE3 layout hash of relative dir/file names, file sizes, and file
-    //   mtimes, excluding Foxy temp artifacts
-    //
-    // Root directory length/ctime/mtime are intentionally excluded because NTFS
-    // and sync-side metadata writes can change them without changing addon
-    // contents. File-level metadata remains part of the key because the cached
-    // addon content hash is also metadata-sensitive.
+    // Exclude root timestamps because NTFS and sync metadata writes change them without content edits.
+    // Keep file metadata because the cached content hash is metadata-sensitive.
     cached.content_fingerprint_ready
         && current.content_fingerprint_ready
         && cached.exists == current.exists
@@ -353,10 +339,8 @@ pub(super) fn persistent_addon_fingerprint_is_current(
     addon_root_fingerprint_stable_match(cached, current) || cached == current
 }
 
-/// Maximum age for legacy entries whose fingerprints predate the content-aware format.
 const PERSISTENT_CACHE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// Save-time eviction window for entries no scan still touches.
 const PERSISTENT_CACHE_EVICT_AFTER_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 pub(super) fn persistent_addon_fingerprint_matches(
@@ -519,7 +503,7 @@ mod tests {
         let current = stable_fingerprint("S:\\Mods\\@Addon");
         let entry = PersistentAddonHashEntry {
             fingerprint: cached,
-            content_hash: String::new(), // empty hash
+            content_hash: String::new(),
             updated_unix_ms: now_unix_ms(),
             last_seen_unix_ms: 0,
         };
@@ -534,7 +518,7 @@ mod tests {
         let entry = PersistentAddonHashEntry {
             fingerprint: cached,
             content_hash: "VALID_HASH".to_string(),
-            updated_unix_ms: 1, // far beyond the legacy TTL
+            updated_unix_ms: 1,
             last_seen_unix_ms: 0,
         };
         assert!(persistent_addon_fingerprint_matches(&entry, &current));
@@ -548,7 +532,7 @@ mod tests {
         let entry = PersistentAddonHashEntry {
             fingerprint: cached,
             content_hash: "VALID_HASH".to_string(),
-            updated_unix_ms: 1, // very old timestamp
+            updated_unix_ms: 1,
             last_seen_unix_ms: 0,
         };
         assert!(!persistent_addon_fingerprint_matches(&entry, &current));
@@ -590,11 +574,7 @@ mod tests {
         assert!(probe.content_hash.is_none());
     }
 
-    /// The content hash mixes in the folder path, and the probe walks the
-    /// trimmed one, so a padded stored path must still produce the digest its
-    /// clean form does. The blocking fallback stats the path as given, which
-    /// Windows rejects outright, so trimming here is what keeps a padded path
-    /// hashable at all rather than permanently unequal to its stored value.
+    /// Normalize stored paths before fingerprinting; Windows rejects padded paths during fallback stats.
     #[test]
     fn addon_root_fingerprint_content_hash_ignores_surrounding_whitespace() {
         let dir = tempfile::tempdir().unwrap();

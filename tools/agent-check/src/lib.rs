@@ -74,6 +74,7 @@ mod tests {
             fixture.add_skill("sample-skill", "A sample skill for validation and testing.");
             fixture.write(".codex/agents/explorer.toml", "name = \"explorer\"\ndescription = \"Map code paths\"\ndeveloper_instructions = \"Read conventions/AGENT_WORKFLOWS.md before work.\"\n");
             fixture.write(".claude/agents/explorer.md", "---\nname: explorer\ndescription: Map code paths\n---\nRead conventions/AGENT_WORKFLOWS.md before work.\n");
+            fixture.write(".cursor/agents/explorer.md", "---\nname: explorer\ndescription: Map code paths\ntools: Read, Grep, Glob, Bash\nmodel: composer-2.5[fast=false]\nreadonly: true\n---\nRead conventions/AGENT_WORKFLOWS.md before work.\n");
             fixture.write("AGENTS.md", "# Rules\n");
             fixture.write("CLAUDE.md", "@AGENTS.md\n");
             fixture.git_setup();

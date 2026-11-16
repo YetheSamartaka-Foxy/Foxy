@@ -1,17 +1,4 @@
-//! Refreshing repository spaces from their published manifest.
-//!
-//! A repository's own `repo.json` says whether that repository's payload moved.
-//! It says nothing about the *space*: a server that adds, drops or re-flags a
-//! repository inside `repository_space.json` changes what the space offers, and
-//! no `repo.json` reports that.
-//!
-//! Every configured space is refreshed at launch, again every
-//! [`REPOSITORY_SPACE_RECHECK_INTERVAL`] while Foxy runs, and on demand from the
-//! space's toolbar and context menu. A refresh whose manifest checksum matches
-//! the stored one leaves the space alone; otherwise it replaces the stored
-//! manifest (entries, name, images, app update source) so new repositories show
-//! up in the space. It never installs or removes a repository: that is a change
-//! to the user's disk and stays their call.
+//! Refresh space manifests because repository-level manifests cannot reveal member-list changes. Apply metadata changes only; repository installation and removal remain user-controlled.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -22,14 +9,9 @@ use sha1::{Digest, Sha1};
 use crate::ui::app::{FetchedRepositorySpace, Foxy, RepositorySpaceManifest};
 use crate::ui::types::RepositorySpaceEntry;
 
-/// How often a running Foxy rereads its spaces' manifests.
 const REPOSITORY_SPACE_RECHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
-/// SHA-1 (lowercase hex) of the compact JSON array
-/// `[name, imageChecksum, iconChecksum, [[Name, Address, Requiered], ...]]`
-/// over the manifest's values as published, entries in order. Matches the
-/// `spaceChecksum` that `foxy-server-backend-cli create-space` writes; both
-/// sides pin the same test vector.
+/// SHA-1 of the compact published manifest values, matching `foxy-server-backend-cli create-space` and its pinned test vector.
 pub fn repository_space_manifest_checksum(manifest: &RepositorySpaceManifest) -> String {
     let entries: Vec<serde_json::Value> = manifest
         .entries
@@ -46,14 +28,12 @@ pub fn repository_space_manifest_checksum(manifest: &RepositorySpaceManifest) ->
     hex::encode(Sha1::digest(canonical.as_bytes()))
 }
 
-/// One space's published membership against the local copy.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RepositorySpaceRemoteDelta {
-    /// Repositories the manifest publishes that this space does not list.
     pub added: Vec<String>,
-    /// Repositories this space still lists that the manifest no longer has.
+
     pub removed: Vec<String>,
-    /// Repositories whose required/optional flag differs from the manifest.
+
     pub required_changed: Vec<String>,
 }
 
@@ -74,39 +54,29 @@ impl RepositorySpaceRemoteDelta {
     }
 }
 
-/// A completed manifest fetch for one space.
 pub struct RepositorySpaceFreshnessResult {
     pub space_id: String,
     pub space_name: String,
-    /// The user asked for this refresh, so an unchanged or failed answer is
-    /// reported instead of only logged.
+    /// Report unchanged or failed results when the user requested the refresh.
     pub requested: bool,
-    /// `Err` when the manifest could not be read. An unreachable manifest is
-    /// unknown freshness, never "unchanged".
+    /// An unreachable manifest means freshness is unknown, not unchanged.
     pub outcome: Result<FetchedRepositorySpace, String>,
 }
 
-/// One repository as a space lists it, reduced to what a comparison needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpaceEntry {
-    /// Normalized address; the identity.
     pub address: String,
     pub name: String,
     pub required: bool,
 }
 
-/// A space to fetch.
 struct SpaceProbeTarget {
     id: String,
     name: String,
     source_address: String,
 }
 
-/// Compare a space against the entry list its manifest publishes.
-///
-/// Addresses are the identity, normalized the same way the add-repository path
-/// normalizes them, so a trailing slash or a case difference is not a change.
-/// Names are only used for the message.
+/// Compare normalized addresses so case or trailing-slash differences do not count as membership changes.
 pub fn repository_space_delta(
     local: &[SpaceEntry],
     remote: &[SpaceEntry],
@@ -163,19 +133,14 @@ impl Foxy {
             .collect()
     }
 
-    /// Refresh every configured space from its manifest. Runs once per launch,
-    /// after the first frame, alongside the repository `repo.json` probes.
     pub(in crate::ui::app) fn start_repository_space_freshness_probe(&mut self) {
         self.start_repository_space_refresh(None);
     }
 
-    /// Refresh one space from its manifest at the user's request.
     pub(crate) fn refresh_repository_space_from_server(&mut self, space_id: &str) {
         self.start_repository_space_refresh(Some(space_id));
     }
 
-    /// Reread every space's manifest once the last full refresh is old enough,
-    /// so a session left open still picks up a changed space.
     pub(in crate::ui::app) fn maybe_recheck_repository_spaces(&mut self) {
         if self
             .repository_space_last_refresh
@@ -212,11 +177,21 @@ impl Foxy {
         if spaces.is_empty() {
             return;
         }
+        if self
+            .repository_space_freshness_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return;
+        }
+        if self.capture_worker_scope().is_none() {
+            return;
+        }
 
         let (tx, rx) = std::sync::mpsc::channel::<RepositorySpaceFreshnessResult>();
         self.repository_space_freshness_rx = Some(rx);
         let repaint_ctx = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             for target in spaces {
                 let outcome = match Self::fetch_repository_space_manifest(&target.source_address) {
                     Ok(Some(fetched)) => Ok(fetched),
@@ -239,12 +214,16 @@ impl Foxy {
                 Self::request_background_repaint(repaint_ctx.as_ref());
             }
         });
+        self.repository_space_freshness_worker = Some(handle);
     }
 
     pub(in crate::ui::app) fn poll_repository_space_freshness_results(
         &mut self,
         ctx: &egui::Context,
     ) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         let mut results = Vec::new();
         let mut finished = false;
         if let Some(rx) = self.repository_space_freshness_rx.as_ref() {
@@ -396,8 +375,6 @@ impl Foxy {
     }
 }
 
-/// Runtime-only record of what the last refresh of each space changed, keyed by
-/// space id.
 pub type RepositorySpaceRemoteChanges = HashMap<String, RepositorySpaceRemoteDelta>;
 
 #[cfg(test)]

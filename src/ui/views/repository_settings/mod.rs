@@ -68,8 +68,7 @@ pub(super) fn normalize_local_path_for_compare(path: &str) -> String {
     normalized
 }
 
-/// A repository that delivers a game build shows addon tabs only for addons
-/// it actually has, so a game-only repository shows no addon tabs at all.
+/// Show addon tabs only for addons present in the repository's game build.
 pub(super) fn visible_repository_settings_tabs(repo: &Repository) -> Vec<RepositorySettingsTab> {
     RepositorySettingsTab::all_tabs()
         .into_iter()
@@ -107,7 +106,6 @@ pub(super) fn should_wipe_cache_after_local_path_change(
             != normalize_local_path_for_compare(current_path)
 }
 
-/// Width (in points) that Body-font `text` occupies on a single unwrapped line.
 pub(super) fn filter_controls_text_width(ui: &Ui, text: &str) -> f32 {
     let font_id = egui::TextStyle::Body.resolve(ui.style());
     ui.painter()
@@ -116,14 +114,11 @@ pub(super) fn filter_controls_text_width(ui: &Ui, text: &str) -> f32 {
         .x
 }
 
-/// Approximate width a checkbox labelled `text` occupies, using egui's own
-/// spacing metrics so the estimate tracks the active theme and DPI.
 pub(super) fn filter_controls_checkbox_width(ui: &Ui, text: &str) -> f32 {
     let spacing = ui.spacing();
     spacing.icon_width + spacing.icon_spacing + filter_controls_text_width(ui, text) + 4.0
 }
 
-/// Approximate width a combo box button showing `selected` occupies.
 pub(super) fn filter_controls_combo_width(ui: &Ui, selected: &str) -> f32 {
     let spacing = ui.spacing();
     (filter_controls_text_width(ui, selected)
@@ -133,17 +128,6 @@ pub(super) fn filter_controls_combo_width(ui: &Ui, selected: &str) -> f32 {
         .max(spacing.combo_width)
 }
 
-/// Width for the filter text field on the combined filter/controls row.
-///
-/// When the trailing controls (`controls_width`) still leave room for a usable
-/// filter field, the field expands to consume the slack so the controls sit
-/// toward the right edge. Otherwise it fills the line, which pushes the controls
-/// onto their own wrapped line(s) below instead of clipping them off the edge.
-///
-/// A fixed slack is held back from the filter so estimation error or combo box
-/// padding can never pack the trailing controls flush against the right edge
-/// (which egui would clip rather than wrap); if that slack cannot be afforded we
-/// fall through to filling the line and wrapping the controls below.
 pub(super) fn responsive_filter_field_width(available_width: f32, controls_width: f32) -> f32 {
     const MIN_FILTER_WIDTH: f32 = 220.0;
     const CONTROLS_SLACK: f32 = 48.0;
@@ -290,8 +274,8 @@ impl Foxy {
                 let external_count = external_cache.rows.len();
                 let enabled_launch_size =
                     enabled_repository_size.saturating_add(external_cache.enabled_size_bytes);
-                // A game-only repository has no addon to enable, so a launch
-                // size and addon counts would only describe an empty list.
+
+
                 let shows_addons = visible_tabs.len() > 1;
                 let total_size_text = if shows_addons && enabled_launch_size != total_size {
                     format!(
@@ -302,8 +286,8 @@ impl Foxy {
                 } else {
                     tr_fmt("Total size: {size}", &[("size", fmt_bytes(total_size))])
                 };
-                // The summary is split so the "External Addons" segment can carry
-                // its own tooltip; the leading metrics share a single label.
+
+
                 let summary_prefix_text = format!(
                     "{} - {}: {} - {}: {} - ",
                     total_size_text,
@@ -351,13 +335,13 @@ impl Foxy {
                 self.export_repository_structure_to_file(repo_index);
             }
 
-            // The header (profile selector, status, tab bar) and the per-tab
-            // content are laid out here without an outer ScrollArea. Addon list
-            // tabs scroll internally through their own virtualized ScrollArea;
-            // nesting them inside an outer vertical ScrollArea would hand the
-            // inner list unbounded height and force every row to render each
-            // frame (killing scroll performance). Tabs that need scrolling wrap
-            // their own content in a ScrollArea below.
+
+
+
+
+
+
+
             ui.vertical(|ui| {
                 ui.vertical(|ui| {
                     let mut profile_updated = false;
@@ -664,12 +648,13 @@ impl Foxy {
                     let tab_panel_horizontal_inset = 15.0;
                     let corner_radius = CornerRadius::same(10);
 
-                    // All tabs render in a fixed-height clipped panel (the white
-                    // card). Addon list tabs scroll internally through their own
-                    // virtualized ScrollArea, so they render directly. The
-                    // Configuration tab has no internal scroll, so it wraps its
-                    // content in a ScrollArea *inside* the panel, keeping the
-                    // scrollbar within the white frame like the other tabs.
+
+
+
+
+
+
+                    // Keep virtualized addon lists out of an outer vertical ScrollArea.
                     let scrolls_internally = !matches!(
                         current_repository_settings_tab,
                         RepositorySettingsTab::Addons

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "game_space_id": "arma3",
+  "game_id": "arma3",
+  "instance_id": "server_00000000000000000000000000000001",
+  "instance_revision": 1,
+  "catalog_revision": 1,
+  "catalog_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "configuration_revision": "config_0000000000000000000000000000000000000000000000000000000000000000",
+  "configuration_manifest_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "configuration_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "content_stage_id": "stage_0000000000000000000000000000000000000000000000000000000000000000",
+  "content_manifest_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "content_bindings_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+  "content_bindings": {
+    "schema_version": 1,
+    "game_space_id": "arma3",
+    "game_id": "arma3",
+    "instance_id": "server_00000000000000000000000000000001",
+    "generation": 1,
+    "instance_revision": 1,
+    "catalog_revision": 1,
+    "catalog_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "content_sources_fingerprint": null,
+    "bindings": []
+  }
+}

@@ -43,15 +43,8 @@ fn emit_app_version() {
     println!("cargo:rustc-env=FOXY_VERSION={version}");
 }
 
-/// Delay-load the Steamworks import on MSVC so a missing `steam_api64.dll` does
-/// not stop the process from starting. Without this the whole app is
-/// unlaunchable when the redistributable is not packaged.
-///
-/// Delay-loading only moves the failure: resolving the import still raises
-/// `0xC06D007E` at the first Steamworks call. Nothing outside the
-/// `foxy steam-helper` subprocess makes such a call, and `workshop::` checks the
-/// library is present before spawning it, so the reachable failure is a clear
-/// error rather than a crash.
+/// MSVC delay-loading lets Foxy start without Steamworks; its first call still faults if the DLL is absent.
+/// Only the guarded steam-helper subprocess may resolve those imports.
 fn delay_load_steamworks() {
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
         return;
@@ -60,13 +53,7 @@ fn delay_load_steamworks() {
     println!("cargo:rustc-link-arg=delayimp.lib");
 }
 
-/// Look for the Steamworks library next to the executable at runtime.
-///
-/// `steamworks-sys` emits a link search path into its own `OUT_DIR` and no
-/// rpath, so an installed ELF/Mach-O binary would only find `libsteam_api.so`
-/// via `LD_LIBRARY_PATH` or a system directory. Unlike Windows there is no
-/// delay-load equivalent - the loader resolves `DT_NEEDED` before `main`, so
-/// without this the installed binary does not start at all.
+/// ELF/Mach-O resolve Steamworks before main; the packaged library needs a relative runtime search path.
 fn steamworks_runtime_search_path() {
     match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
         Ok("linux") => {
@@ -79,20 +66,12 @@ fn steamworks_runtime_search_path() {
     }
 }
 
-/// Place the Steamworks redistributable next to the built executable.
-///
-/// `steamworks-sys` links the import library, so the shared library is a load-
-/// time dependency of the whole binary: without it beside the exe the process
-/// does not start at all (`STATUS_DLL_NOT_FOUND` on Windows), not just the
-/// Workshop commands. `steamworks-sys` only unpacks it into its own `OUT_DIR`,
-/// so copy it into the target profile directory that CI and the installer
-/// package from.
+/// steamworks-sys stages its load-time dependency only in OUT_DIR; packaging needs it beside the executable.
 fn copy_steamworks_redistributable() {
     let Some(out_dir) = std::env::var_os("OUT_DIR").map(PathBuf::from) else {
         return;
     };
-    // OUT_DIR is `<target>/<profile>/build/<pkg>-<hash>/out`; the profile
-    // directory holding the executable is four levels up.
+
     let Some(profile_dir) = out_dir.ancestors().nth(3) else {
         return;
     };
@@ -117,8 +96,6 @@ fn copy_steamworks_redistributable() {
     }
 }
 
-/// Locate a redistributable inside any `build/steamworks-sys-*/out` directory
-/// under the current target profile.
 fn find_steamworks_redistributable(profile_dir: &Path, name: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(profile_dir.join("build")).ok()?;
     entries.flatten().find_map(|entry| {
@@ -131,16 +108,9 @@ fn find_steamworks_redistributable(profile_dir: &Path, name: &str) -> Option<Pat
     })
 }
 
-/// Bakes the source commit hash consumed by `src/build_info.rs`.
-///
-/// The build kind (dev / pre-release / release) is derived from the compile
-/// profile in `build_info.rs`, not here; this only captures the commit so a
-/// running binary can be matched back to the exact checkout it came from.
 fn emit_build_metadata() {
     println!("cargo:rustc-env=FOXY_GIT_HASH={}", git_short_hash());
 
-    // Rebuild when the checked-out commit or working tree changes so the baked
-    // dev hash stays accurate.
     for path in [".git/HEAD", ".git/index"] {
         if std::path::Path::new(path).exists() {
             println!("cargo:rerun-if-changed={path}");
@@ -151,9 +121,6 @@ fn emit_build_metadata() {
     }
 }
 
-/// Short commit hash of `HEAD`, with a `-dirty` suffix when the working tree
-/// has uncommitted changes. Returns `"unknown"` when git is unavailable or the
-/// source is not a git checkout.
 fn git_short_hash() -> String {
     let rev = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
@@ -179,8 +146,6 @@ fn git_short_hash() -> String {
     if dirty { format!("{rev}-dirty") } else { rev }
 }
 
-/// Path to the ref file `HEAD` points at, so a commit on that branch retriggers
-/// the build script.
 fn head_ref_path() -> Option<String> {
     let head = std::fs::read_to_string(".git/HEAD").ok()?;
     let reference = head.strip_prefix("ref:")?.trim();

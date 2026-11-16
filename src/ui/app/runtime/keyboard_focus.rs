@@ -1,6 +1,4 @@
-/// Windows can leave Foxy as the active foreground window while no window owns
-/// keyboard focus. Keystrokes then arrive as `WM_SYSKEYDOWN`/`WM_SYSCHAR`, which
-/// beep, and winit never reports `Focused(true)`, so egui hides the text caret.
+/// Windows can report Foxy as foreground without keyboard focus; then keystrokes beep and egui hides the caret because winit never sends `Focused(true)`.
 #[cfg(any(target_os = "windows", test))]
 fn needs_focus_repair(foreground: usize, active: usize, focus: usize, minimized: bool) -> bool {
     active != 0 && foreground == active && focus == 0 && !minimized

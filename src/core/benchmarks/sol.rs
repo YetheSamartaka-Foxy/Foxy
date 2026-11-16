@@ -1,11 +1,4 @@
-//! Speed-of-light summary of the `SOL op=...` lines a benchmark captured,
-//! folded to one row per operation so a run that logged dozens of hash
-//! batches still reads as a single ratio. See `conventions/SPEED_OF_LIGHT.md`.
-//!
-//! The folded `actual_s` is a service sum over the operation's lines, not the
-//! action's wall time: batches that overlapped (hashing during a download)
-//! add up to more than the action took. The record's `elapsed_ms` is the
-//! makespan.
+//! Folded actual_s is summed service time, including overlapping batches; elapsed_ms alone is the action makespan.
 
 use std::collections::BTreeMap;
 
@@ -38,7 +31,6 @@ impl SolLightSource {
         }
     }
 
-    /// Translation key describing where the light came from.
     pub fn label(&self) -> &'static str {
         match self {
             Self::LimiterCap => "bandwidth limit",
@@ -50,7 +42,6 @@ impl SolLightSource {
         }
     }
 
-    /// The comparison a ratio against this light answers.
     pub fn metric_kind(&self) -> SolMetricKind {
         match self {
             Self::LimiterCap => SolMetricKind::ModeledBound,
@@ -61,9 +52,7 @@ impl SolLightSource {
     }
 }
 
-/// What a displayed percentage means (convention section 2.1). A modeled
-/// bound, a same-run peak and a nominal device rate are different questions
-/// and must not be read as one "efficiency".
+/// Modeled bounds, same-run peaks and nominal device rates answer different questions; do not label all as efficiency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SolMetricKind {
     /// `T_bound / T_actual` against a policy or modeled lower bound.
@@ -77,7 +66,6 @@ pub enum SolMetricKind {
 }
 
 impl SolMetricKind {
-    /// Translation key, short enough to sit beside the percentage.
     pub fn label(self) -> &'static str {
         match self {
             Self::ModeledBound => "vs bound",
@@ -87,7 +75,6 @@ impl SolMetricKind {
         }
     }
 
-    /// Translation key for the long explanation.
     pub fn description(self) -> &'static str {
         match self {
             Self::ModeledBound => {
@@ -110,7 +97,6 @@ impl SolMetricKind {
 /// light: the destination disk of a download on rotational storage.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolSubPart {
-    /// Translation key naming the resource.
     pub name: &'static str,
     pub work_bytes: u64,
     pub light_bps: Option<f64>,
@@ -146,27 +132,24 @@ impl SolSubPart {
     }
 }
 
-/// A category-specific figure of an operation, folded over its runs.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SolDetailValue {
     Count(f64),
     Secs(f64),
     BytesPerSec(f64),
     Percent(f64),
-    /// A per-second rate with its translation-key unit (`addons`).
+
     Rate(f64, &'static str),
-    /// Distinct raw values, comma separated.
+
     Text(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolDetail {
-    /// Translation key.
     pub label: &'static str,
     pub value: SolDetailValue,
 }
 
-/// One operation of a benchmark, summed over every `SOL` line it logged.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolOpSummary {
     pub op: String,
@@ -201,16 +184,14 @@ pub struct SolOpSummary {
     pub metric_versions: Vec<u32>,
     pub mixed_metric_versions: bool,
     pub malformed_lines: usize,
-    /// Distinct `outcome` values the lines reported, first-seen order.
+
     pub outcomes: Vec<String>,
     pub sub_parts: Vec<SolSubPart>,
     pub details: Vec<SolDetail>,
 }
 
 impl SolOpSummary {
-    /// How many times faster the operation could run before its reference
-    /// objects (E3 of the convention): a distance to the named reference,
-    /// not a promise of achievable speedup.
+    /// This is distance to the named reference, not a promise that the operation can achieve that speedup.
     pub fn headroom(&self) -> Option<f64> {
         self.sol.filter(|sol| *sol > 0.0).map(|sol| 1.0 / sol)
     }
@@ -229,12 +210,10 @@ impl SolOpSummary {
         (self.rated_runs > 0).then(|| self.rated_actual_s.unwrap_or(self.actual_s) - ideal)
     }
 
-    /// Every line carried a ratio.
     pub fn full_coverage(&self) -> bool {
         self.runs > 0 && self.rated_runs == self.runs
     }
 
-    /// No line reported a terminal outcome other than success.
     pub fn completed(&self) -> bool {
         self.outcomes
             .iter()
@@ -293,8 +272,6 @@ impl SolOpSummary {
         }
     }
 
-    /// Crucial-operation number and name from `conventions/SPEED_OF_LIGHT.md`,
-    /// `None` for an operation the convention does not list.
     pub fn category(&self) -> Option<(&'static str, &'static str)> {
         Some(match self.op.as_str() {
             "download" => ("O1", "Full-file download"),
@@ -314,7 +291,6 @@ impl SolOpSummary {
         })
     }
 
-    /// Translation key naming the resource the main ratio measures.
     pub fn main_part_name(&self) -> &'static str {
         match self.op.as_str() {
             "download" => "network",
@@ -336,9 +312,7 @@ enum Fold {
     Sum,
     Max,
     Distinct,
-    /// `100 * sum(numerator) / sum(denominator)`; falls back to the
-    /// work-weighted mean of the raw percentages on lines without the
-    /// byte counters.
+    /// Use summed numerator/denominator; legacy percentages without counters use a work-weighted mean.
     PercentOf(&'static str, &'static str),
     /// `sum(key) / sum(actual_s)` over the lines carrying `key`.
     PerSecondOf(&'static str),
@@ -354,8 +328,6 @@ enum Kind {
     Text,
 }
 
-/// Which extra keys of an operation's lines are worth a figure, and how
-/// they fold across runs. Keys not listed stay in the raw lines.
 fn detail_specs(op: &str) -> &'static [(&'static str, &'static str, Kind, Fold)] {
     match op {
         "download" => &[
@@ -539,8 +511,6 @@ fn sum_of(maps: &[&BTreeMap<String, String>], key: &str) -> Option<f64> {
     (!values.is_empty()).then(|| values.iter().sum())
 }
 
-/// Work-weighted mean of a per-line ratio, for legacy lines that carry the
-/// percentage but not the counters it was derived from.
 fn weighted_mean(maps: &[&BTreeMap<String, String>], key: &str) -> Option<f64> {
     let mut total_weight = 0.0;
     let mut total = 0.0;
@@ -623,8 +593,6 @@ fn fold_details(op: &str, maps: &[&BTreeMap<String, String>]) -> Vec<SolDetail> 
     out
 }
 
-/// The download's disk ratio, logged as `disk_*` keys on rotational
-/// destinations; serial over runs like the main ratio.
 fn disk_sub_part(maps: &[&BTreeMap<String, String>]) -> Option<SolSubPart> {
     let rated: Vec<&&BTreeMap<String, String>> = maps
         .iter()
@@ -835,10 +803,8 @@ fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
         summary.light_src = rated[0].light_src.clone();
         return summary;
     }
-    // No line knew its light. When the batches are the same kind of work,
-    // the fastest batch is a same-run peak: a consistency figure, never a
-    // physical light. Batches of different profiles or phases (calibration
-    // trials against production hashing) are not comparable and get no ratio.
+    // Only comparable batches may supply a same-run peak; different profiles/phases get no derived ratio.
+    // A same-run peak measures consistency, never a physical bound.
     if lines.len() >= 2
         && !heterogeneous
         && let Some(aggregate) = actual_bps
@@ -860,7 +826,6 @@ fn summarize(op: &str, maps: &[&BTreeMap<String, String>]) -> SolOpSummary {
 }
 
 impl BenchmarkRecord {
-    /// One summary per operation, in first-logged order.
     pub fn sol_summaries(&self) -> Vec<SolOpSummary> {
         let mut ops: Vec<(String, Vec<&BTreeMap<String, String>>)> = Vec::new();
         for map in &self.sol {
@@ -878,9 +843,7 @@ impl BenchmarkRecord {
         ops.iter().map(|(op, maps)| summarize(op, maps)).collect()
     }
 
-    /// The operation whose ratio describes the action: the download for
-    /// transfers, hashing for checks. No other operation stands in for it:
-    /// a rated app-update probe in the frame is not the benchmark's ratio.
+    /// Only the action's primary operation may provide its ratio; an unrelated rated probe must not replace it.
     pub fn headline_op(&self) -> &'static str {
         if self
             .sol
@@ -948,7 +911,6 @@ impl BenchmarkRecord {
         self.headline_op().to_owned()
     }
 
-    /// The summary of the headline operation, when it exists at all.
     pub fn headline_summary(&self) -> Option<SolOpSummary> {
         let op = self.headline_op();
         self.sol_summaries()
@@ -1107,9 +1069,6 @@ mod tests {
 
     #[test]
     fn service_sum_can_exceed_the_action_makespan_without_becoming_a_share() {
-        // Three overlapped 1 s batches inside a 1.2 s action: the folded
-        // `actual_s` is occupancy (3 s), and nothing here divides it by the
-        // record's elapsed time.
         let mut record = record(
             BenchmarkKind::Update,
             (0..3)
@@ -1502,7 +1461,6 @@ mod tests {
 
     #[test]
     fn savings_fold_from_summed_bytes_not_the_mean_of_percentages() {
-        // 90% of 100 bytes and 10% of 900 bytes is 18% overall, not 50%.
         let record = record(
             BenchmarkKind::Update,
             vec![
@@ -1533,8 +1491,6 @@ mod tests {
 
     #[test]
     fn scan_rate_folds_from_summed_addons_over_summed_time() {
-        // 100 addons in 0.1 s and 100 addons in 0.9 s is 200 addons/s, not
-        // the mean of 1000 and 111.
         let record = record(
             BenchmarkKind::QuickCheck,
             vec![

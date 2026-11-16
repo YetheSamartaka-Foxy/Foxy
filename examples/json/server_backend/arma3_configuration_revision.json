@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "game_space_id": "arma3",
+  "instance": {
+    "schema_version": 2,
+    "id": "server_00000000000000000000000000000001",
+    "game_space_id": "arma3",
+    "revision": 1,
+    "display_name": "MainServer",
+    "installation_id": null,
+    "definition": {
+      "game": "arma3",
+      "settings": {
+        "hostname": "MainServer",
+        "game_port": 2302,
+        "max_players": 64,
+        "persistent": false,
+        "auto_init": false,
+        "battleye": true,
+        "verify_signatures": "v2",
+        "mission_cycle": []
+      }
+    }
+  },
+  "preview": {
+    "format_version": 1,
+    "instance_id": "server_00000000000000000000000000000001",
+    "instance_revision": 1,
+    "fingerprint": "287e3d764a6bf4e18f6b0a806f11fbe35d909a89a0a8fdd60b44917231134fab",
+    "files": [
+      {
+        "relative_path": "server.cfg",
+        "contents": "hostname = \"MainServer\";\nmaxPlayers = 64;\npersistent = 0;\nBattlEye = 1;\nverifySignatures = 2;\nclass Missions\n{\n};\n",
+        "blake3": "06a33f946b9a716eaa51958a5fe13f935f82f457e2b7ae38f458e63f063e34dd"
+      },
+      {
+        "relative_path": "basic.cfg",
+        "contents": "",
+        "blake3": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+      },
+      {
+        "relative_path": "launch-intent.json",
+        "contents": "{\n  \"game_port\": 2302,\n  \"auto_init\": false\n}",
+        "blake3": "a64abd8af21c546194fdf1de8b1e2d2836afeba5fe415bb52e8c9e10661bbd81"
+      }
+    ],
+    "warnings": [
+      "Configuration preview only. Engine compatibility, content, credentials and launch readiness remain unverified.",
+      "Arma port and auto-init are launch intent, not server.cfg fields. Basic tuning is empty and custom difficulty/profile settings are not generated.",
+      "No mission cycle is configured."
+    ],
+    "launch_ready": false
+  }
+}

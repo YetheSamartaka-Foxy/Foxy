@@ -12,9 +12,8 @@ use super::{
     SPEED_SAMPLE_INTERVAL,
 };
 
-/// Minimum throughput (10 KB/s) - below this for consecutive windows triggers degradation.
 const DEGRADATION_THRESHOLD_BPS: u64 = 10 * 1024;
-/// Number of consecutive low-speed windows before declaring degraded.
+
 const DEGRADATION_CONSECUTIVE_WINDOWS: u8 = 3;
 
 #[derive(Debug)]
@@ -33,9 +32,7 @@ pub(crate) struct AdaptiveBandwidthState {
 }
 
 impl AdaptiveBandwidthState {
-    /// The slowest pace the limiter allows. A paused download drags the
-    /// rolling average towards zero, and a pullback that reached zero would
-    /// leave the next slot an infinite wait.
+    /// Keep the limiter floor above zero so a paused transfer cannot create an infinite wait.
     fn floor_bytes_per_sec(&self) -> u64 {
         RAMP_MIN_START_BYTES_PER_SEC
             .min(self.max_bytes_per_sec)
@@ -82,7 +79,6 @@ impl AdaptiveBandwidthState {
             self.avg_speed_samples_bps.len()
         );
 
-        // Track consecutive low-speed windows for degradation detection
         if avg_bps < DEGRADATION_THRESHOLD_BPS && avg_bps > 0 {
             self.consecutive_low_speed_windows =
                 self.consecutive_low_speed_windows.saturating_add(1);
@@ -160,13 +156,11 @@ impl AdaptiveBandwidthState {
                 .saturating_add(fast_step)
                 .min(self.max_bytes_per_sec)
         } else if history_step > 0 && gap > 0 {
-            // Not fully saturated, but recent rolling averages suggest we can nudge upward.
             let gentle = history_step.min(step).min(gap);
             self.current_bytes_per_sec
                 .saturating_add(gentle)
                 .min(self.max_bytes_per_sec)
         } else if history_target > 0 && self.current_bytes_per_sec > history_overshoot_threshold {
-            // Pull back when limiter target is clearly above sustained rolling throughput.
             let pullback = step
                 .min(self.current_bytes_per_sec.saturating_sub(history_target))
                 .max(RAMP_MIN_STEP_BYTES_PER_SEC);
@@ -218,9 +212,6 @@ pub(crate) enum AdaptiveBandwidthLimiter {
     Limited(Mutex<AdaptiveBandwidthState>),
 }
 
-/// Shared flag set when download speed is severely degraded across
-/// consecutive measurement windows. Transfer tasks can poll this to
-/// decide whether to attempt a reconnect.
 static SPEED_DEGRADED: AtomicBool = AtomicBool::new(false);
 
 impl AdaptiveBandwidthLimiter {
@@ -258,8 +249,6 @@ impl AdaptiveBandwidthLimiter {
         }))
     }
 
-    /// Acquire a rate-limit slot and record the transfer in a single lock acquisition.
-    /// This halves mutex contention compared to separate until_ready + record_transfer calls.
     pub(crate) async fn acquire_and_record(&self, bytes: usize) {
         let AdaptiveBandwidthLimiter::Limited(state_lock) = self else {
             return;
@@ -269,7 +258,6 @@ impl AdaptiveBandwidthLimiter {
             let mut state = state_lock.lock().await;
             state.adjust_rate_if_due();
 
-            // Record transfer under the same lock
             state.observed_bytes = state.observed_bytes.saturating_add(bytes as u64);
             state.sample_window_bytes = state.sample_window_bytes.saturating_add(bytes as u64);
 
@@ -302,8 +290,6 @@ impl AdaptiveBandwidthLimiter {
 mod tests {
     use super::*;
 
-    /// A limiter mid-transfer whose rolling average fell while the download
-    /// sat paused: the state logged right before a resumed download panicked.
     fn after_a_pause(max_bytes_per_sec: u64, current_bytes_per_sec: u64) -> AdaptiveBandwidthState {
         let now = Instant::now();
         let ago = |seconds| now.checked_sub(Duration::from_secs(seconds)).unwrap_or(now);

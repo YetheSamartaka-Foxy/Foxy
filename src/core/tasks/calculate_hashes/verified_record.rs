@@ -1,10 +1,4 @@
-//! A record of files whose every part was read and matched the remote, kept
-//! beside `database.db` so a whole-database wipe (a schema bump) does not
-//! cost a full re-read of a payload nothing has touched. A file is restored
-//! from it only while its NTFS identity, size, write and change times and
-//! change-journal USN are exactly those captured around the hash that
-//! verified it, and only where the database holds no local state for it. An
-//! integrity recheck never restores; every hash run refreshes the record.
+//! Restore verified files only while identity and timestamps match and the database has no local state.
 
 use super::part_hashes::PartSpanSource;
 use super::scheduling::{FileHashJob, FileHashResult};
@@ -15,13 +9,11 @@ use std::sync::Mutex;
 
 const RECORD_FILE: &str = "verified_hashes.json";
 const RECORD_VERSION: u32 = 1;
-/// Entries not verified or restored for this long are dropped on save.
+
 const STALE_AFTER_SECS: u64 = 180 * 24 * 60 * 60;
 
-/// Serialises load-modify-save of the record between concurrent hash runs.
 static RECORD_WRITE: Mutex<()> = Mutex::new(());
 
-/// Where one operation's record lives and whether it may restore from it.
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedHashRecordUse {
     path: PathBuf,
@@ -29,8 +21,7 @@ pub(crate) struct VerifiedHashRecordUse {
 }
 
 impl VerifiedHashRecordUse {
-    /// The active game space's record. `trust` is false for flows that must
-    /// read every byte (integrity recheck, force redownload).
+    /// Disable restoration for integrity checks and force-redownloads that must read every byte.
     pub(crate) fn for_active_space(trust: bool) -> Self {
         Self::at(
             record_path(&crate::core::game::spaces::active_game_space_dir()),
@@ -42,8 +33,7 @@ impl VerifiedHashRecordUse {
         Self { path, trust }
     }
 
-    /// Whether this operation may restore any file under `folder`: a wipe
-    /// forgets a repository's entries but keeps the record file.
+    /// Repository wipes forget its entries while retaining the shared record file.
     pub(crate) async fn may_restore_under(&self, folder: &str) -> bool {
         if !self.trust {
             return false;
@@ -66,8 +56,6 @@ pub(crate) fn record_path(space_dir: &Path) -> PathBuf {
     space_dir.join(RECORD_FILE)
 }
 
-/// Everything about a file that a write, truncation, replacement or restore
-/// from backup changes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct FileIdentity {
     volume: u32,
@@ -75,12 +63,10 @@ pub(super) struct FileIdentity {
     size: u64,
     modified: i64,
     changed: i64,
-    /// The file's last change-journal record; `None` when the volume keeps
-    /// no journal (the query then answers 0).
+
     usn: Option<i64>,
 }
 
-/// A file the hash run verified end to end, ready to record.
 #[derive(Clone, Debug)]
 pub(super) struct VerifiedFile {
     pub(super) identity: FileIdentity,
@@ -132,9 +118,7 @@ fn save(path: &Path, record: &RecordFile) -> std::io::Result<()> {
     std::fs::rename(&temp, path)
 }
 
-/// What the record binds a verification to: the manifest's parts for the
-/// file (order, path, remote span and checksum) and its whole-file checksum,
-/// so a new version of the file never matches an old entry.
+/// Bind verification to the full manifest layout and file checksum so a new version cannot reuse an old record.
 pub(super) fn parts_signature<'a>(
     file_remote_checksum: &str,
     parts: impl IntoIterator<Item = &'a FoxyModFilePart>,
@@ -156,8 +140,6 @@ pub(super) fn parts_signature<'a>(
     hasher.finalize().to_hex().to_string()
 }
 
-/// True when every part matched the remote at the remote offsets, or the
-/// whole-file checksum matched for a file without parts.
 pub(super) fn result_is_clean(
     file_remote_checksum: &str,
     parts: &[(usize, FoxyModFilePart)],
@@ -178,8 +160,6 @@ pub(super) fn result_is_clean(
     })
 }
 
-/// Splits `jobs` into results restored from the record and the jobs that
-/// still need hashing. Only runs whose context trusts the record restore.
 pub(super) async fn restore(
     record: &VerifiedHashRecordUse,
     jobs: Vec<FileHashJob>,
@@ -195,8 +175,7 @@ pub(super) async fn restore(
     if stored.entries.is_empty() {
         return (Vec::new(), jobs);
     }
-    // Jobs the database knows nothing about, whose manifest parts are the ones
-    // the record verified.
+
     let candidates: Vec<(usize, String)> = jobs
         .iter()
         .enumerate()
@@ -299,8 +278,6 @@ fn restored_result(job: FileHashJob, entry: &Entry, signature: String) -> FileHa
     }
 }
 
-/// Records every verified file of a finished run and forgets the files the
-/// run found changed, unreadable or not matching the remote.
 pub(super) async fn update<'a>(
     record: &VerifiedHashRecordUse,
     results: impl Iterator<Item = &'a FileHashResult>,
@@ -336,9 +313,7 @@ pub(super) async fn update<'a>(
     }
 }
 
-/// Checkpoint only positive per-file evidence from a cancelled pass. A partial
-/// pass cannot prove that an older record entry is stale for files it did not
-/// finish examining.
+/// A cancelled pass may checkpoint positive evidence, but cannot invalidate entries it did not examine.
 pub(super) async fn retain_completed<'a>(
     record: &VerifiedHashRecordUse,
     results: impl Iterator<Item = &'a FileHashResult>,
@@ -376,8 +351,6 @@ fn update_blocking(
     Ok((recorded, forgotten, record.entries.len()))
 }
 
-/// Drops the active game space's entries under `folder`, for a repository
-/// whose database state the user asked Foxy to forget.
 pub(crate) fn forget_verified_hashes_under(folder: &str) {
     let path = record_path(&crate::core::game::spaces::active_game_space_dir());
     match forget_under(&path, folder) {
@@ -453,7 +426,7 @@ pub(super) fn capture_identity(path: &Path) -> Option<FileIdentity> {
     if basic_ok == 0 {
         return None;
     }
-    // A USN_RECORD_V2 or V3 with the file name; 1 KiB holds any name.
+
     let mut usn_record = [0u64; 128];
     let mut returned = 0u32;
     // SAFETY: the output buffer is 8-aligned and its size is passed.
@@ -496,7 +469,6 @@ fn bytemuck_bytes(words: &[u64; 128]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), size_of_val(words)) }
 }
 
-/// The `Usn` field of a USN_RECORD_V2 (64-bit file ids) or V3 (128-bit).
 fn usn_from_record(bytes: &[u8], len: usize) -> Option<i64> {
     let bytes = bytes.get(..len)?;
     let major = u16::from_le_bytes(bytes.get(4..6)?.try_into().ok()?);

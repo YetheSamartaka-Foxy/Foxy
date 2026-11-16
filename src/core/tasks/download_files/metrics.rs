@@ -9,22 +9,15 @@ use tokio::task::JoinHandle;
 
 use super::DownloadResourceLimits;
 
-/// Lightweight download telemetry collected during a single download run.
-///
-/// Designed to be shared via `Arc<DownloadMetrics>` across the orchestrator,
-/// batching, and transfer layers. All counters are lock-free atomics; event
-/// vectors use a `Mutex` that is held only for the short push.
 pub(crate) struct DownloadMetrics {
     started_at: Instant,
     pub(super) counters: DownloadCounters,
     file_events: Mutex<Vec<FileMetric>>,
     range_events: Mutex<Vec<RangeMetric>>,
     phase_events: Mutex<Vec<PhaseMetric>>,
-    /// One `root=.. fs=..` description per volume the run writes to, so the
-    /// final report says where the bytes went.
+
     destinations: Mutex<Vec<String>>,
-    /// Every sampler window of the run, kept so the end-of-run line can
-    /// split the wall time into ramp, plateau and tail.
+
     series: Mutex<Vec<SeriesPoint>>,
     patch_stages: Mutex<Vec<PatchStageMetric>>,
     sampler_stop: AtomicBool,
@@ -260,20 +253,15 @@ impl DownloadRunReport {
     }
 }
 
-/// Lock-free counters polled by the throughput sampler.
 pub(super) struct DownloadCounters {
     pub(super) active_files: AtomicUsize,
     pub(super) active_ranges: AtomicUsize,
     pub(super) bytes_transferred: AtomicU64,
-    /// Best network throughput observed in any sampler window of at least
-    /// `PEAK_MIN_INTERVAL` (bytes/sec, byte delta over the measured interval).
-    /// Serves as the demonstrated path capacity ("light") for the end-of-run
-    /// SOL ratio when no bandwidth limiter is configured.
+    /// Use the best qualified sample as path capacity when no limiter sets a ceiling.
     pub(super) peak_network_bps: AtomicU64,
-    /// Measured width in nanoseconds of the window that set `peak_network_bps`.
+
     pub(super) peak_window_ns: AtomicU64,
-    /// Full size of every file that was delta patched rather than downloaded;
-    /// its bytes were produced by local copies and never re-read by the hash.
+    /// Patched bytes come from local copies and are not reread by the hash.
     pub(super) patched_full_bytes: AtomicU64,
     pub(super) files_completed: AtomicUsize,
     pub(super) range_retries: AtomicUsize,
@@ -283,7 +271,6 @@ pub(super) struct DownloadCounters {
     pub(super) db_checkpoint_statements: AtomicUsize,
 }
 
-/// Per-file telemetry recorded when a file download completes or fails.
 pub(super) struct FileMetric {
     pub(super) file_id: u64,
     pub(super) mod_id: u64,
@@ -301,7 +288,6 @@ pub(super) struct FileMetric {
     pub(super) avg_mbps: f64,
 }
 
-/// Per-range telemetry recorded when a single HTTP range request completes.
 pub(super) struct RangeMetric {
     pub(super) file_id: u64,
     pub(super) start: u64,
@@ -314,8 +300,6 @@ pub(super) struct RangeMetric {
     pub(super) bytes: u64,
 }
 
-/// One retained sampler window: when it ended (offset from the telemetry
-/// epoch), how wide it was, what it moved and how much work was in flight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SeriesPoint {
     pub(crate) end_offset: Duration,
@@ -336,13 +320,8 @@ impl SeriesPoint {
     }
 }
 
-/// Fraction of the peak rate a window must reach to count as plateau.
 const PLATEAU_FRACTION: f64 = 0.9;
 
-/// How a download's wall time splits around its plateau: the ramp before
-/// the first window at plateau rate, the tail after the last one, and the
-/// bytes each of them fell short of the peak rate. All zero when no window
-/// reached the plateau or there is no peak.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct RampTail {
     pub(crate) ramp: Duration,
@@ -387,14 +366,8 @@ pub(crate) fn ramp_tail_profile(
     }
 }
 
-/// Shortest sampler window allowed to set the run's peak rate. A window
-/// narrower than this (an immediate wake, the final partial interval) is a
-/// valid rate for the series but too noisy to stand as the path ceiling.
 pub(super) const PEAK_MIN_INTERVAL: Duration = Duration::from_millis(500);
 
-/// One throughput sample: the byte deltas since the previous sample and the
-/// measured width of that interval, so the rate is `delta / elapsed` rather
-/// than "delta per nominal tick".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct RateSample {
     pub(super) at: Instant,
@@ -411,8 +384,6 @@ impl RateSample {
     }
 }
 
-/// Cursor over monotonically increasing byte counters. Pure so the interval
-/// arithmetic can be tested with synthetic clocks.
 pub(super) struct RateSampler {
     last_at: Instant,
     last_network_bytes: u64,
@@ -451,8 +422,6 @@ impl RateSampler {
     }
 }
 
-/// Bytes per second over a measured interval; zero for an empty interval so
-/// an immediate wake never divides by zero or reports an infinite rate.
 pub(super) fn interval_rate(delta_bytes: u64, elapsed: Duration) -> u64 {
     let secs = elapsed.as_secs_f64();
     if secs <= 0.0 || delta_bytes == 0 {
@@ -461,13 +430,11 @@ pub(super) fn interval_rate(delta_bytes: u64, elapsed: Duration) -> u64 {
     (delta_bytes as f64 / secs).round() as u64
 }
 
-/// Phase timing for top-level orchestrator steps.
 struct PhaseMetric {
     name: &'static str,
     elapsed: Duration,
 }
 
-/// RAII guard that records phase duration on drop.
 pub(super) struct PhaseGuard<'a> {
     metrics: &'a DownloadMetrics,
     name: &'static str,
@@ -612,7 +579,6 @@ impl DownloadMetrics {
         }
     }
 
-    /// Start timing a named phase. Duration is recorded when the guard drops.
     pub(super) fn phase(&self, name: &'static str) -> PhaseGuard<'_> {
         PhaseGuard {
             metrics: self,
@@ -621,7 +587,6 @@ impl DownloadMetrics {
         }
     }
 
-    /// Record a completed (or failed) file download.
     pub(super) fn record_file(&self, metric: FileMetric) {
         if metric.method == "delta_patch" {
             self.counters
@@ -633,21 +598,16 @@ impl DownloadMetrics {
         }
     }
 
-    /// Record a completed range request.
     pub(super) fn record_range(&self, metric: RangeMetric) {
         if let Ok(mut ranges) = self.range_events.lock() {
             ranges.push(metric);
         }
     }
 
-    /// Highest sampler-window network throughput measured so far in this
-    /// download, 0 until the first eligible window.
     pub(crate) fn peak_network_bps(&self) -> u64 {
         self.counters.peak_network_bps.load(Ordering::Relaxed)
     }
 
-    /// Width of the window behind `peak_network_bps`, zero until a window
-    /// qualified.
     pub(crate) fn peak_window(&self) -> Duration {
         Duration::from_nanos(self.counters.peak_window_ns.load(Ordering::Relaxed))
     }
@@ -669,7 +629,6 @@ impl DownloadMetrics {
         }
     }
 
-    /// The retained sampler windows in order.
     pub(crate) fn series(&self) -> Vec<SeriesPoint> {
         self.series
             .lock()
@@ -677,21 +636,13 @@ impl DownloadMetrics {
             .unwrap_or_default()
     }
 
-    /// Record bytes transferred (called from transfer layer per chunk).
     pub(crate) fn record_bytes(&self, n: u64) {
         self.counters
             .bytes_transferred
             .fetch_add(n, Ordering::Relaxed);
     }
 
-    /// Spawn a background task that logs a throughput sample every second.
-    /// Active regardless of whether a bandwidth limiter is configured.
-    ///
-    /// `telemetry_epoch` anchors the `elapsed_ms` reported in each
-    /// `DownloadTelemetry` event. It is captured by the caller at the moment
-    /// real download work begins (after pre-download validation) so the speed
-    /// graph starts at the download's own t=0 rather than including the prep
-    /// phases, and so the hash lane can share the same origin.
+    /// Anchor telemetry after pre-download validation so download and hash lanes share the work timeline.
     pub(super) fn spawn_sampler(
         self: &std::sync::Arc<Self>,
         progress_tx: Option<tokio::sync::broadcast::Sender<ProgressEvent>>,
@@ -716,8 +667,7 @@ impl DownloadMetrics {
                     _ = interval.tick() => {}
                     _ = me.sampler_wake.notified() => {}
                 }
-                // The stop signal still takes one closing sample so the bytes
-                // of the final partial window are not dropped from the series.
+                // Take a final sample on stop so the last partial interval is not lost.
                 let stopping = me.sampler_stop.load(Ordering::Relaxed);
                 let sample = rates.sample(
                     me.counters.bytes_transferred.load(Ordering::Relaxed),
@@ -755,9 +705,7 @@ impl DownloadMetrics {
                 } else {
                     (0.0, 0)
                 };
-                // Task Manager's figure (private working set) rather than the
-                // whole working set, which also counts the shared and
-                // memory-mapped file pages hashing reads through.
+
                 let memory_bytes = crate::ui::memory::sample_process_memory()
                     .task_manager_memory_bytes()
                     .unwrap_or(memory_bytes);
@@ -792,13 +740,11 @@ impl DownloadMetrics {
         })
     }
 
-    /// Signal the sampler task to stop.
     pub(super) fn stop_sampler(&self) {
         self.sampler_stop.store(true, Ordering::Relaxed);
         self.sampler_wake.notify_one();
     }
 
-    /// Build a structured summary of the entire download run.
     pub(crate) fn build_report(&self, mod_outcomes: &[DownloadModOutcome]) -> DownloadRunReport {
         DownloadRunReport {
             total: self.render_summary(),
@@ -1170,20 +1116,15 @@ fn indent_lines(text: &str, indent: &str) -> String {
         .join("\n")
 }
 
-/// Shared scheduler state used to compute adaptive split counts per file.
-/// Created once in the orchestrator and passed through to the transfer layer.
 pub(super) struct DownloadSchedulerState {
-    /// Number of large files currently being downloaded.
     pub(super) active_large_files: AtomicUsize,
-    /// Number of large files still waiting in the queue.
+
     pub(super) queued_large_files: AtomicUsize,
-    /// Global semaphore capping total concurrent HTTP range requests.
+
     pub(super) range_permits: std::sync::Arc<Semaphore>,
-    /// Caps concurrent delta-patch applies (the disk-bound phase), so a
-    /// rotational destination is not seeked by dozens of applies at once.
+    /// Cap disk-bound applies on rotational storage to limit concurrent seeks.
     pub(super) patch_apply_permits: std::sync::Arc<Semaphore>,
-    /// Raised when a large file finishes, so range workers parked above the
-    /// old fair-share cap wake on the event instead of on their poll interval.
+
     pub(super) range_cap_changed: tokio::sync::Notify,
     pub(super) limits: DownloadResourceLimits,
 }
@@ -1200,13 +1141,7 @@ impl DownloadSchedulerState {
         }
     }
 
-    /// Fair-share cap on concurrent ranges a single file may use right now.
-    ///
-    /// Divides the global range budget across large files that are actively
-    /// transferring, clamped to the per-file floor/ceiling. Queued files do not
-    /// own range capacity yet; counting them here parks workers behind capacity
-    /// that is otherwise idle at the start of large batches and can keep the
-    /// network well below line rate.
+    /// Divide range permits among active files only; queued files must not park workers behind idle capacity.
     pub(super) fn current_per_file_range_cap(&self) -> usize {
         let in_flight = self.active_large_files.load(Ordering::Relaxed).max(1);
         let fair_share = self.limits.max_active_range_requests / in_flight;
@@ -1383,7 +1318,6 @@ mod tests {
 
     #[test]
     fn ramp_tail_splits_the_wall_time_around_the_plateau() {
-        // 100 B/s peak: two ramp windows, three at plateau, one tail window.
         let series = vec![
             point(1.0, 1.0, 10),
             point(2.0, 1.0, 50),
@@ -1437,8 +1371,6 @@ mod tests {
         assert!(m.sampler_stop.load(Ordering::Relaxed));
     }
 
-    // ── interval-correct sampling ─────────────────────────────────────
-
     fn secs(s: f64) -> Duration {
         Duration::from_secs_f64(s)
     }
@@ -1456,7 +1388,7 @@ mod tests {
     fn delayed_tick_is_not_reported_as_a_faster_second() {
         let epoch = Instant::now();
         let mut sampler = RateSampler::new(epoch);
-        // 1.8 s late with 1.8 MB moved is 1 MB/s, not 1.8 MB/s.
+
         let sample = sampler.sample(1_800_000, 0, epoch + secs(1.8));
         assert_eq!(sample.elapsed, secs(1.8));
         assert_eq!(sample.network_bps, 1_000_000);
@@ -1528,14 +1460,12 @@ mod tests {
         let epoch = Instant::now();
         let mut sampler = RateSampler::new(epoch);
         m.record_peak(&sampler.sample(1_000_000, 0, epoch + secs(1.0)));
-        // A 0.2 s window at 5 MB/s is short-window noise, not the ceiling.
+
         m.record_peak(&sampler.sample(2_000_000, 0, epoch + secs(1.2)));
         m.record_peak(&sampler.sample(4_000_000, 0, epoch + secs(2.2)));
         assert_eq!(m.peak_network_bps(), 2_000_000);
         assert_eq!(m.peak_window(), secs(1.0));
     }
-
-    // ── current_per_file_range_cap ─────────────────────────────────────
 
     fn scheduler_with_large_files(active: usize, queued: usize) -> DownloadSchedulerState {
         let state = DownloadSchedulerState::new(DownloadResourceLimits::normal());
@@ -1564,8 +1494,6 @@ mod tests {
 
     #[test]
     fn range_cap_scales_with_queue_drain() {
-        // Global permits are divided across active files only, then clamped to
-        // the per-file ceiling.
         assert_eq!(
             scheduler_with_large_files(3, 3).current_per_file_range_cap(),
             32

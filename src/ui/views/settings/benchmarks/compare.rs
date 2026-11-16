@@ -1,6 +1,3 @@
-//! Side-by-side comparison of two benchmarks: header cards, a metric diff
-//! table with proportion bars, stage bars and overlaid charts.
-
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Ui, Vec2};
 
 use super::charts::{SeriesStyle, bar_chart, line_chart};
@@ -17,7 +14,6 @@ pub fn percent_change(a: f64, b: f64) -> Option<f64> {
     (a.abs() > f64::EPSILON).then(|| (b - a) / a * 100.0)
 }
 
-/// Two stacked bars showing `a` and `b` relative to the larger of them.
 fn proportion_bars(ui: &mut Ui, a: f64, b: f64, colors: [Color32; 2], track: Color32) {
     const WIDTH: f32 = 110.0;
     const BAR: f32 = 5.0;
@@ -99,9 +95,7 @@ impl Foxy {
         });
     }
 
-    /// Speed-of-light ratio per operation of both records, so a build can be
-    /// judged by how close it ran to the light rather than by raw seconds
-    /// that a different repository or machine would skew.
+    /// Compare speed-of-light ratios so machine- or repository-specific raw times do not skew builds.
     fn render_compare_sol(
         &self,
         ui: &mut Ui,
@@ -116,8 +110,7 @@ impl Foxy {
         }
         let scale = text_scale(ui);
         let dim = self.color_text_dim();
-        // (operation, sub-part) pairs of both records in first-seen order;
-        // the main ratio has no sub-part name.
+
         let mut ops: Vec<(String, Option<&'static str>)> = Vec::new();
         for summary in sol_a.iter().chain(&sol_b) {
             let parts = std::iter::once(None).chain(summary.sub_parts.iter().map(|p| Some(p.name)));
@@ -225,8 +218,7 @@ impl Foxy {
                                 ui.label(RichText::new("n/a").color(dim));
                             }
                         }
-                        // The kind is text so a mismatch between the two
-                        // records reads without a tooltip.
+
                         let kind_text = if src_a == src_b || src_b.is_empty() {
                             src_a.clone()
                         } else if src_a.is_empty() {
@@ -242,8 +234,6 @@ impl Foxy {
         ui.add_space(8.0);
     }
 
-    /// "Oldest as A" toggle and an A/B swap, shared by the list toolbar and
-    /// the comparison header.
     pub(super) fn render_compare_order_controls(&mut self, ui: &mut Ui) {
         let can_swap = self.benchmarks_view.selected.len() == 2;
         if ui

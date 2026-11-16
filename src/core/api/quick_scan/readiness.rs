@@ -166,11 +166,6 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
-    // Query 1: mod stats via subquery (avoids JOIN row inflation).
-    // Scoped to enabled addons, like the diff itself: a deselected optional
-    // addon is never downloaded, so its files can never earn local tree
-    // checksums, part checksums or content hashes, and counting it here would
-    // hold the repository out of the fast path on every launch.
     let mod_stats_started = Instant::now();
     let mod_row = match db
         .query_one(
@@ -235,14 +230,12 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
-    // Populated repo/addon rollups are enough for the local folder fingerprint check.
     let addon_levels_complete = missing_mod_remote == 0
         && missing_mod_local == 0
         && missing_mod_content == 0
         && !repo_missing_tree
         && !repo_missing_content;
     if addon_levels_complete {
-        // Startup callers need a cheap proof that part metadata exists.
         let fast_path_allowed = parts_metadata_ready;
         if fast_path_allowed {
             info!(
@@ -344,12 +337,7 @@ async fn quick_scan_preflight_combined_inner(
         });
     }
 
-    // Part rows only ever contribute two booleans here, and both are already
-    // decided whenever a higher level is missing. Probing with `LIMIT 1` stops
-    // at the first row that settles the question; the aggregate this replaced
-    // had to read every part row in the repository to reach the same answer,
-    // which cost over a second on a repository with 141k parts and gated the
-    // whole startup verdict (`conventions/SPEED_OF_LIGHT.md` O8).
+    // Use LIMIT 1: readiness needs booleans, not a full part-table scan.
     let part_stats_started = Instant::now();
     let deferred_parts = context.deferred_part_count() > 0;
     let part_rows_exist = if deferred_parts {
@@ -410,7 +398,6 @@ async fn quick_scan_preflight_combined_inner(
         && missing_mod_content == mod_count
         && missing_file_content == file_count;
 
-    // Blank content hashes with a complete tree only need baseline refresh.
     let bootstrap_plan = if content_missing_all && tree_missing {
         QuickScanBootstrapPlan::InitializeTreeAndRefreshContent
     } else if tree_missing {
@@ -449,26 +436,14 @@ async fn quick_scan_preflight_combined_inner(
     })
 }
 
-/// A part row the server never published a checksum for.
 const PART_MISSING_REMOTE_CHECKSUM: &str = "sf.remote_checksum = ''";
 
-/// A part row that has never been hashed locally, unless its file is already
-/// proven clean at the file level, in which case its parts do not need one.
 const PART_MISSING_LOCAL_CHECKSUM: &str = "(sf.local_checksum IS NULL OR sf.local_checksum = '') \
      AND NOT (f.local_checksum IS NOT NULL AND f.local_checksum != '' \
      AND f.local_checksum = f.remote_checksum AND f.remote_checksum != '')";
 
-/// Existence probe over one repository's enabled-addon part rows.
-///
-/// `predicate` is a constant SQL fragment chosen by the caller, never user
-/// input. `LIMIT 1` is the point: the preflight needs booleans, and a scan that
-/// stops at the first qualifying row is what keeps a large repository from
-/// paying a full part-table read on every launch.
-///
-/// `None` on a query error, never `false`: a failed probe must not be read as
-/// "nothing is missing", which would let the preflight report remote metadata
-/// ready or the local tree complete on no evidence at all. Every caller
-/// propagates it into the conservative preflight fallback.
+/// Predicates are caller-selected SQL constants; LIMIT 1 answers the readiness probe.
+/// On query errors return None so callers use the conservative fallback.
 async fn scoped_part_exists(
     db: &FoxyDb,
     repository_id: i64,
@@ -503,8 +478,6 @@ async fn scoped_part_exists(
     }
 }
 
-/// How a part probe reads in the preflight log: its answer, or that a higher
-/// level already decided and it never ran.
 fn probe_log_value(probed: Option<bool>) -> &'static str {
     match probed {
         Some(true) => "true",
@@ -513,7 +486,6 @@ fn probe_log_value(probed: Option<bool>) -> &'static str {
     }
 }
 
-/// Indexed existence probe for repository part metadata.
 async fn repository_parts_metadata_exists(
     db: &FoxyDb,
     repository_id: i64,
@@ -723,13 +695,8 @@ pub(crate) fn collect_files_with_missing_local_tree_hashes(tree: &Tree) -> HashS
     file_ids
 }
 
-/// The subset of [`collect_files_with_missing_local_tree_hashes`] a targeted
-/// init can actually make progress on. A file that is absent on disk can never
-/// earn a local tree hash, so re-running the init over it on every sync only
-/// re-reads part rows and flips the "targeted init ran" state for nothing;
-/// such a file is reported through the quick scan's `!exists` path instead.
-/// A missing file that still carries stale local state is kept so the hash
-/// pass can clear it.
+/// Targeted init excludes absent files, which cannot gain hashes; quick scan handles them as missing.
+/// Retain stale local state for the hash pass to clear.
 pub(crate) fn collect_hashable_files_with_missing_local_tree_hashes(tree: &Tree) -> HashSet<u64> {
     collect_files_with_missing_local_tree_hashes(tree)
         .into_iter()
@@ -753,11 +720,7 @@ fn local_file_present(local_path: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Files a targeted tree-hash init must still baseline: the ones it hashed
-/// plus any requested file it skipped (already tree-synced through sibling
-/// propagation) that carries no content hash. Without a baseline the quick
-/// scan reports such a file as a content mismatch while the tree checksums
-/// keep it out of the download queue.
+/// Baseline sibling-synced files skipped by targeted init when they lack a content hash.
 pub(crate) fn collect_targeted_init_content_baseline_files(
     tree: &Tree,
     requested_file_ids: &HashSet<u64>,
@@ -904,9 +867,7 @@ pub(super) fn content_hash_baseline_ready(tree: &Tree) -> bool {
         })
 }
 
-/// File indices reachable from the tree's enabled addons. Disabled addons are
-/// out of scope for every readiness gate, so their files must not decide
-/// whether a baseline is complete.
+/// Only enabled-addon files participate in readiness; disabled files cannot determine baseline completeness.
 fn enabled_addon_file_indices(tree: &Tree) -> HashSet<usize> {
     tree.mod_nodes
         .iter()
@@ -989,7 +950,6 @@ pub(crate) async fn launch_quick_scan_repo_startup_eligibility(
         .0
 }
 
-/// Eligibility plus the preflight it was derived from.
 pub(super) async fn launch_quick_scan_repo_startup_eligibility_with_preflight(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -1036,8 +996,6 @@ pub(super) async fn launch_quick_scan_repo_startup_eligibility_with_preflight(
     (eligibility, Some(preflight))
 }
 
-/// Deep eligibility check using consolidated JOIN queries.
-/// Takes repo_id directly (already known from [batch_eligible_repos]), skipping per-repo URL lookup.
 #[cfg(test)]
 pub(crate) async fn launch_quick_scan_repo_eligible_joined(
     db: &FoxyDb,
@@ -1182,8 +1140,6 @@ mod tests {
         assert!(readiness.incomplete_files.is_empty());
     }
 
-    // ── checksum/content helpers ────────────────────────────────────────
-
     fn repo(local_checksum: &str, local_content_hash: &str) -> FoxyRepository {
         FoxyRepository {
             id: 1,
@@ -1198,9 +1154,6 @@ mod tests {
         }
     }
 
-    /// Single repo/addon/file/part tree with explicit checksum + content-hash
-    /// values for each level, linked through the node graph so the enabled-addon
-    /// scoping in the content-hash helpers can walk it.
     #[allow(clippy::too_many_arguments)]
     fn checksum_tree(
         repo_tree: &str,
@@ -1314,7 +1267,6 @@ mod tests {
 
     #[test]
     fn tree_local_checksums_baseline_missing_false_when_any_present() {
-        // A single populated file checksum means the baseline is not fully empty.
         let tree = checksum_tree("", "", "", "", "F", "", "");
         assert!(!tree_local_checksums_baseline_missing(&tree));
     }
@@ -1331,7 +1283,6 @@ mod tests {
 
     #[test]
     fn content_hash_baseline_missing_when_all_content_hashes_empty() {
-        // Tree checksums present but content hashes entirely absent.
         let tree = checksum_tree("R", "", "M", "", "F", "", "P");
         assert!(content_hash_baseline_missing(&tree));
     }
@@ -1359,8 +1310,6 @@ mod tests {
         assert!(!content_hash_baseline_ready(&Tree::default()));
     }
 
-    /// A deselected optional addon is never downloaded, so it can never earn a
-    /// content hash; it must not hold the repository baseline back forever.
     #[test]
     fn content_hash_baseline_ready_ignores_disabled_addon() {
         let tree = checksum_tree_with_enabled("R", "RC", "M", "", "F", "", "P", false);
@@ -1376,15 +1325,10 @@ mod tests {
         assert!(enabled_addon_file_indices(&disabled).is_empty());
     }
 
-    // ── collect_files_with_missing_local_tree_hashes ────────────────────
-
-    /// `(file_id, file_checksum, [part_checksums])`.
     type FileSpec<'a> = (u64, &'a str, Vec<&'a str>);
-    /// `(mod_checksum, [FileSpec])`.
+
     type ModSpec<'a> = (&'a str, Vec<FileSpec<'a>>);
 
-    /// Builds a repo→addon→file→part tree from per-addon specs with a fully
-    /// wired node graph.
     fn node_tree(repo_checksum: &str, mods: Vec<ModSpec<'_>>) -> Tree {
         let mut tree = Tree {
             repositories: vec![repo(repo_checksum, "")],
@@ -1593,8 +1537,6 @@ mod tests {
 
     #[test]
     fn collect_missing_tree_hashes_rolls_up_missing_addon_checksum() {
-        // The addon checksum is empty, so every file under it is flagged even
-        // though the files themselves look complete.
         let tree = node_tree(
             "R",
             vec![("", vec![(10, "F", vec!["P"]), (11, "F2", vec!["P2"])])],
@@ -1607,7 +1549,6 @@ mod tests {
 
     #[test]
     fn collect_missing_tree_hashes_rolls_up_missing_repo_checksum() {
-        // Empty repository checksum flags all files across all addons.
         let tree = node_tree(
             "",
             vec![

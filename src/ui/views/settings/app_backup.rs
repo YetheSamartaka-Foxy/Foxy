@@ -6,22 +6,18 @@ use log::info;
 use super::render_wrapped_info_row;
 
 impl Foxy {
-    /// App update settings section: update source selector, URL/repo fields, auto-check, and
-    /// check-now / browse-all-versions buttons.
     pub(super) fn render_application_settings_updates(
         &mut self,
         ui: &mut Ui,
         horizontal_padding: f32,
         changed: &mut bool,
     ) {
-        // --- App Updates section ---
         ui.separator();
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             ui.label(RichText::new(tr("App Updates")).strong());
         });
 
-        // Update mode selector
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             ui.label(tr("Update source"));
@@ -155,7 +151,6 @@ impl Foxy {
             ui.add_space(horizontal_padding);
         });
 
-        // Show update check status
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             match &self.app_update_status {
@@ -187,8 +182,6 @@ impl Foxy {
         });
     }
 
-    /// Renders the wipe-database confirmation dialog. Returns `true` if the dialog is currently
-    /// shown so callers can skip other interactions if needed.
     pub(super) fn render_application_settings_wipe_db_confirmation(&mut self, ui: &mut Ui) {
         if self.show_wipe_db_confirmation {
             egui::Window::new(tr("Confirm Wipe Database"))
@@ -227,6 +220,9 @@ impl Foxy {
                                             .output_mut(Foxy::set_pointing_cursor_output);
                                     }
                                     if yes_btn.clicked() {
+                                        if !self.client_db_admission.allows() {
+                                            return;
+                                        }
                                         self.database_wipe_in_flight = true;
                                         self.show_wipe_db_confirmation = false;
                                         let include_benchmarks = self.wipe_db_include_benchmarks;
@@ -242,29 +238,54 @@ impl Foxy {
                                             }
                                         }
                                         self.benchmarks_view = Default::default();
-                                        // Run the database wipe on a background thread
                                         let database_wipe_tx = self.database_wipe_tx.clone();
-                                        std::thread::spawn(move || {
-                                            let result = match tokio::runtime::Runtime::new() {
-                                                Ok(rt) => {
-                                                    if let Err(e) = rt.block_on(
-                                                        crate::core::tasks::init_database::wipe_database_live(),
-                                                    ) {
-                                                        log::error!("Failed to wipe database: {}", e);
-                                                        Err(e)
-                                                    } else {
-                                                        info!("Database wipe completed");
-                                                        Ok(())
+                                        let Some(scope) = self.capture_worker_scope() else {
+                                            self.database_wipe_in_flight = false;
+                                            return;
+                                        };
+                                        let space_id = scope.space_id().to_string();
+                                        let generation = scope.generation();
+                                        let admission = self.client_db_admission.clone();
+                                        let handle = std::thread::spawn(move || {
+                                            let outcome = if !crate::ui::app::admit_database_section(
+                                                &admission,
+                                            ) {
+                                                Err("Database admission is closed".to_string())
+                                            } else {
+                                                match tokio::runtime::Runtime::new() {
+                                                    Ok(rt) => {
+                                                        if let Err(e) = rt.block_on(
+                                                            crate::core::tasks::init_database::wipe_database_live(),
+                                                        ) {
+                                                            log::error!(
+                                                                "Failed to wipe database: {}",
+                                                                e
+                                                            );
+                                                            Err(e)
+                                                        } else {
+                                                            info!("Database wipe completed");
+                                                            Ok(())
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        log::error!(
+                                                            "Failed to create runtime for database wipe: {}",
+                                                            e
+                                                        );
+                                                        Err(e.to_string())
                                                     }
                                                 }
-                                                Err(e) => {
-                                                    log::error!("Failed to create runtime for database wipe: {}", e);
-                                                    Err(e.to_string())
-                                                }
                                             };
-                                            let _ = database_wipe_tx.send(result);
+                                            let _ = database_wipe_tx.send(
+                                                crate::ui::app::DatabaseWipeDelivery {
+                                                    space_id,
+                                                    generation,
+                                                    outcome,
+                                                },
+                                            );
                                         });
-                                        // Clear in-memory state
+                                        self.database_wipe_worker = Some(handle);
+
                                         self.clear_mod_diff_cache();
                                         self.repo_states.clear();
                                         self.update_ready_repo = None;

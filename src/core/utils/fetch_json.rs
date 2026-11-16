@@ -69,16 +69,14 @@ fn is_transient_metadata_error(error: &(dyn Error + 'static)) -> bool {
     false
 }
 
-/// Timing breakdown for a JSON metadata fetch.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FetchJsonTiming {
-    /// Time to send the HTTP request and read the full response body.
     pub download: Duration,
-    /// Size of the response body in bytes.
+
     pub response_bytes: usize,
-    /// Time to skip leading non-JSON bytes and parse into the target type.
+
     pub parse: Duration,
-    /// The server confirmed the cached body; nothing was downloaded.
+
     pub cached: bool,
 }
 
@@ -90,7 +88,6 @@ pub(crate) async fn fetch_json_fresh(
     Ok(value)
 }
 
-/// Revalidate an addon manifest against the context's manifest cache.
 pub(crate) async fn fetch_manifest_json_timed<T: DeserializeOwned + Send + 'static>(
     context: Arc<FoxyContext>,
     url: &str,
@@ -260,7 +257,6 @@ async fn fetch_json_single<T: DeserializeOwned + Send + 'static>(
         .into());
     }
 
-    // Validate Content-Length against the actual bytes received.
     if content_encoding == "identity"
         && let Some(expected) = expected_bytes
         && response_bytes != expected as usize
@@ -299,7 +295,6 @@ async fn fetch_json_single<T: DeserializeOwned + Send + 'static>(
     ))
 }
 
-/// Skip a BOM or other leading bytes, then parse; returns the parse time.
 async fn parse_json_body<T, B>(
     url: &str,
     body: B,
@@ -331,9 +326,7 @@ fn json_start(body: &[u8]) -> usize {
         .unwrap_or(body.len())
 }
 
-/// Line breaks are dropped before a retry because some servers emit raw ones
-/// inside strings; outside strings they are whitespace, so a clean body parses
-/// the same either way.
+/// Some servers emit illegal raw newlines in JSON strings; retry without line breaks, which are whitespace elsewhere.
 fn parse_json_slice<T: DeserializeOwned>(
     url: &str,
     bytes: &[u8],
@@ -385,8 +378,6 @@ mod tests {
         ));
     }
 
-    /// Serves one JSON body with an ETag and answers a matching
-    /// `If-None-Match` with 304; counts the full bodies it sent.
     fn spawn_manifest_server(body: &'static str) -> (String, Arc<AtomicUsize>) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

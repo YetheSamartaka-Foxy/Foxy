@@ -1,0 +1,27 @@
+{
+  "channel": "stable",
+  "requested": [
+    { "addon_id": "aaaaaaaaaaaaaaaa", "version": null, "required": true },
+    { "addon_id": "bbbbbbbbbbbbbbbb", "version": null, "required": false }
+  ],
+  "mods_required_by_default": null,
+  "scenario_id": "{0123456789ABCDEF}Missions/Main.conf",
+  "scenario_provider": null,
+  "realized": [
+    {
+      "addon_id": "aaaaaaaaaaaaaaaa",
+      "version": "1.0.0",
+      "channel": "stable",
+      "provider": "bohemia_workshop",
+      "dependencies": [],
+      "scenarios": []
+    }
+  ],
+  "omissions": [
+    { "addon_id": "bbbbbbbbbbbbbbbb", "reason": "metadata unavailable" }
+  ],
+  "degraded": true,
+  "content_sources": {
+    "aaaaaaaaaaaaaaaa": "R:/Mods/server/instances/server_00000000000000000000000000000002/reforger-addons/revision_0000000000000000000000000000000000000000000000000000000000000000/addons/aaaaaaaaaaaaaaaa"
+  }
+}

@@ -13,11 +13,98 @@ use crate::ui::app::agent_driver::AgentGuiLaunchConfig;
 
 pub enum CliExecution {
     RunUi {
+        mode_override: Option<crate::core::app_mode::AppMode>,
         debug_mode: bool,
         agent_gui: AgentGuiLaunchConfig,
         debug_modals: Vec<crate::ui::app::debug_modals::DebugModal>,
     },
     Exit(i32),
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) fn cleanup_witness_entry(arguments: &[String]) -> Option<i32> {
+    if arguments.get(1).map(String::as_str) != Some("server")
+        || arguments.get(2).map(String::as_str) != Some("cleanup-witness")
+    {
+        return None;
+    }
+    let handles = (arguments.len() == 7)
+        .then(|| {
+            arguments[3..]
+                .iter()
+                .map(|value| value.parse::<u64>().ok().filter(|value| *value > 0))
+                .collect::<Option<Vec<_>>>()
+        })
+        .flatten();
+    Some(match handles {
+        Some(handles) => match foxy_supervisor::process::run_cleanup_witness(
+            handles[0], handles[1], handles[2], handles[3],
+        ) {
+            Ok(()) => exit_codes::SUCCESS,
+            Err(_) => exit_codes::OPERATION_FAILED,
+        },
+        None => exit_codes::VALIDATION_ERROR,
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn console_signal_entry(arguments: &[String]) -> Option<i32> {
+    if arguments.get(1).map(String::as_str) != Some("server")
+        || arguments.get(2).map(String::as_str) != Some("console-signal")
+    {
+        return None;
+    }
+    let ctrl_break = arguments.len() == 5 && arguments[3] == "--ctrl-break";
+    let handle = (arguments.len() == 4 || ctrl_break)
+        .then(|| {
+            arguments[if ctrl_break { 4 } else { 3 }]
+                .parse::<u64>()
+                .ok()
+        })
+        .flatten()
+        .filter(|handle| *handle != 0);
+    Some(match handle {
+        Some(handle) => match if ctrl_break {
+            foxy_supervisor::process::run_console_break_helper(handle)
+        } else {
+            foxy_supervisor::process::run_console_signal_helper(handle)
+        } {
+            Ok(code) => code,
+            Err(error) => error
+                .raw_os_error()
+                .and_then(|code| code.checked_add(1000))
+                .unwrap_or(exit_codes::VALIDATION_ERROR),
+        },
+        None => exit_codes::VALIDATION_ERROR,
+    })
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn console_signal_entry_requires_exact_arguments_and_nonzero_inherited_authority() {
+    for args in [
+        vec!["foxy", "server", "console-signal", "0"],
+        vec!["foxy", "server", "console-signal", "--ctrl-break", "0"],
+        vec!["foxy", "server", "console-signal", "--unknown", "1"],
+        vec!["foxy", "server", "console-signal", "--ctrl-break"],
+    ] {
+        let args: Vec<_> = args.into_iter().map(str::to_owned).collect();
+        assert_eq!(
+            console_signal_entry(&args),
+            Some(exit_codes::VALIDATION_ERROR)
+        );
+    }
+    assert_eq!(
+        console_signal_entry(&["foxy".into(), "version".into()]),
+        None
+    );
+}
+
+fn server_monitor_stream(cli: &CliArgs) -> bool {
+    !cli.dry_run
+        && matches!(cli.command.as_ref(), Some(args::CliCommand::Server {
+        command: args::ServerCommand::Instance { command: args::ServerInstanceCommand::Monitor(monitor), .. }
+    }) if monitor.follow && monitor.stream_json)
 }
 
 pub fn run_from_env() -> CliExecution {
@@ -67,6 +154,7 @@ pub fn run_from_env() -> CliExecution {
 
     if let Some(CliCommand::Ui(args)) = cli.command.as_ref() {
         return CliExecution::RunUi {
+            mode_override: args.mode.map(Into::into),
             debug_mode: args.debug_mode,
             agent_gui: AgentGuiLaunchConfig {
                 enabled: args.agent_gui,
@@ -76,17 +164,94 @@ pub fn run_from_env() -> CliExecution {
         };
     }
 
-    if matches!(cli.command.as_ref(), Some(CliCommand::Version)) {
-        match run_command(&cli, CliCommand::Version) {
+    if matches!(cli.command, Some(CliCommand::ContentAcquisitionWorker))
+        && (cli.dry_run || cli.wipe_db)
+    {
+        emit_error(
+            &output,
+            CommandError {
+                action: "content-acquisition-worker".into(),
+                message: "Worker execution cannot be combined with dry-run or database wipe".into(),
+                code: exit_codes::VALIDATION_ERROR,
+            },
+        );
+        return CliExecution::Exit(exit_codes::VALIDATION_ERROR);
+    }
+
+    if !cli.wipe_db
+        && matches!(
+            cli.command.as_ref(),
+            Some(
+                CliCommand::Version
+                    | CliCommand::Server {
+                        command: args::ServerCommand::Owner(_)
+                            | args::ServerCommand::Supervise(_)
+                            | args::ServerCommand::Context(_)
+                            | args::ServerCommand::Capabilities(_)
+                            | args::ServerCommand::Instance { .. }
+                            | args::ServerCommand::Installation { .. }
+                            | args::ServerCommand::Configuration { .. }
+                            | args::ServerCommand::Content { .. }
+                            | args::ServerCommand::Mission { .. }
+                            | args::ServerCommand::Keys { .. }
+                            | args::ServerCommand::Deploy { .. }
+                            | args::ServerCommand::Steam { .. }
+                            | args::ServerCommand::Workshop { .. }
+                            | args::ServerCommand::Headless { .. }
+                            | args::ServerCommand::Maintenance { .. }
+                            | args::ServerCommand::ReforgerAddons { .. }
+                    }
+            )
+        )
+    {
+        let streamed = server_monitor_stream(&cli);
+        let command = cli.command.take().expect("matched command");
+        match run_command(&cli, command) {
             Ok(success) => {
-                output.success(&success.action, &success.message, success.data);
+                if !streamed {
+                    output.success(&success.action, &success.message, success.data);
+                }
                 return CliExecution::Exit(success.exit_code);
             }
             Err(err) => {
+                let code = err.code;
                 emit_error(&output, err);
-                return CliExecution::Exit(exit_codes::OPERATION_FAILED);
+                return CliExecution::Exit(code);
             }
         }
+    }
+
+    if cli.wipe_db
+        && matches!(
+            cli.command.as_ref(),
+            Some(CliCommand::Server {
+                command: args::ServerCommand::Owner(_)
+                    | args::ServerCommand::Supervise(_)
+                    | args::ServerCommand::Context(_)
+                    | args::ServerCommand::Capabilities(_)
+                    | args::ServerCommand::Instance { .. }
+                    | args::ServerCommand::Installation { .. }
+                    | args::ServerCommand::Configuration { .. }
+                    | args::ServerCommand::Content { .. }
+                    | args::ServerCommand::Mission { .. }
+                    | args::ServerCommand::Keys { .. }
+                    | args::ServerCommand::Deploy { .. }
+                    | args::ServerCommand::Steam { .. }
+                    | args::ServerCommand::Workshop { .. }
+                    | args::ServerCommand::Headless { .. }
+                    | args::ServerCommand::Maintenance { .. },
+            })
+        )
+    {
+        emit_error(
+            &output,
+            CommandError {
+                action: "server".to_string(),
+                message: "Server draft commands cannot be combined with --wipe-db".to_string(),
+                code: exit_codes::VALIDATION_ERROR,
+            },
+        );
+        return CliExecution::Exit(exit_codes::VALIDATION_ERROR);
     }
 
     if command_uses_database(cli.command.as_ref(), cli.wipe_db) {
@@ -117,34 +282,40 @@ pub fn run_from_env() -> CliExecution {
                 return CliExecution::Exit(exit_codes::OPERATION_FAILED);
             }
         }
+        if let Err(error) = crate::core::game::spaces::prepare_game_spaces_layout() {
+            emit_error(
+                &output,
+                CommandError {
+                    action: "game.bootstrap".to_string(),
+                    message: error,
+                    code: exit_codes::OPERATION_FAILED,
+                },
+            );
+            return CliExecution::Exit(exit_codes::OPERATION_FAILED);
+        }
+        if let Some(error) =
+            database_claim_error(crate::core::tasks::db_process_lock::acquire_for_active_space())
+        {
+            let code = error.code;
+            emit_error(&output, error);
+            return CliExecution::Exit(code);
+        }
+        let path = crate::core::tasks::db_turso::database_file_path();
+        if let Err(message) = crate::core::tasks::init_database::resume_database_access_sync(&path)
+        {
+            emit_error(
+                &output,
+                CommandError {
+                    action: "database-lock".to_string(),
+                    message,
+                    code: exit_codes::OPERATION_FAILED,
+                },
+            );
+            return CliExecution::Exit(exit_codes::OPERATION_FAILED);
+        }
     }
 
-    // Turso has no multi-process access, so a command that touches the database
-    // must own it outright. Claim it before dispatching rather than letting the
-    // open race a running GUI.
-    if command_uses_database(cli.command.as_ref(), cli.wipe_db)
-        && let crate::core::tasks::db_process_lock::LockOutcome::Busy { holder_pid } =
-            crate::core::tasks::db_process_lock::acquire_for_active_space()
-    {
-        let owner = holder_pid
-            .map(|pid| format!(" (PID {pid})"))
-            .unwrap_or_default();
-        emit_error(
-            &output,
-            CommandError {
-                action: "database-lock".to_string(),
-                message: format!(
-                    "the database for this game space is in use by another Foxy process{owner}; close it and retry"
-                ),
-                code: exit_codes::DATABASE_BUSY,
-            },
-        );
-        return CliExecution::Exit(exit_codes::DATABASE_BUSY);
-    }
-
-    // `--wipe-db` is a standalone, non-interactive maintenance operation: wipe
-    // and rebuild the whole local database, then exit. Destructive, so it
-    // requires explicit `--yes` consent (the CLI never wipes implicitly).
+    // A standalone database wipe must require explicit --yes consent and exit after rebuilding.
     if cli.wipe_db {
         return run_db_wipe(&output, cli.yes);
     }
@@ -219,6 +390,7 @@ pub fn run_from_env() -> CliExecution {
     }
 
     if !output.json
+        && command_uses_database(Some(&command), false)
         && let Some(hint) = crate::core::tasks::db_schema_version::cli_wipe_hint()
     {
         eprintln!("warning: {hint}");
@@ -258,13 +430,7 @@ fn update_action(command: &CliCommand) -> Option<&'static str> {
     }
 }
 
-/// Whether a dispatch will open the game space database, and so must hold the
-/// exclusive process claim.
-///
-/// The exemptions are the commands that deliberately run *alongside* a live GUI:
-/// `agent-gui` drives one over TCP, `steam-helper` is the Steamworks subprocess
-/// the GUI itself spawns, and `server` generates repository manifests from the
-/// filesystem. `version` and `ui` are handled before this point.
+/// Commands that attach to an existing owner or inspect public metadata must work beside a live GUI without its DB claim.
 fn command_uses_database(command: Option<&CliCommand>, wipe_db: bool) -> bool {
     if wipe_db {
         return true;
@@ -272,12 +438,66 @@ fn command_uses_database(command: Option<&CliCommand>, wipe_db: bool) -> bool {
     match command {
         None => false,
         Some(
-            CliCommand::AgentGui { .. }
-            | CliCommand::SteamHelper { .. }
-            | CliCommand::Server { .. }
-            | CliCommand::Version,
+            CliCommand::AgentGui { .. } | CliCommand::SteamHelper { .. } | CliCommand::Version,
         ) => false,
+        Some(CliCommand::Server { command }) => match server_database_use(command) {
+            ServerDatabaseUse::LocalMetadata
+            | ServerDatabaseUse::PublicQuery
+            | ServerDatabaseUse::OwnerClient
+            | ServerDatabaseUse::ForegroundOwner => false,
+        },
         Some(_) => true,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServerDatabaseUse {
+    LocalMetadata,
+    PublicQuery,
+    OwnerClient,
+    ForegroundOwner,
+}
+
+fn server_database_use(command: &args::ServerCommand) -> ServerDatabaseUse {
+    match command {
+        args::ServerCommand::Owner(_) => ServerDatabaseUse::OwnerClient,
+        args::ServerCommand::Supervise(_) => ServerDatabaseUse::ForegroundOwner,
+        args::ServerCommand::InspectAddons(_)
+        | args::ServerCommand::ConsoleSignal { .. }
+        | args::ServerCommand::CleanupWitness { .. } => ServerDatabaseUse::PublicQuery,
+        args::ServerCommand::Context(_)
+        | args::ServerCommand::Capabilities(_)
+        | args::ServerCommand::Instance { .. }
+        | args::ServerCommand::Installation { .. }
+        | args::ServerCommand::Configuration { .. }
+        | args::ServerCommand::Content { .. }
+        | args::ServerCommand::Mission { .. }
+        | args::ServerCommand::Keys { .. }
+        | args::ServerCommand::Steam { .. }
+        | args::ServerCommand::Workshop { .. }
+        | args::ServerCommand::Headless { .. }
+        | args::ServerCommand::Maintenance { .. }
+        | args::ServerCommand::ReforgerAddons { .. }
+        | args::ServerCommand::Deploy { .. } => ServerDatabaseUse::LocalMetadata,
+    }
+}
+
+fn database_claim_error(
+    outcome: crate::core::tasks::db_process_lock::LockOutcome,
+) -> Option<CommandError> {
+    use crate::core::tasks::db_process_lock::LockOutcome;
+    match outcome {
+        LockOutcome::Acquired => None,
+        LockOutcome::Busy { holder_pid } => Some(CommandError {
+            action: "database-lock".to_string(),
+            message: format!("the database for this game space is in use by another Foxy process{}; close it and retry", holder_pid.map(|pid| format!(" (PID {pid})")).unwrap_or_default()),
+            code: exit_codes::DATABASE_BUSY,
+        }),
+        LockOutcome::Unavailable(_) => Some(CommandError {
+            action: "database-lock".to_string(),
+            message: "Cannot verify exclusive access to this game space's database; check config-directory permissions and filesystem lock support, then retry".to_string(),
+            code: exit_codes::OPERATION_FAILED,
+        }),
     }
 }
 
@@ -285,9 +505,6 @@ fn emit_error(output: &CliOutput, error: CommandError) {
     output.failure(&error.action, &error.message, vec![error.message.clone()]);
 }
 
-/// Non-interactively wipe and rebuild the entire local database, then record the
-/// current schema version (the same live wipe the GUI schema-upgrade prompt
-/// performs). Requires `--yes`; this never prompts.
 fn run_db_wipe(output: &CliOutput, confirmed: bool) -> CliExecution {
     crate::core::api::ensure_logger();
     const ACTION: &str = "db.wipe";
@@ -351,6 +568,179 @@ fn env_flag_enabled(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_ownership_is_an_operation_failure_and_busy_stays_distinct() {
+        use crate::core::tasks::db_process_lock::LockOutcome;
+        assert!(database_claim_error(LockOutcome::Acquired).is_none());
+        assert_eq!(
+            database_claim_error(LockOutcome::Busy { holder_pid: None })
+                .unwrap()
+                .code,
+            exit_codes::DATABASE_BUSY
+        );
+        let error =
+            database_claim_error(LockOutcome::Unavailable("not supported".to_string())).unwrap();
+        assert_eq!(error.code, exit_codes::OPERATION_FAILED);
+        assert_eq!(error.action, "database-lock");
+    }
+
+    #[test]
+    fn context_inspection_is_database_free_except_for_explicit_wipe() {
+        let cli =
+            CliArgs::try_parse_from(["foxy", "server", "context", "--game-space", "beta"]).unwrap();
+        assert!(!command_uses_database(cli.command.as_ref(), false));
+        assert!(command_uses_database(cli.command.as_ref(), true));
+        let Some(CliCommand::Server {
+            command: args::ServerCommand::Context(args),
+        }) = cli.command
+        else {
+            panic!("expected context command")
+        };
+        assert_eq!(args.game_space.as_deref(), Some("beta"));
+        assert!(
+            CliArgs::try_parse_from([
+                "foxy",
+                "server",
+                "context",
+                "--game-space",
+                "beta",
+                "--wipe-db",
+                "--yes",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn draft_commands_use_captured_context_and_require_explicit_edit_revisions() {
+        for tail in [
+            vec!["capabilities"],
+            vec!["instance", "list"],
+            vec![
+                "instance",
+                "show",
+                "server_00000000000000000000000000000001",
+            ],
+            vec!["instance", "add", "--name", "MainServer"],
+            vec!["instance", "validate", "--file", "draft.json"],
+            vec![
+                "instance",
+                "replace",
+                "--file",
+                "draft.json",
+                "--expected-revision",
+                "1",
+            ],
+            vec![
+                "instance",
+                "rename",
+                "server_00000000000000000000000000000001",
+                "--name",
+                "MainServer",
+                "--expected-revision",
+                "1",
+            ],
+            vec![
+                "instance",
+                "clone",
+                "server_00000000000000000000000000000001",
+                "--name",
+                "MainServer",
+                "--expected-revision",
+                "1",
+            ],
+            vec![
+                "instance",
+                "remove",
+                "server_00000000000000000000000000000001",
+                "--expected-revision",
+                "1",
+            ],
+        ] {
+            let mut argv = vec!["foxy", "--dry-run", "--json", "server"];
+            argv.extend(tail);
+            argv.extend(["--game-space", "beta"]);
+            let cli = CliArgs::try_parse_from(argv).unwrap();
+            assert!(!command_uses_database(cli.command.as_ref(), false));
+            assert!(command_uses_database(cli.command.as_ref(), true));
+            assert!(cli.dry_run && cli.json);
+        }
+        for command in ["rename", "clone", "remove"] {
+            assert!(
+                CliArgs::try_parse_from([
+                    "foxy",
+                    "server",
+                    "instance",
+                    command,
+                    "server_00000000000000000000000000000001"
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            CliArgs::try_parse_from([
+                "foxy",
+                "server",
+                "instance",
+                "list",
+                "--game-space",
+                "beta",
+                "--wipe-db",
+                "--yes"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn app_mode_flags_distinguish_session_overrides_and_saved_preferences() {
+        use crate::core::app_mode::AppMode;
+        for (value, expected) in [("client", AppMode::Client), ("server", AppMode::Server)] {
+            let cli = CliArgs::try_parse_from(["foxy", "ui", "--mode", value]).unwrap();
+            let Some(CliCommand::Ui(args)) = cli.command else {
+                panic!("expected UI args")
+            };
+            assert_eq!(args.mode.map(AppMode::from), Some(expected));
+            let cli =
+                CliArgs::try_parse_from(["foxy", "settings", "set", "--app-mode", value]).unwrap();
+            let Some(CliCommand::Settings { command }) = cli.command else {
+                panic!("expected settings args")
+            };
+            let args::SettingsCommand::Set(args) = *command else {
+                panic!("expected settings set")
+            };
+            assert_eq!(args.app_mode.map(AppMode::from), Some(expected));
+        }
+        assert!(CliArgs::try_parse_from(["foxy", "ui", "--mode", "other"]).is_err());
+        assert!(
+            CliArgs::try_parse_from(["foxy", "settings", "set", "--app-mode", "other"]).is_err()
+        );
+        let cli = CliArgs::try_parse_from(["foxy", "ui"]).unwrap();
+        let Some(CliCommand::Ui(args)) = cli.command else {
+            panic!("expected UI args")
+        };
+        assert!(args.mode.is_none());
+    }
+
+    #[test]
+    fn server_inspection_keeps_its_database_exemption() {
+        let cli = CliArgs::try_parse_from([
+            "foxy",
+            "server",
+            "inspect-addons",
+            "--address",
+            "127.0.0.1",
+            "--port",
+            "2302",
+        ])
+        .unwrap();
+        assert!(!command_uses_database(cli.command.as_ref(), false));
+        assert!(command_uses_database(cli.command.as_ref(), true));
+        let cli =
+            CliArgs::try_parse_from(["foxy", "settings", "set", "--app-mode", "server"]).unwrap();
+        assert!(command_uses_database(cli.command.as_ref(), false));
+    }
 
     #[test]
     fn update_actions_cover_checks_downloads_and_destructive_redownloads() {

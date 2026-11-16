@@ -12,7 +12,6 @@ use std::path::PathBuf;
 
 use super::render_wrapped_info_row;
 
-/// Which management operation is pending confirmation in the modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arma3ProfileActionKind {
     Rename,
@@ -20,8 +19,6 @@ pub enum Arma3ProfileActionKind {
     Delete,
 }
 
-/// A profile management action opened from the settings profile list,
-/// carrying the snapshot of the profile it targets and the name input.
 #[derive(Debug, Clone)]
 pub struct Arma3ProfileAction {
     pub kind: Arma3ProfileActionKind,
@@ -30,7 +27,6 @@ pub struct Arma3ProfileAction {
 }
 
 impl Foxy {
-    /// List of detected Arma 3 profiles with rename/clone/delete actions.
     pub(super) fn render_arma3_profile_management(&mut self, ui: &mut Ui, horizontal_padding: f32) {
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
@@ -145,7 +141,6 @@ impl Foxy {
         );
     }
 
-    /// Confirmation modal for the pending profile action.
     pub(crate) fn render_arma3_profile_action_modal(&mut self, ui: &mut Ui) {
         let Some(action) = self.pending_arma3_profile_action.clone() else {
             return;
@@ -246,18 +241,14 @@ impl Foxy {
                 });
             });
 
-        if confirmed {
-            // Re-read the (possibly edited) name from state before executing.
-            if let Some(action) = self.pending_arma3_profile_action.clone() {
-                self.execute_arma3_profile_action(&action);
-            }
+        if confirmed && let Some(action) = self.pending_arma3_profile_action.clone() {
+            self.execute_arma3_profile_action(&action);
         }
         if close_modal {
             self.pending_arma3_profile_action = None;
         }
     }
 
-    /// Validation message for a proposed profile name, or None when valid.
     fn arma3_profile_name_error(
         &self,
         action: &Arma3ProfileAction,
@@ -290,8 +281,7 @@ impl Foxy {
         }
     }
 
-    /// Directories that must never be renamed or deleted as a whole:
-    /// the vanilla profile roots and the configured custom profiles root.
+    /// Never rename or delete the vanilla or configured custom profile roots.
     fn arma3_profile_protected_roots(&self) -> Vec<PathBuf> {
         let mut roots = Vec::new();
         if let Some(documents) = dirs::document_dir() {

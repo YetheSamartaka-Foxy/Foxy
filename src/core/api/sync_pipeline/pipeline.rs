@@ -58,20 +58,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
-// Byte size is the main signal for useful overlapped hashing. The threshold is
-// kept large enough to avoid paying a DB persist cycle for every small
-// completion burst, but small enough that hashing starts overlapping the
-// download soon after the first mods finish rather than idling until a quarter
-// gigabyte has piled up.
+// Buffer completions to overlap hashing without persisting every small burst.
 const INCREMENTAL_HASH_MIN_FILES: usize = 32;
 const INCREMENTAL_HASH_MIN_BYTES: u64 = 128 * 1024 * 1024;
-/// A file at least this large is hashed as soon as its last range lands, while
-/// its bytes are still in the page cache. Waiting for a full batch on a
-/// rotational destination with a dozen large files in flight means the batch
-/// has been evicted by the time it is hashed and is read back from the platter.
+/// Hash large files as soon as they finish so rotational disks do not evict them before the batch.
 const INCREMENTAL_HASH_IMMEDIATE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Whether the pending incremental hash set should be flushed now.
 fn should_flush_incremental_hash_batch(
     pending_files: usize,
     pending_bytes: u64,
@@ -242,9 +234,7 @@ fn should_load_bootstrap_tree(
     !repo_already_complete && (!force_redownload || local_path_mismatch_guard_applies(mode))
 }
 
-/// A repository whose part rows were just staged as a fresh load has no hash
-/// state for the pending scope to narrow (every addon is pending), so its
-/// bootstrap takes the whole-tree pass, which inserts the parts during hashing.
+/// Fresh staged parts leave no hash state to narrow pending scope, so bootstrap must cover the whole tree.
 fn scopes_tree_bootstrap(
     builds_download_plan: bool,
     has_pending_scope: bool,
@@ -253,10 +243,7 @@ fn scopes_tree_bootstrap(
     builds_download_plan && has_pending_scope && !fresh_part_load
 }
 
-/// Addons a recheck without a download plan applies again from their
-/// manifests: those of the saved pending update, so stored metadata that
-/// disagrees with the server cannot keep the update pending through every
-/// recheck. A download plan forces its own quick-verify scope instead.
+/// Reapply saved pending-update manifests unless a prepared download queue narrows quick verification.
 pub(crate) fn recheck_reapplied_addons(saved_pending_mods: &[ModDiffSummary]) -> HashSet<String> {
     saved_pending_mods
         .iter()
@@ -265,24 +252,8 @@ pub(crate) fn recheck_reapplied_addons(saved_pending_mods: &[ModDiffSummary]) ->
         .collect()
 }
 
-/// True when this repository instance has file rows whose tree hash is missing
-/// (`local_checksum` NULL/empty) AND ZERO part rows (`subfiles`). This is a
-/// structurally broken state: the tree-hash rollup derives every file's
-/// `local_checksum` from its parts, so with no parts the checksums can never be
-/// filled and every quick scan falsely reports all addons as needing
-/// re-download - a loop a local-only `QuickCheckOnly` can never break (it has no
-/// parts to roll up and never fetches remote metadata to rebuild them). It
-/// arises when a metadata rebuild deferred the manifest parts but the flush
-/// never completed (an interrupted force-redownload, or the earlier
-/// deferral-flush gap).
-///
-/// The missing-tree-hash condition is what distinguishes this corruption from a
-/// legitimate whole-file manifest (which also has zero parts but whose files DO
-/// carry tree hashes - see `remote_state_complete_accepts_whole_file_manifest_without_parts`):
-/// without it we would needlessly re-escalate every healthy part-free repo on
-/// every quick check. Scoped to the (url, local_path) instance, so a healthy
-/// sibling sharing the same URL in a repository space is unaffected. On query
-/// error we return false (never escalate on a transient failure).
+/// Detects incomplete metadata after a deferred part flush. Requiring an
+/// unhashed file distinguishes it from valid whole-file manifests; query errors do not escalate.
 async fn repository_has_files_but_no_parts(db: &FoxyDb, repository_id: i64) -> bool {
     let has_unhashed_files = match db
         .query_all(
@@ -506,7 +477,6 @@ fn render_final_update_report(
     lines.join("\n")
 }
 
-/// Resolves once the user cancels the sync or the sender is dropped.
 async fn sync_cancel_requested(cancel_rx: &mut watch::Receiver<bool>) {
     loop {
         if *cancel_rx.borrow() {
@@ -611,8 +581,7 @@ async fn existing_download_targets_are_tiny(
     checked == file_ids.len()
 }
 
-/// Wait for the incremental hash worker to finish whatever batch it is in
-/// before a rollback: an abort would leave its persistence running detached.
+/// Join the incremental hash worker before rollback; abort would detach checksum persistence.
 async fn settle_incremental_hash_worker<T>(worker: tokio::task::JoinHandle<T>, reason: &str) {
     let started = std::time::Instant::now();
     match worker.await {
@@ -628,9 +597,7 @@ async fn settle_incremental_hash_worker<T>(worker: tokio::task::JoinHandle<T>, r
     }
 }
 
-/// A reverted file is back in its pre-download state, but the incremental
-/// hash may already have recorded the promoted bytes; drop that baseline so
-/// nothing later trusts a checksum the disk no longer carries.
+/// Rollback restores old bytes, so discard any baseline recorded from the promoted file.
 async fn forget_reverted_hashes(context: Arc<FoxyContext>, file_ids: &HashSet<u64>, reason: &str) {
     match invalidate_local_hash_baseline(context, file_ids).await {
         Ok(rows) => info!(
@@ -829,18 +796,8 @@ async fn reconcile_target_repository_local_checksum(
         .await
 }
 
-/// Decide whether the confirmation-prepared download queue can be reused for a
-/// `Download` run instead of re-running the full prepare pipeline (remote
-/// refresh, hash bootstrap, quick verify and queue rebuild).
-///
-/// Reuse is safe only when all of the following hold:
-/// - a genuine pending update is recorded for this instance (`remote_checksum`
-///   is non-empty and differs from `local_checksum`),
-/// - a confirmation preflight left a pending-update payload behind,
-/// - a prepared download queue already exists for this repository instance, and
-/// - fresh repository indexes match the prepared repository and addon versions.
-///
-/// Files invalidated by shared rollback must be covered by the queue.
+/// Reuse only a confirmed pending update with a prepared queue and matching repository/addon versions.
+/// Shared-rollback invalidations must be covered by that queue.
 async fn can_reuse_prepared_download_queue(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -850,19 +807,18 @@ async fn can_reuse_prepared_download_queue(
         Ok(repo) => repo,
         Err(_) => return false,
     };
-    // Cheap gate first so we only pay for the network probe when reuse is otherwise
-    // plausible: a genuine pending update must be recorded for this instance.
+
     if !pending_update_recorded(&repo.remote_checksum, &repo.local_checksum) {
         return false;
     }
-    // A confirmation preflight must have left a pending payload behind.
+
     if !matches!(
         fetch_pending_update_for_context(context.clone(), repo_url).await,
         Ok(Some(_))
     ) {
         return false;
     }
-    // ...and a prepared download queue for this repository instance.
+
     let (file_ids, _) = collect_repo_download_targets(context.clone(), repo_url, None).await;
     if file_ids.is_empty() {
         return false;
@@ -902,12 +858,8 @@ async fn prepared_queue_covers_unverified_files(
     )
 }
 
-/// Enabled addons whose verified files outside the download queue are missing
-/// or changed size on disk. The watcher marks a changed folder, but a change it
-/// missed (the watcher off or idle, a file deleted just before Update) would
-/// otherwise be skipped by a reused queue and by the verify scoped to pending
-/// addons, ending as an up-to-date repository with files missing. `None` when
-/// the check itself failed.
+/// Recheck enabled files outside the queue so missed deletions or size changes cannot appear current.
+/// None means the check failed.
 async fn addons_with_changed_kept_files(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -1024,16 +976,11 @@ async fn pending_remote_addon_scope(
         .collect()
 }
 
-/// Whether a genuine pending update is recorded for an instance: the remote
-/// checksum is known and differs from the verified local checksum.
 fn pending_update_recorded(remote_checksum: &str, local_checksum: &str) -> bool {
     let remote = remote_checksum.trim();
     !remote.is_empty() && !remote.eq_ignore_ascii_case(local_checksum.trim())
 }
 
-/// Pure reuse decision: the prepared queue is safe to reuse only when a genuine
-/// pending update is recorded AND a fresh `repo.json` probe shows the remote
-/// repository checksum is unchanged since the queue was built.
 fn prepared_queue_reuse_is_safe(
     stored_remote_checksum: &str,
     stored_local_checksum: &str,
@@ -1048,9 +995,6 @@ fn prepared_queue_reuse_is_safe(
     )
 }
 
-/// Load the confirmation-prepared pending-update diff (the exact queue the
-/// preflight emitted) so a reused download run can show and back up the same
-/// addons without recomputing them.
 async fn load_pending_update_mods(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -1110,7 +1054,7 @@ async fn run_repository_pipeline(
     let overall_start = std::time::Instant::now();
     crate::core::utils::profiling::phase("pre-download");
     ensure_logger();
-    // The hash pass logs the power state; take the slow first sample off its path.
+
     tokio::task::spawn_blocking(crate::core::utils::power::recent_sample);
     info!(
         "Starting sync: op={} mode={:?} repo={} path={}",
@@ -1119,8 +1063,6 @@ async fn run_repository_pipeline(
         sanitize_log_url(&repository_url),
         sanitize_log_path_str(&local_path)
     );
-    // DATABASE_URL is set once at startup in main.rs to avoid unsafe env::set_var
-    // race conditions in multi-threaded context.
 
     let mut stage = std::time::Instant::now();
 
@@ -1133,7 +1075,6 @@ async fn run_repository_pipeline(
         &operation_id,
     );
 
-    // Normalize remote URL once so all stages use the same key that matches DB storage (trailing slash)
     let normalized_repo_url =
         crate::core::models::repository::normalize_repository_url(&repository_url);
     let mut summary = PipelineSummary::new(
@@ -1149,7 +1090,6 @@ async fn run_repository_pipeline(
         overall_start,
     );
 
-    // Surface startup DB maintenance while context creation is blocked.
     if crate::core::tasks::db_turso::db_startup_compaction_active() {
         send_progress_event(
             &progress_tx,
@@ -1234,11 +1174,7 @@ async fn run_repository_pipeline(
     summary.push(StageEntry::new("create_context", stage.elapsed()));
     stage = std::time::Instant::now();
 
-    // `addons.enabled` is the scope signal every later DB-only read uses (quick
-    // scan readiness, the repository content-hash rollup, pending updates), and
-    // a metadata rebuild is skipped whenever the remote checksum is unchanged.
-    // Refresh it from the caller's durable selection so a deselected optional
-    // addon cannot keep the repository out of the quick scan fast path forever.
+    // Refresh durable `addons.enabled`; DB-only readiness and rollups use it even when remote metadata is unchanged.
     if let Some(selection) = persisted_addon_selection.as_ref() {
         let selection: HashMap<String, bool> = selection
             .iter()
@@ -1336,9 +1272,7 @@ async fn run_repository_pipeline(
     let mut download_mod_ids: HashSet<u64> = HashSet::new();
     let mut quick_update_mod_names: HashSet<String> = HashSet::new();
     let mut delta_plan_estimate_refreshed = false;
-    // The download-path mod diff. Normally produced by the post-remote quick
-    // verify; for a reused confirmation queue it is loaded from the prepared
-    // pending-update payload instead.
+
     let mut mods: Vec<ModDiffSummary> = Vec::new();
     let mut unexpected_by_mod: HashMap<String, Vec<String>> = HashMap::new();
     let mut cached_pending_scope =
@@ -1522,7 +1456,6 @@ async fn run_repository_pipeline(
             .is_some_and(|result| result.remote_ready);
         let mut offline_tree = None;
 
-        // Phase 1: Full remote metadata fetch
         emit_progress!(ProgressEvent::Stage {
             label: "Fetching repository metadata".into(),
             percent: 0.05,
@@ -1532,7 +1465,7 @@ async fn run_repository_pipeline(
             &normalized_repo_url,
             Some(&local_path),
             Some(&mod_enabled_overrides),
-            true, // force_refresh - always fetch remote for integrity recheck
+            true,
             hash_algorithm_preference,
         )
         .await;
@@ -1583,7 +1516,6 @@ async fn run_repository_pipeline(
         ));
         integrity_stage = std::time::Instant::now();
 
-        // Phase 1.5: Pre-propagate sibling checksums to avoid redundant hashing
         emit_progress!(ProgressEvent::Stage {
             label: "Pre-propagating sibling checksums".into(),
             percent: 0.15,
@@ -1595,7 +1527,6 @@ async fn run_repository_pipeline(
         ));
         integrity_stage = std::time::Instant::now();
 
-        // Phase 2: Full local hash recalculation
         emit_progress!(ProgressEvent::Stage {
             label: "Recalculating file hashes".into(),
             percent: 0.20,
@@ -1670,7 +1601,6 @@ async fn run_repository_pipeline(
             return;
         }
 
-        // Phase 3: Build update status
         emit_progress!(ProgressEvent::Stage {
             label: "Building update status".into(),
             percent: 0.85,
@@ -1682,8 +1612,8 @@ async fn run_repository_pipeline(
             Some(&mod_enabled_overrides),
             Some(&progress_tx),
             false,
-            true, // already_eligible: tree hashes + content baseline were just recalculated
-            true, // force_fresh_addon_hash: ensure addon content hash reflects current disk state
+            true,
+            true,
             None,
         )
         .await;
@@ -1785,7 +1715,6 @@ async fn run_repository_pipeline(
         return;
     }
 
-    // Produce mod-level diff (needs_update + size) scoped to the current repository only
     let emit_diff_overrides = mod_enabled_overrides.clone();
     let emit_diff = |tree: &Tree, mod_filter: Option<&HashSet<u64>>| -> Vec<ModDiffSummary> {
         let mut repo_mod_indices: Vec<usize> = tree
@@ -1888,11 +1817,7 @@ async fn run_repository_pipeline(
         mods
     };
 
-    // Ensure download queues are clean for this repository run. Ordinary
-    // check-only modes suppress target creation; confirmation preflight is the
-    // explicit exception and leaves its freshly rebuilt queue for review.
-    // When reusing a confirmation-prepared queue, this is exactly the queue we
-    // intend to execute, so it must NOT be truncated here.
+    // Preserve a confirmation-prepared queue for execution; truncate only check-only queues.
     if !reuse_prepared_queue {
         if let Err(e) = truncate_all_download_tables(context.clone()).await {
             warn!("Failed to clear download queue before sync: {}", e);
@@ -1900,8 +1825,6 @@ async fn run_repository_pipeline(
             info!("Cleared download queue before sync");
         }
     }
-
-    // Keep download path incremental: remote refresh + quick diff + targeted hash updates only.
 
     if *cancel_rx.borrow() {
         info!(
@@ -1912,7 +1835,6 @@ async fn run_repository_pipeline(
         return;
     }
 
-    // Reuse has already validated fresh repository and addon indexes.
     let mut remote_recheck_elapsed = None;
     let repo_metadata = if reuse_prepared_queue {
         None
@@ -1964,11 +1886,7 @@ async fn run_repository_pipeline(
             )
         };
 
-        // A++ (after_turso_regression_analysis7.md): on a force-redownload, let the
-        // per-mod part insert buffer its brand-new rows for one background INSERT
-        // overlapped with the download instead of writing the 66k rows inline on the
-        // critical path. The flag is an `Arc<AtomicBool>` shared across context
-        // clones, so the per-mod fan-out spawned inside `remote_repository` sees it.
+        // Defer fresh force-redownload part rows to the background insert; the per-mod fan-out reads this shared flag.
         let defer_remote_metadata_part_inserts =
             should_defer_remote_metadata_part_inserts(mode, force_redownload);
         info!(
@@ -2001,10 +1919,7 @@ async fn run_repository_pipeline(
         info!("Recheck finished in {:.2?}", recheck_elapsed);
         summary.push(StageEntry::new("remote_repository", stage.elapsed()));
         stage = std::time::Instant::now();
-        // Every `None` here is a real failure (manifest fetch, manifest parse,
-        // repository upsert, unset local path), never a benign no-op. Continuing
-        // would run the rest of the pipeline against a repository that has no
-        // rows, find nothing to update, and report the sync as clean.
+        // Treat every None as failure; continuing without repository rows could report a clean sync.
         let Some(repo_metadata) = repo_metadata else {
             let message = format!(
                 "Could not load remote repository metadata for {}; the sync cannot tell whether updates are pending",
@@ -2114,22 +2029,13 @@ async fn run_repository_pipeline(
         percent: 0.25,
     });
 
-    // When the repository is already complete (has linked addons, remote state,
-    // and non-empty checksums), we can skip the expensive Tree::load + hash
-    // bootstrap check and go straight to the quick scan with `already_eligible`.
-    // Reusing the prepared queue means the tree is already as initialized as the
-    // preflight left it; treat the repo as complete so the bootstrap pass is skipped.
+    // Complete repositories can skip tree-load/hash bootstrap; confirmation preflight already prepared the queue.
     let repo_already_complete = reuse_prepared_queue
         || repo_metadata
             .as_ref()
             .is_some_and(|m| m.repository_complete);
 
-    // Pre-propagate checksums from sibling repositories that share the same local
-    // file paths. This lets the hashing phase skip files that were already hashed
-    // by a previously-synced sibling, saving significant I/O and CPU time.
-    // Note: remote_repository() also calls pre-propagation for the first-sync case
-    // (empty checksums), but the metadata rebuild may have created new records since
-    // then. This call covers those; the early bail-out makes it cheap when redundant.
+    // Pre-propagate after metadata rebuild because it may add sibling-shared files since the first-sync pass.
     if !reuse_prepared_queue {
         emit_progress!(ProgressEvent::Stage {
             label: "Pre-propagating sibling checksums".into(),
@@ -2138,12 +2044,7 @@ async fn run_repository_pipeline(
         pre_propagate_sibling_checksums(context.clone(), &normalized_repo_url).await;
     }
 
-    // First run after fresh remote metadata can have empty local tree checksums.
-    // Initialize them once so subsequent quick checks can rely on persisted tree state.
-    // Load the tree once and reuse it for both the check and the hashing phase,
-    // avoiding redundant 622K-row subfiles queries.
-    // When the repo is already complete, skip this entirely - tree hashes are already
-    // initialized and the quick scan preflight would just confirm that.
+    // Initialize missing tree checksums once and reuse the loaded tree; complete repositories already have this state.
     let mut full_tree_hash_bootstrap = false;
     let mut targeted_tree_hash_init = false;
     let mut targeted_init_hashed_file_ids: HashSet<u64> = HashSet::new();
@@ -2205,13 +2106,7 @@ async fn run_repository_pipeline(
         summary.push(StageEntry::new("local_path_preflight", stage.elapsed()));
         stage = std::time::Instant::now();
         if force_redownload {
-            // a#7 Step 1 / §3: skip the local tree-hash baseline init on a
-            // force-redownload. Every file re-downloads unconditionally and
-            // `force_redownload_hash_invalidate` clears all local checksums, so any
-            // baseline we hash here is discarded and recomputed during the download.
-            // On a missing baseline (after a schema wipe or first sync over a
-            // pre-populated dir) this branch otherwise hashes all on-disk files
-            // (~13.5s on a 1500-file repository) purely to throw the result away.
+            // Force-redownload invalidates all local checksums, so a pre-download baseline would be discarded.
             info!(
                 "Skipping tree hash bootstrap for force-redownload repo={} (baseline discarded; rehashed during download)",
                 normalized_repo_url
@@ -2257,9 +2152,7 @@ async fn run_repository_pipeline(
                     emit_progress!(ProgressEvent::Cancelled);
                     return;
                 }
-                // Every addon row, not only the pending ones, so the content
-                // refresh can roll the repository baseline up; without it the
-                // next quick scan re-samples every file to rebuild it.
+                // Refresh every addon so the repository content baseline stays complete and quick scan does not resample files.
                 Tree::load_for_files(context.clone(), &normalized_repo_url, &file_ids)
                     .await
                     .ok()
@@ -2412,11 +2305,7 @@ async fn run_repository_pipeline(
         }
     }
 
-    // A rebuild that deferred its part rows relies on the hash bootstrap to
-    // persist them. Every path that skips hashing (repository already complete,
-    // nothing hashable on disk, no local files yet) would otherwise leave the
-    // manifest parts in memory only, and the next process would see files with
-    // no parts. The force-redownload path flushes them itself at download start.
+    // Persist deferred manifest parts even when hashing is skipped, or the next process sees files without parts.
     if !force_redownload
         && context.deferred_part_count() > 0
         && context.deferred_part_inserts_are_fresh_load()
@@ -2440,10 +2329,7 @@ async fn run_repository_pipeline(
         stage = std::time::Instant::now();
     }
 
-    // Refresh the content-hash baseline after a tree hash initialization so
-    // the quick scan finds it present. A targeted init refreshes the files it
-    // hashed plus any it skipped as sibling-synced without a baseline (and
-    // their addons); the one-time full baseline refreshes all.
+    // Refresh baselines after tree initialization so quick scan sees targeted and full initialization results.
     if targeted_tree_hash_init && !targeted_init_baseline_file_ids.is_empty() {
         let stage_started = std::time::Instant::now();
         match bootstrap_tree_for_content_hash.take() {
@@ -2523,7 +2409,7 @@ async fn run_repository_pipeline(
             Some(&mod_enabled_overrides),
             Some(&progress_tx),
             false,
-            true, // already_eligible: tree hashes + content baseline were just initialized
+            true,
             false,
             None,
             PreHashedFiles::All,
@@ -2598,22 +2484,11 @@ async fn run_repository_pipeline(
         return;
     }
 
-    // After remote metadata refresh creates/updates DB entries, run a local quick verification
-    // against disk so recheck reflects actual local state and avoids false redownload prompts.
     let quick_post_remote_start = std::time::Instant::now();
-    // Reusing the prepared queue keeps the prepared `mods` payload; re-running the
-    // quick verify here would re-hash and overwrite it for no benefit.
+    // Reuse the prepared queue and its mods payload; quick verification would overwrite it unnecessarily.
     if !reuse_prepared_queue {
         if force_redownload {
-            // a#7 Step 3b: on a force-redownload the verdict is trivially "everything
-            // updates" and the actual queue is driven by `download_target_file` (built
-            // in remote_repository), not by this diff. The `mods` payload here is only
-            // cosmetic (UI diff + pending_updates) and is overwritten from the hashed
-            // tree post-download. So skip the local-disk hashing + `subfiles` tree read
-            // (the last pre-download `subfiles` reader, ~5.8s of wasted work) and
-            // synthesize the payload directly from the freshly persisted download
-            // targets. This also removes the only pre-download dependency on persisted
-            // parts, which is what lets the part insert be deferred (A++).
+            // Force-redownload targets come from the prepared queue; avoiding a pre-download tree read permits deferred part inserts.
             match fetch_all_download_targets_with_mod_and_name(context.clone()).await {
                 Ok(targets) => {
                     mods = build_download_estimate_diffs(&targets);
@@ -2656,7 +2531,7 @@ async fn run_repository_pipeline(
                 Some(&mod_enabled_overrides),
                 Some(&progress_tx),
                 !builds_download_plan,
-                targeted_tree_hash_init || repo_already_complete, // skip bootstrap if tree is initialized or repo is already complete
+                targeted_tree_hash_init || repo_already_complete,
                 false,
                 None,
                 pre_hashed,
@@ -2716,11 +2591,7 @@ async fn run_repository_pipeline(
         post_remote_elapsed, has_pending_updates
     );
 
-    // Reconcile stale repo-level checksum: when the quick scan confirms all addons
-    // are up-to-date, ensure the repository's local_checksum equals remote_checksum.
-    // This can drift when hash recomputation updates file/mod checksums but does not
-    // roll up to the repository level, causing the fast-path early exit to miss on
-    // every subsequent startup.
+    // Reconcile repository checksums so a clean quick scan can take the fast path on later startups.
     if !has_pending_updates {
         match reconcile_target_repository_local_checksum(context.clone(), &normalized_repo_url)
             .await
@@ -2779,11 +2650,7 @@ async fn run_repository_pipeline(
             }
         }
 
-        // Path/layout guards and the patch-plan queue rebuild already ran during
-        // the confirmation preflight; reusing its queue skips them. A force
-        // redownload must still rebuild the queue even when quick verify found no
-        // pending updates, so only the guards stay scoped to non-empty pending
-        // mods.
+        // Reuse preflight guards, but rebuild the queue for force-redownload even when quick verification found no pending updates.
         if !reuse_prepared_queue && (force_redownload || !pending_mod_names.is_empty()) {
             stage = std::time::Instant::now();
             if !pending_mod_names.is_empty()
@@ -2810,10 +2677,7 @@ async fn run_repository_pipeline(
                         missing_summary.missing_addons,
                         samples
                     );
-                    // In-depth on-disk layout snapshot before a download that
-                    // would (re)fetch whole addons, so the actual paths/contents
-                    // are captured whether the redownload proceeds or is blocked
-                    // by the suspect guard below.
+
                     log_addon_path_disk_state(
                         &normalized_repo_url,
                         &local_path,
@@ -2842,14 +2706,7 @@ async fn run_repository_pipeline(
                     return;
                 }
 
-                // Layout/path-mismatch guard: every enabled addon folder is
-                // present (none counted missing above), but if their expected
-                // files do not resolve while real content sits on disk, then
-                // "downloading the missing files" would be a near-full
-                // redownload of content the user already has. Probe only when no
-                // addon dir is missing, so a genuine fresh download into empty
-                // folders is never penalised, and let an explicit force bypass
-                // it.
+                // Block layout-mismatch redownloads only when enabled addon folders exist; force-redownload bypasses the guard.
                 if !allow_suspect_full_redownload
                     && missing_summary.missing_addons == 0
                     && let Ok(tree) = Tree::load_for_mod_names(
@@ -2902,16 +2759,7 @@ async fn run_repository_pipeline(
             summary.push(StageEntry::new("download_target_collect", stage.elapsed()));
             stage = std::time::Instant::now();
             let rebuilt_files = if force_redownload {
-                // a#6 Step 3 / P2: on a force-redownload the local files are deleted, so
-                // there are no patch sources and patch planning is a no-op (every measured
-                // run shows planned_patches=0). The part metadata and the
-                // `download_target_file` rows were already (re)built during
-                // `remote_repository`; `refresh_patch_plan_metadata_for_pending_updates`
-                // here only re-reads all ~66k `subfiles` rows and re-runs
-                // `remote_file_parts_batch` over them to produce identical data - pure
-                // redundant work on the critical path (~5s). Skip it. The download queue is
-                // rebuilt independently below from the existing download targets via
-                // `collect_repo_download_targets`.
+                // Force-redownload has no patch sources; reuse its prepared targets instead of rereading parts to rebuild identical plans.
                 0
             } else if existing_download_targets_are_tiny(context.clone(), &existing_targets).await {
                 info!(
@@ -2954,8 +2802,7 @@ async fn run_repository_pipeline(
                 .with("mods", download_mod_ids.len()),
         );
         stage = std::time::Instant::now();
-        // A reused queue may still list files a cancelled run already finished
-        // and hashed; the incremental hash pass left their checksums verified.
+
         if reuse_prepared_queue && !download_file_ids.is_empty() {
             match prune_verified_download_targets(context.clone(), &download_file_ids).await {
                 Ok(pruned) if !pruned.is_empty() => {
@@ -2975,9 +2822,6 @@ async fn run_repository_pipeline(
                     );
                     stage = std::time::Instant::now();
                     if download_file_ids.is_empty() {
-                        // Everything queued was already finished: let the quick
-                        // verify settle the repository state instead of failing
-                        // on an empty queue.
                         mods = quick_local_change_diff(
                             context.clone(),
                             &normalized_repo_url,
@@ -3099,7 +2943,6 @@ async fn run_repository_pipeline(
             }
         }
 
-        // Queue may still contain stale targets when quick verification proves files are already valid.
         if !force_redownload && !mods.iter().any(|m| m.needs_update) {
             if let Err(err) = truncate_all_download_tables(context.clone()).await {
                 warn!(
@@ -3247,7 +3090,6 @@ async fn run_repository_pipeline(
     };
     context.pin_hash_targets(write_targets.clone());
 
-    // Download files
     let mut shared_version_advisory = false;
     match shared_conflicts::check_shared_version_conflicts(
         context.clone(),
@@ -3385,11 +3227,7 @@ async fn run_repository_pipeline(
             estimated_download_bytes
         );
     }
-    // A++ (after_turso_regression_analysis7.md): on a force-redownload the part
-    // insert was deferred (buffered by the per-mod batch), so kick it off now as one
-    // background transaction overlapped with the download. The incremental hash worker
-    // awaits this handle before its first tree load, so the rows are guaranteed present
-    // by the time any reader needs them. No-op when nothing was deferred.
+    // Flush deferred parts during download; the hash worker waits for completion before its first tree load.
     let deferred_part_insert_handle: Option<tokio::task::JoinHandle<bool>> = if force_redownload
         && context.should_defer_part_inserts()
     {
@@ -3402,10 +3240,7 @@ async fn run_repository_pipeline(
     } else {
         None
     };
-    // The worker blocks on the deferred insert (~22s) before its first tree load, so
-    // the channel must hold the completions that arrive during that window without
-    // spilling them to the (post-download) final hash stage. 2048 comfortably covers
-    // the ~10% of files that finish in the first ~22s of a multi-minute download.
+    // Buffer completions while the hash worker waits for the deferred insert, avoiding spill into the final hash stage.
     let mod_completion_channel_bound = if deferred_part_insert_handle.is_some() {
         2048
     } else {
@@ -3416,20 +3251,14 @@ async fn run_repository_pipeline(
     let incremental_hash_context = context.clone();
     let incremental_hash_repo_url = normalized_repo_url.clone();
     let incremental_hash_progress = progress_tx.clone();
-    // Shared origin for every telemetry lane on the speed graph. The download
-    // worker sets it once real transfer begins (after pre-download validation);
-    // the hash lanes read it so they sit on the same timeline as the download
-    // lane instead of trailing it by the remote-refresh/prep gap. Falls back to
-    // `overall_start` only if a hash sample somehow precedes the download start.
+    // Share the download start time across telemetry lanes so hash and download progress use one timeline.
     let telemetry_epoch: Arc<std::sync::OnceLock<std::time::Instant>> =
         Arc::new(std::sync::OnceLock::new());
     let incremental_hash_started_at = overall_start;
     let hash_telemetry_epoch = telemetry_epoch.clone();
     let incremental_hash_cancel = cancel_rx.clone();
     let incremental_hash_worker = tokio::spawn(async move {
-        // A++: ensure the deferred part insert has completed before the first tree
-        // load (the only `subfiles` reader on the force path). Completions that arrive
-        // during this wait buffer in the widened channel rather than spilling.
+        // Complete the deferred insert before the first tree load; buffer completions during the wait.
         if let Some(handle) = deferred_part_insert_handle {
             match handle.await {
                 Ok(true) => {}
@@ -3564,10 +3393,7 @@ async fn run_repository_pipeline(
                         .as_millis() as u64,
                     files_per_sec: hashed_files as f64 / batch_elapsed.as_secs_f64(),
                 });
-                // Surface the running incremental hash total so the in-progress
-                // download summary shows a live "Cumulative hash" value instead of
-                // 0ms until the final summary lands. After-download hashing has not
-                // started yet, so its share is still zero here.
+
                 let _ = incremental_hash_progress.send(ProgressEvent::HashSummary {
                     cumulative_hash_ms: hash_duration.as_millis() as u64,
                     after_download_hash_ms: 0,
@@ -3693,9 +3519,7 @@ async fn run_repository_pipeline(
     };
 
     if cancelled_during_download || *cancel_rx.borrow() {
-        // Join rather than abort: a batch in flight persists its checksums
-        // from tasks an abort would not reach, and the rollback below must
-        // run after the last of them.
+        // Join in-flight batches before rollback because they can persist checksums after an abort.
         settle_incremental_hash_worker(incremental_hash_worker, "cancel").await;
         info!(
             "Sync cancelled after download phase for repo={}",
@@ -3875,7 +3699,6 @@ async fn run_repository_pipeline(
         return;
     }
 
-    // Recalculate hashes
     crate::core::utils::profiling::phase("hash");
     let hash_start = std::time::Instant::now();
     emit_progress!(ProgressEvent::Stage {
@@ -4138,7 +3961,7 @@ async fn run_repository_pipeline(
                 detail: Some(detail),
             });
     }
-    // Emit a fresh diff after hashes so UI can update downloaded states immediately
+
     if download_file_ids.is_empty() {
         let cleaned = quick_local_change_diff(
             context.clone(),
@@ -4582,7 +4405,7 @@ mod tests {
     async fn part_less_repository_detection_is_scoped_to_repository_instance() {
         let db = crate::core::tasks::db_turso::build_test_database().await;
         let fdb = FoxyDb::from_turso(db.clone());
-        // Two repository instances of the same URL in different folders.
+
         fdb.execute(
             "INSERT INTO repositories (id, name, remote_url, local_path) VALUES \
                  (1, 'Healthy', 'https://example.invalid/repo/', 'C:/space'), \
@@ -4599,8 +4422,7 @@ mod tests {
         )
         .await
         .expect("insert addons");
-        // file 100/200 have NULL tree hash; file 300 carries a tree hash (a
-        // legitimate whole-file manifest entry).
+
         fdb.execute(
             "INSERT INTO files (id, name, remote_path, local_path, local_checksum) VALUES \
                  (100, 'f1', 'frp1', 'flp1', ''), (200, 'f2', 'frp2', 'flp2', ''), \
@@ -4621,8 +4443,7 @@ mod tests {
         )
         .await
         .expect("insert addon_files");
-        // Only the healthy instance (repo 1) has a part row; the standalone
-        // instance (repo 2) has unhashed files but zero parts.
+
         fdb.execute(
             "INSERT INTO subfiles (file_id, path, remote_length, remote_start, remote_checksum, data_order) \
                  VALUES (100, 'p1', 1, 0, 'c1', 0)",
@@ -4656,19 +4477,18 @@ mod tests {
         )
         .await
         .expect("insert repository");
-        // No addons/files linked: an empty repo is not the part-less corruption.
+
         assert!(!repository_has_files_but_no_parts(&fdb, 1).await);
     }
 
     #[test]
     fn pending_update_recorded_requires_known_differing_remote() {
-        // No remote checksum known yet → not a recorded pending update.
         assert!(!pending_update_recorded("", "LOCAL"));
         assert!(!pending_update_recorded("   ", "LOCAL"));
-        // Remote equals local (case/whitespace-insensitive) → already up to date.
+
         assert!(!pending_update_recorded("ABC", "abc"));
         assert!(!pending_update_recorded(" ABC ", "abc"));
-        // Remote differs from local → genuine pending update.
+
         assert!(pending_update_recorded("ABC", "DEF"));
         assert!(pending_update_recorded("ABC", ""));
     }
@@ -4730,24 +4550,23 @@ mod tests {
 
     #[test]
     fn prepared_queue_reuse_requires_pending_update_and_unchanged_remote() {
-        // No pending update → never reuse, regardless of probe.
         assert!(!prepared_queue_reuse_is_safe("ABC", "ABC", Some("ABC")));
         assert!(!prepared_queue_reuse_is_safe("", "", Some("")));
-        // Pending update but the probe could not be obtained → do not reuse.
+
         assert!(!prepared_queue_reuse_is_safe("REMOTE", "LOCAL", None));
-        // Pending update but the remote changed since the queue was built → rebuild.
+
         assert!(!prepared_queue_reuse_is_safe(
             "REMOTE",
             "LOCAL",
             Some("REMOTE_NEW")
         ));
-        // Pending update and the probe matches the stored remote → safe to reuse.
+
         assert!(prepared_queue_reuse_is_safe(
             "REMOTE",
             "LOCAL",
             Some("REMOTE")
         ));
-        // Match is case- and whitespace-insensitive like the rest of the gate.
+
         assert!(prepared_queue_reuse_is_safe(
             "REMOTE",
             "LOCAL",
@@ -4870,7 +4689,7 @@ mod tests {
             4 * 1024 * 1024,
             false
         ));
-        // A patched file brings its own checksums; nothing to read while warm.
+
         assert!(!should_flush_incremental_hash_batch(
             1,
             64 * 1024 * 1024,
@@ -5105,8 +4924,6 @@ mod tests {
         ));
     }
 
-    // ── local_path_mismatch_guard_applies ───────────────────────────────
-
     #[test]
     fn suspect_guard_allows_empty_root_as_fresh_download_destination() {
         let summary = MissingAddonPathSummary {
@@ -5137,8 +4954,6 @@ mod tests {
             SyncMode::RecheckIntegrity
         ));
     }
-
-    // ── format_suspect_full_redownload_message ──────────────────────────
 
     #[test]
     fn format_suspect_message_includes_missing_counts() {
@@ -5178,8 +4993,6 @@ mod tests {
         assert!(message.contains("@ace"));
     }
 
-    // ── AutoRebenchmarkSchedule edges ───────────────────────────────────
-
     #[test]
     fn auto_rebenchmark_schedule_zero_total_is_none() {
         assert!(AutoRebenchmarkSchedule::new(0).is_none());
@@ -5191,7 +5004,6 @@ mod tests {
         assert_eq!(schedule.threshold_for_percent(10), 100);
         assert_eq!(schedule.threshold_for_percent(25), 250);
 
-        // Tiny totals still produce a threshold of at least one byte.
         let tiny = AutoRebenchmarkSchedule::new(5).unwrap();
         assert_eq!(tiny.threshold_for_percent(10), 1);
     }
@@ -5199,12 +5011,10 @@ mod tests {
     #[test]
     fn auto_rebenchmark_advance_past_skips_multiple_milestones() {
         let mut schedule = AutoRebenchmarkSchedule::new(1_000).unwrap();
-        // Jumping straight past 30% should leave 40% as the next milestone.
+
         assert_eq!(schedule.take_crossed_milestone(350).unwrap().percent, 10);
         assert_eq!(schedule.next_milestone().unwrap().percent, 40);
     }
-
-    // ── suspect ratio boundaries ────────────────────────────────────────
 
     #[test]
     fn missing_addon_ratio_below_ninety_percent_is_not_suspect() {
@@ -5243,7 +5053,7 @@ mod tests {
             empty_repo_root: false,
             sample_paths: Vec::new(),
         };
-        // Would be suspect, but the explicit force-redownload override disables it.
+
         assert!(suspect_full_redownload_guard_applies(
             &summary, true, false, false
         ));

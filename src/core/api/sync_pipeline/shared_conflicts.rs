@@ -286,8 +286,6 @@ fn classify_conflicts(
     result
 }
 
-/// Check the requested update's physical file targets against other repository
-/// instances. Known overlapping instances are refreshed before the decision.
 pub(crate) async fn check_shared_version_conflicts(
     context: Arc<FoxyContext>,
     repo_url: &str,

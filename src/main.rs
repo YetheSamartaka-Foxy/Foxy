@@ -24,16 +24,13 @@ unsafe extern "C" {
     fn mi_option_get(option: std::ffi::c_int) -> std::ffi::c_long;
 }
 
-/// Commit allocator pages as they are touched rather than whole, so the many
-/// hashing threads do not each hold committed memory they never use. A value
-/// set in the environment still wins.
+/// Commit pages on demand so hashing threads do not reserve unused memory; explicit allocator environment settings win.
 fn configure_allocator() {
     if std::env::var_os("MIMALLOC_PAGE_COMMIT_ON_DEMAND").is_none() {
         unsafe { mi_option_set(MI_OPTION_PAGE_COMMIT_ON_DEMAND, 1) };
     }
 }
 
-// TODO: @YetheSamartaka Temporary fix for console not showing up on Windows.
 #[cfg(target_os = "windows")]
 fn attach_console() {
     use std::fs::File;
@@ -47,7 +44,6 @@ fn attach_console() {
             AllocConsole();
         }
 
-        // redirect stdout
         if let Err(e) = File::create("CONOUT$") {
             eprintln!("WARNING: Failed to redirect console output: {}", e);
         }
@@ -216,13 +212,11 @@ fn register_linux_desktop_entry() {
 
     log::info!("Desktop entry registered: {}", desktop_path.display());
 
-    // Update desktop database if available
     let _ = Command::new("update-desktop-database")
         .arg(&desktop_dir)
         .status();
 }
 
-// TODO: Rewrite:
 mod core;
 
 #[allow(dead_code)]
@@ -257,13 +251,7 @@ fn install_panic_hook() {
     });
 }
 
-/// Log native exceptions (access violations, illegal instructions) that no
-/// panic hook sees before Windows terminates the process.
-///
-/// The filter only reads the exception record and writes one log line, then
-/// returns `EXCEPTION_CONTINUE_SEARCH` so the default crash handling still
-/// runs. That single line is what tells a graphics-driver crash apart from
-/// "nothing happened".
+/// Native faults bypass panic hooks; record the exception before continuing Windows' default crash handling.
 #[cfg(target_os = "windows")]
 fn install_native_crash_handler() {
     use winapi::um::errhandlingapi::SetUnhandledExceptionFilter;
@@ -294,8 +282,7 @@ fn install_native_crash_handler() {
     }
 }
 
-/// File name of the module containing `address`, without its directory so a
-/// user's install path never reaches the log.
+/// Omit the module directory so crash diagnostics cannot expose installation paths.
 #[cfg(target_os = "windows")]
 fn native_crash_module_name(address: usize) -> Option<String> {
     use winapi::shared::minwindef::HMODULE;
@@ -351,6 +338,20 @@ fn mark_wgpu_panic_for_next_launch(message: &str) {
 }
 
 fn main() {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let arguments: Vec<String> = std::env::args().collect();
+        if let Some(code) = cli::cleanup_witness_entry(&arguments) {
+            std::process::exit(code);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let arguments: Vec<String> = std::env::args().collect();
+        if let Some(code) = cli::console_signal_entry(&arguments) {
+            std::process::exit(code);
+        }
+    }
     configure_allocator();
     install_panic_hook();
     #[cfg(target_os = "windows")]
@@ -361,7 +362,7 @@ fn main() {
     let no_args = raw_args.len() <= 1;
 
     if no_args && (cfg!(debug_assertions) || !launched_from_terminal) {
-        launch_ui(false, default_no_arg_agent_gui_config(), Vec::new());
+        launch_ui(false, default_no_arg_agent_gui_config(), Vec::new(), None);
         return;
     }
 
@@ -372,18 +373,23 @@ fn main() {
                 .get(1)
                 .map(|arg| !arg.eq_ignore_ascii_case("ui"))
                 .unwrap_or(true);
-        if (launched_from_terminal && likely_cli) || cfg!(debug_assertions) {
+        let hidden_owner = raw_args.iter().any(|arg| arg == "--parent-bound")
+            && raw_args
+                .windows(2)
+                .any(|args| args == ["server", "supervise"]);
+        if !hidden_owner && ((launched_from_terminal && likely_cli) || cfg!(debug_assertions)) {
             attach_console();
         }
     }
 
     match cli::run_from_env() {
         cli::CliExecution::RunUi {
+            mode_override,
             debug_mode,
             agent_gui,
             debug_modals,
         } => {
-            launch_ui(debug_mode, agent_gui, debug_modals);
+            launch_ui(debug_mode, agent_gui, debug_modals, mode_override);
         }
         cli::CliExecution::Exit(code) => {
             std::process::exit(code);
@@ -409,6 +415,7 @@ fn launch_ui(
     debug_mode: bool,
     agent_gui: AgentGuiLaunchConfig,
     debug_modals: Vec<ui::app::debug_modals::DebugModal>,
+    mode_override: Option<core::app_mode::AppMode>,
 ) {
     let ownership = core::tasks::config_process_lock::acquire_for_config_root();
     let refusal = match ownership {
@@ -440,16 +447,12 @@ fn launch_ui(
     }
     core::api::ensure_logger_with_terminal();
 
-    // Agent GUI (driver/test) sessions must not mutate the user's desktop
-    // environment: skip Start Menu / .desktop registration so a throwaway dev
-    // build launched with `ui --agent-gui` never repoints the real shortcut.
+    // Agent GUI sessions must not repoint real desktop shortcuts to throwaway builds.
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     let skip_desktop_integration = agent_gui.enabled;
 
     #[cfg(target_os = "windows")]
     {
-        // Skip Start Menu shortcut registration if installed via the Inno Setup installer
-        // (the installer handles shortcuts). Detect by checking for unins000.exe next to the binary.
         let installed_via_installer = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|p| p.join("unins000.exe").exists()))
@@ -461,8 +464,6 @@ fn launch_ui(
 
     #[cfg(target_os = "linux")]
     {
-        // Register .desktop entry if not installed via the .sh installer.
-        // Detect by checking for a marker file left by the installer.
         let installed_via_installer = std::env::current_exe()
             .ok()
             .and_then(|exe| {
@@ -517,7 +518,7 @@ fn launch_ui(
         eprintln!("{error}");
         return;
     }
-    ui::window::main(debug_mode, agent_gui, debug_modals);
+    ui::window::main(debug_mode, agent_gui, debug_modals, mode_override);
 }
 
 #[cfg(test)]

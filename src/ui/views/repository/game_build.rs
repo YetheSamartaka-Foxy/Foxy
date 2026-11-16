@@ -4,8 +4,6 @@ use eframe::egui::{RichText, Ui};
 use log::warn;
 
 impl Foxy {
-    /// The game a custom game repository delivers, shown in place of an addon
-    /// row so the build reads as the game itself.
     pub(super) fn render_repository_game_build_section(
         &mut self,
         ui: &mut Ui,

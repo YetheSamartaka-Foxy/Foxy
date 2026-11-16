@@ -48,8 +48,6 @@ pub fn command_exists(command: &str) -> bool {
     command_in_path(command).is_some()
 }
 
-/// A regular file this process may execute. On Unix, spawning a directory or a
-/// file without an execute bit fails with `EACCES`, not `ENOENT`.
 pub fn is_executable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {

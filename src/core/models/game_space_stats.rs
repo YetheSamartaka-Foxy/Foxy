@@ -2,18 +2,14 @@ use crate::core::db::{DbErr, DbValue, FoxyDb, params};
 use crate::core::models::repository::normalize_repository_local_path_identity;
 use crate::core::tasks::init_database::init_database;
 
-/// Aggregate over a set of repository instances. Addons and files are counted
-/// once per local path, so repositories that share a download folder (a
-/// repository space) do not double count the mods they have in common.
+/// Count shared addon/file paths once across repository instances so repository spaces do not double-count content.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AddonGroupStats {
-    /// Instances from the requested set that have a database row.
     pub matched_repositories: u64,
     pub unique_addons: u64,
     pub total_bytes: u64,
 }
 
-/// Aggregate stats for the `(remote_url, local_path)` instances in `members`.
 pub async fn addon_group_stats(members: &[(String, String)]) -> Result<AddonGroupStats, DbErr> {
     let db = FoxyDb::from_handle(init_database().await);
     addon_group_stats_in(&db, members).await
@@ -98,8 +94,6 @@ mod tests {
     use super::*;
     use crate::core::tasks::db_turso::build_test_database;
 
-    /// Two repositories in one shared folder ("space") that both carry `@a`,
-    /// plus a standalone repository with its own `@b`.
     async fn seeded_db() -> FoxyDb {
         let db = FoxyDb::from_turso(build_test_database().await);
         db.execute(

@@ -1,8 +1,3 @@
-//! CPU time per thread, grouped by thread name, so a long operation can say
-//! which threads its CPU went to. The breakdown is Windows only; elsewhere
-//! every snapshot is empty and it says nothing. The calling thread's and the
-//! whole process's CPU time are read on Windows, Linux and macOS.
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -27,12 +22,10 @@ impl CpuTime {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ThreadCpuSnapshot {
-    /// Thread id to its name and CPU time so far.
     threads: HashMap<u32, (String, CpuTime)>,
     process: CpuTime,
 }
 
-/// One named group of threads in a [`breakdown`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ThreadGroupCpu {
     pub(crate) name: String,
@@ -81,7 +74,6 @@ pub(crate) fn breakdown(
     (groups, unaccounted)
 }
 
-/// `name=user+kernel/threads` for each group, then the exited remainder.
 pub(crate) fn describe(groups: &[ThreadGroupCpu], unaccounted: CpuTime) -> String {
     let mut parts: Vec<String> = groups
         .iter()
@@ -143,10 +135,8 @@ pub(crate) fn snapshot() -> ThreadCpuSnapshot {
     snapshot
 }
 
-/// Visits this process's threads with `NtGetNextThread`, which walks only
-/// them; a Toolhelp snapshot lists every thread on the machine, tens of
-/// thousands on a busy desktop and about 80 ms per walk. False when ntdll
-/// lacks the export or refuses the first step.
+/// NtGetNextThread limits sampling to this process; Toolhelp would enumerate all machine threads.
+/// Unavailable or denied enumeration returns false.
 #[cfg(windows)]
 fn visit_own_threads(visit: &mut dyn FnMut(u32, winapi::um::winnt::HANDLE)) -> bool {
     use std::sync::OnceLock;
@@ -233,7 +223,6 @@ pub(crate) fn snapshot() -> ThreadCpuSnapshot {
     ThreadCpuSnapshot::default()
 }
 
-/// User plus kernel CPU the calling thread has used.
 #[cfg(windows)]
 pub(crate) fn current_thread_cpu() -> Option<Duration> {
     use winapi::shared::minwindef::FILETIME;
@@ -259,7 +248,6 @@ pub(crate) fn current_thread_cpu() -> Option<Duration> {
     None
 }
 
-/// User plus kernel CPU the whole process has used.
 #[cfg(windows)]
 pub(crate) fn process_cpu() -> Option<Duration> {
     use winapi::shared::minwindef::FILETIME;
@@ -287,7 +275,6 @@ pub(crate) fn process_cpu() -> Option<Duration> {
 
 #[cfg(unix)]
 fn clock_cpu(clock: libc::clockid_t) -> Option<Duration> {
-    // Zeroed rather than a literal: some targets pad `timespec` with private fields.
     let mut time: libc::timespec = unsafe { std::mem::zeroed() };
     if unsafe { libc::clock_gettime(clock, &mut time) } != 0 {
         return None;
@@ -298,8 +285,6 @@ fn clock_cpu(clock: libc::clockid_t) -> Option<Duration> {
     ))
 }
 
-/// The thread's description, looked up at runtime because it only exists on
-/// Windows 10 1607 and later.
 #[cfg(windows)]
 fn thread_name(thread: *mut std::ffi::c_void) -> String {
     use std::sync::OnceLock;

@@ -1,11 +1,6 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-rem Builds the Foxy Windows installer using the same layout as the GitHub workflow.
-rem Requirements:
-rem   - Rust toolchain with x86_64-pc-windows-msvc target
-rem   - Inno Setup 6.7 or later, compiler (iscc.exe) available in PATH
-
 pushd "%~dp0\.." || exit /b 1
 
 where cargo >nul 2>nul

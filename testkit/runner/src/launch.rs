@@ -137,10 +137,7 @@ pub fn process(command: &mut Command, timeout: Duration) -> Result<Output> {
     tracked_process(command, timeout, None)
 }
 
-/// Run a command to completion, optionally publishing its pid so a memory watch
-/// can follow it. The CLI harness measures a `Foxy.exe` invocation rather than a
-/// live window, so without this the database lane - where the largest reads
-/// happen - would record no footprint at all.
+/// Publish the CLI child's PID so memory sampling covers database work outside a persistent GUI process.
 pub fn tracked_process(
     command: &mut Command,
     timeout: Duration,

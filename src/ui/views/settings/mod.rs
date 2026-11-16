@@ -1,5 +1,6 @@
 mod app_backup;
 mod app_general;
+mod app_mode;
 mod app_paths;
 mod app_proxy;
 mod app_resources;
@@ -71,7 +72,7 @@ impl Foxy {
 
                 // Game-space specific settings (game paths, search folders,
                 // TS3 plugins) live in the game space settings view.
-                let tabs = [
+                let client_tabs = [
                     "Application",
                     "Benchmarks",
                     "Cleanup",
@@ -80,11 +81,20 @@ impl Foxy {
                     "Scheduling",
                     "Customization",
                 ];
+                let server_tabs = ["Application", "Customization"];
+                let tabs: &[&str] = if self.client_db_admission.allows() {
+                    &client_tabs
+                } else {
+                    &server_tabs
+                };
+                if !tabs.contains(&self.settings_view_state.current_tab.as_str()) {
+                    self.settings_view_state.current_tab = "Application".into();
+                }
                 let selected = tabs
                     .iter()
                     .position(|t| *t == self.settings_view_state.current_tab.as_str())
                     .unwrap_or(0);
-                if let Some(idx) = self.render_adaptive_tab_bar(ui, &tabs, selected) {
+                if let Some(idx) = self.render_adaptive_tab_bar(ui, tabs, selected) {
                     self.settings_view_state.current_tab = tabs[idx].to_string();
                     info!("Switched settings tab to {}", tabs[idx]);
                 }
@@ -200,8 +210,6 @@ fn render_palette_color_picker(
             |ui| {
                 ui.label(label);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // Small gap so the color button doesn't sit flush against the
-                    // card's right border.
                     ui.add_space(3.0);
                     let mut color = value.to_color32();
                     let response = ui.color_edit_button_srgba(&mut color);

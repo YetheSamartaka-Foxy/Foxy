@@ -11,9 +11,7 @@ pub(super) fn download_progress_percent(done: usize, total: usize) -> f32 {
     stage_percent_from_fraction(done as f32 / total as f32)
 }
 
-/// Overall download-stage percent weighted by bytes, not file count: small
-/// files finish first, so a file-count bar parks near its end while the
-/// large files still carry most of the transfer.
+/// Weight progress by bytes because a few large files dominate remaining work.
 pub(super) fn download_progress_percent_by_bytes(
     files_done: usize,
     total_files: usize,
@@ -27,7 +25,6 @@ pub(super) fn download_progress_percent_by_bytes(
 }
 
 fn stage_percent_from_fraction(fraction: f32) -> f32 {
-    // Map download progress into 0.25..0.85 range (recheck done at 0.25)
     let base = 0.25_f32;
     let span = 0.60_f32;
     (base + span * fraction.clamp(0.0, 1.0)).min(0.85)
@@ -88,7 +85,7 @@ pub(super) fn start_progress_ticker(
             }
             sleep(Duration::from_millis(100)).await;
         }
-        // One last update on exit
+
         let done = completed.load(Ordering::SeqCst);
         send_progress_event(
             &tx,
@@ -106,8 +103,6 @@ pub(super) fn start_progress_ticker(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── download_progress_percent ───────────────────────────────────────
 
     #[test]
     fn progress_percent_zero_total_returns_one() {
@@ -129,15 +124,12 @@ mod tests {
     #[test]
     fn progress_percent_half_done() {
         let pct = download_progress_percent(50, 100);
-        // 0.25 + 0.60 * 0.5 = 0.55
+
         assert!((pct - 0.55).abs() < 0.001);
     }
 
-    // ── download_progress_percent_by_bytes ──────────────────────────────
-
     #[test]
     fn progress_by_bytes_ignores_many_small_finished_files() {
-        // 1532 of 1719 files done, but only 0.44 of 24 GB transferred.
         let pct = download_progress_percent_by_bytes(1532, 1719, 440_000_000, 24_000_000_000);
         assert!(pct < 0.27, "pct={pct}");
         assert!(pct > 0.25, "pct={pct}");
@@ -151,7 +143,6 @@ mod tests {
 
     #[test]
     fn progress_by_bytes_all_files_done_reaches_cap() {
-        // Files that complete without network bytes still finish the stage.
         let pct = download_progress_percent_by_bytes(5, 5, 100, 1_000);
         assert!((pct - 0.85).abs() < 0.001);
     }
@@ -172,8 +163,6 @@ mod tests {
     fn progress_by_bytes_zero_files_is_complete() {
         assert_eq!(download_progress_percent_by_bytes(0, 0, 0, 0), 1.0);
     }
-
-    // ── summarize_mod_progress ──────────────────────────────────────────
 
     #[test]
     fn summarize_mod_progress_empty() {
@@ -206,23 +195,20 @@ mod tests {
             },
         ];
         let (files, bytes) = summarize_mod_progress(&entries);
-        assert_eq!(files, 1); // only first is complete
-        assert_eq!(bytes, 350); // 200 + min(150, 300)
+        assert_eq!(files, 1);
+        assert_eq!(bytes, 350);
     }
 
     #[test]
     fn summarize_mod_progress_caps_at_size() {
-        // download_total exceeds size - bytes should be capped
         let entries = vec![ModProgressEntry {
             size: 100,
             download_total: Arc::new(AtomicUsize::new(999)),
         }];
         let (files, bytes) = summarize_mod_progress(&entries);
         assert_eq!(files, 1);
-        assert_eq!(bytes, 100); // capped at size
+        assert_eq!(bytes, 100);
     }
-
-    // ── download_progress_percent: additional ──────────────────────────
 
     #[test]
     fn progress_percent_one_of_many() {
@@ -242,8 +228,6 @@ mod tests {
         let pct = download_progress_percent(1, 1);
         assert!((pct - 0.85).abs() < 0.001);
     }
-
-    // ── summarize_mod_progress: additional ──────────────────────────────
 
     #[test]
     fn summarize_mod_progress_all_zero_downloads() {
@@ -290,7 +274,7 @@ mod tests {
             download_total: Arc::new(AtomicUsize::new(0)),
         }];
         let (files, bytes) = summarize_mod_progress(&entries);
-        assert_eq!(files, 1); // 0 >= 0
+        assert_eq!(files, 1);
         assert_eq!(bytes, 0);
     }
 }

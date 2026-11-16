@@ -78,6 +78,9 @@ impl ProfileBackupState {
 
 impl crate::ui::app::Foxy {
     pub(crate) fn start_automatic_profile_backups(&mut self, ctx: &eframe::egui::Context) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         let active = crate::core::game::spaces::active_game_space();
         if !crate::core::game::registry()
             .get(&active.game_id)
@@ -266,6 +269,9 @@ impl crate::ui::app::Foxy {
         ctx: &eframe::egui::Context,
         work: impl FnOnce(PathBuf) -> Result<MutationResult, String> + Send + 'static,
     ) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         let root = crate::core::game::spaces::active_game_space_dir().join("profile_backups");
         if self.launch_action.is_pending()
             || self.pending_game_space_switch.is_some()

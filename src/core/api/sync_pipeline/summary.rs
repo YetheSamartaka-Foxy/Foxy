@@ -3,11 +3,10 @@ use crate::core::utils::speed_of_light::{SolLight, sol_line};
 use log::info;
 use std::time::{Duration, Instant};
 
-/// A single stage entry in the pipeline summary table.
 pub(crate) struct StageEntry {
     pub name: String,
     pub duration: Duration,
-    /// Key-value metadata pairs for this stage (e.g., "files=120", "bytes=50MB").
+
     pub details: Vec<(&'static str, String)>,
 }
 
@@ -26,7 +25,6 @@ impl StageEntry {
     }
 }
 
-/// Collects pipeline stages and prints a formatted summary table.
 pub(crate) struct PipelineSummary {
     pub operation_id: String,
     pub mode: String,
@@ -55,8 +53,6 @@ impl PipelineSummary {
         }
     }
 
-    /// The CPU usage limit in force and how long work paused for it during
-    /// this operation, `None` when no limit is set.
     fn cpu_limit_pauses(&self) -> Option<(u8, crate::core::utils::cpu_governor::GovernorCounters)> {
         let limit = crate::core::utils::cpu_governor::limit_percent()?;
         Some((
@@ -69,7 +65,6 @@ impl PipelineSummary {
         self.stages.push(entry);
     }
 
-    /// Log a formatted ASCII table summarizing all stages.
     pub fn log_table(&self, outcome: &str) {
         let total_secs = self.overall_start.elapsed().as_secs_f64();
         let repo_label = sanitize_log_url(&self.repo_url);
@@ -101,7 +96,6 @@ impl PipelineSummary {
             );
         }
 
-        // Calculate column widths based on actual content
         let name_w = self
             .stages
             .iter()
@@ -117,7 +111,7 @@ impl PipelineSummary {
             .unwrap_or(20)
             .clamp(20, 64);
 
-        let sep_w = name_w + 12 + details_w + 7; // pipes + padding
+        let sep_w = name_w + 12 + details_w + 7;
 
         let mut lines = Vec::with_capacity(self.stages.len() + 10);
         let sep = "=".repeat(sep_w);
@@ -168,9 +162,7 @@ impl PipelineSummary {
 }
 
 impl PipelineSummary {
-    /// The complete-action record (conventions/SPEED_OF_LIGHT.md): one
-    /// `SOL op=sync_action` per pipeline exit, whatever the outcome, with the
-    /// stage service times so the critical path can be read without the table.
+    /// Emit one sync-action record on every exit, including failures, so stage outcomes remain observable.
     fn sol_line(&self, outcome: &str) -> String {
         let mut extras = vec![
             ("op_id", self.operation_id.clone()),
@@ -207,7 +199,6 @@ impl PipelineSummary {
     }
 }
 
-/// `stage_<name>_s`, with the stage name reduced to the grammar's key charset.
 fn stage_key(name: &str) -> String {
     let name: String = name
         .chars()

@@ -227,9 +227,7 @@ pub(crate) async fn collect_unexpected_files_for_repo_mods(
     by_mod
 }
 
-/// Delete unexpected local files from addon directories. Runs the actual
-/// filesystem deletions inside `spawn_blocking` to avoid blocking the tokio
-/// async runtime with synchronous I/O syscalls.
+/// Run synchronous deletions in spawn_blocking to keep filesystem I/O off the async runtime.
 #[cfg(test)]
 pub(crate) async fn delete_unexpected_local_files(
     unexpected_by_mod: &HashMap<String, Vec<String>>,

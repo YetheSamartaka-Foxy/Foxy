@@ -10,41 +10,25 @@ const SUSPECT_MISSING_FILE_RATIO_DENOMINATOR: usize = 10;
 const SUSPECT_MISSING_ADDON_RATIO_NUMERATOR: usize = 1;
 const SUSPECT_MISSING_ADDON_RATIO_DENOMINATOR: usize = 2;
 
-/// An addon counts as "content present but unresolved" (a layout/path mismatch
-/// signal) when its folder holds at least this fraction of its expected files
-/// on disk while *none* of those expected files resolve at their manifest
-/// paths. Half is conservative: it tolerates older/partial on-disk versions
-/// while still requiring the folder to clearly contain the addon's content.
 const LAYOUT_MISMATCH_MIN_DISK_RATIO_NUMERATOR: usize = 1;
 const LAYOUT_MISMATCH_MIN_DISK_RATIO_DENOMINATOR: usize = 2;
 /// Upper bound on directory entries scanned per addon when probing for on-disk
 /// content, so a pathological tree cannot stall the preflight.
 const LAYOUT_MISMATCH_ENTRY_BUDGET: usize = 8192;
-/// Cap on the number of problem addons captured for detailed diagnostics.
+
 const DIAGNOSTIC_ADDON_LIMIT: usize = 12;
-/// Cap on directory entries listed per folder when logging the on-disk layout.
+
 const DISK_SNAPSHOT_ENTRY_LIMIT: usize = 16;
-/// Upper bound on directory entries scanned when locating expected filenames
-/// across the whole repo root (the shared-redirection probe). Larger than the
-/// per-addon budget because it may traverse sibling repos in a shared space, but
-/// still bounded so a huge tree cannot stall the suspect-path logging.
+/// Bounds the shared-root filename probe, which can traverse sibling repos.
 const ROOT_LOCATE_ENTRY_BUDGET: usize = 50_000;
 
-/// Why an addon was flagged as a path problem worth detailed logging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AddonPathProblem {
-    /// The addon's configured folder does not exist on disk.
     MissingDir,
-    /// The folder exists and holds files, but none of the expected files resolve
-    /// at their declared paths - a layout/path-casing mismatch.
     LayoutMismatch,
-    /// The folder exists but holds little/no matching content - a genuine
-    /// missing download.
     FilesMissing,
 }
 
-/// Per-addon detail captured for problem addons so logs can pinpoint the exact
-/// path and on-disk state when a redownload or path mismatch is flagged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AddonPathDiagnostic {
     pub(crate) name: String,
@@ -52,7 +36,6 @@ pub(crate) struct AddonPathDiagnostic {
     pub(crate) dir_exists: bool,
     pub(crate) expected_files: usize,
     pub(crate) resolved_files: usize,
-    /// On-disk file count beneath the addon folder (capped at `expected_files`).
     pub(crate) on_disk_files: usize,
     pub(crate) problem: AddonPathProblem,
 }
@@ -68,22 +51,13 @@ pub(crate) struct LocalPathAvailability {
     pub(crate) existing_files: usize,
     pub(crate) existing_files_with_expected_size: usize,
     pub(crate) missing_files: usize,
-    /// Addons whose folder exists and holds files on disk, yet none of the
-    /// addon's expected files resolve at their manifest-declared paths. This is
-    /// the signature of a layout/path-casing mismatch: the content was
-    /// downloaded but lives under unexpected names/subfolders, so flagging a
-    /// (re)download would be wrong.
+
     pub(crate) addons_with_disk_content_unresolved: usize,
     pub(crate) had_prior_local_state: bool,
     pub(crate) had_prior_missing_local_state: bool,
     pub(crate) sample_missing_addon_dirs: Vec<String>,
     pub(crate) sample_missing_files: Vec<String>,
-    /// Sample of real on-disk file paths found inside addon folders whose
-    /// expected files did not resolve - surfaced for diagnostics so the actual
-    /// layout difference is visible without filesystem access.
     pub(crate) sample_unresolved_disk_paths: Vec<String>,
-    /// Per-addon detail for addons that look problematic (missing folder, layout
-    /// mismatch, or no matching content), capped at [`DIAGNOSTIC_ADDON_LIMIT`].
     pub(crate) addon_diagnostics: Vec<AddonPathDiagnostic>,
 }
 
@@ -103,9 +77,6 @@ impl LocalPathAvailability {
             && self.addons_with_disk_content_unresolved == 0
     }
 
-    /// `true` when on-disk addon content exists but does not line up with the
-    /// manifest's expected file paths - a layout/path mismatch rather than a
-    /// missing download.
     pub(crate) fn layout_mismatch_suspected(&self) -> bool {
         self.addons_with_disk_content_unresolved > 0
     }
@@ -120,10 +91,7 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
     let root_exists =
         !repo_root.trim().is_empty() && crate::core::utils::profiling::fs::is_dir(&repo_root);
 
-    // Prior-download evidence. A repo that was previously verified/downloaded carries
-    // a non-empty local_checksum or local_content_hash on the repository row, or on any of its
-    // addon/file rows. A never-downloaded repo (e.g. migrated metadata, or a fresh install into
-    // a shared space populated by sibling repos) has none of these.
+    // Shared-root state alone does not prove this repository's files were downloaded.
     let has_state = |checksum: &str, content_hash: &str| {
         !checksum.trim().is_empty() || !content_hash.trim().is_empty()
     };
@@ -214,12 +182,6 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
             }
         }
 
-        // Classify problem addons and capture per-addon detail for diagnostics.
-        // Healthy and partially-resolved addons are skipped (they cost nothing).
-        // A folder that exists but resolves *none* of its expected files is
-        // probed for on-disk content: substantial content means the addon was
-        // downloaded and merely lives at unexpected paths (layout/case drift)
-        // rather than being a missing download.
         let problem = if addon_expected_files == 0 {
             None
         } else if !addon_dir_exists {
@@ -229,8 +191,6 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
                 .saturating_mul(LAYOUT_MISMATCH_MIN_DISK_RATIO_NUMERATOR)
                 .div_ceil(LAYOUT_MISMATCH_MIN_DISK_RATIO_DENOMINATOR)
                 .max(1);
-            // Count up to the full expected total so the logged on-disk count is
-            // representative, while the layout decision still keys off `needed`.
             let disk_files = count_disk_files_capped(
                 Path::new(addon_path),
                 addon_expected_files,
@@ -282,11 +242,8 @@ pub(crate) fn summarize_local_path_availability(tree: &Tree) -> LocalPathAvailab
     }
 }
 
-/// Count regular files beneath `root` (recursively), stopping as soon as `cap`
-/// files have been seen. Collects up to `sample_limit` real paths for
-/// diagnostics. Bounded by [`LAYOUT_MISMATCH_ENTRY_BUDGET`] directory entries so
-/// a deep or hostile tree cannot stall the preflight. Symlinks are treated as
-/// neither file nor dir (skipped) to avoid following loops.
+/// Count regular files and collect path samples, bounded to avoid untrusted
+/// trees stalling preflight. Symlinks are skipped to avoid loops.
 fn count_disk_files_capped(
     root: &Path,
     cap: usize,
@@ -326,10 +283,6 @@ fn count_disk_files_capped(
     count
 }
 
-/// Return up to `limit` immediate child entry names of `dir` (directories
-/// suffixed with `/`, sorted), with a trailing `…` marker when more exist.
-/// Returns a single explanatory marker when the directory cannot be read. Used
-/// only for diagnostic logging, so it is bounded and never fails.
 fn sample_dir_entries(dir: &Path, limit: usize) -> Vec<String> {
     const GATHER_CAP: usize = 256;
     let read_dir = match crate::core::utils::profiling::fs::read_dir(dir) {
@@ -356,14 +309,8 @@ fn sample_dir_entries(dir: &Path, limit: usize) -> Vec<String> {
     names
 }
 
-/// Search beneath `root` (bounded, recursive) for files whose lowercased name
-/// matches one of `wanted_lower`, returning up to `sample_limit` real on-disk
-/// paths. Locates files that the manifest expects inside an addon folder but that
-/// actually live elsewhere under the repo root - e.g. cross-repo shared-folder
-/// layouts where content sits outside the declared addon folder - so the log
-/// shows where it went. Bounded by [`ROOT_LOCATE_ENTRY_BUDGET`] entries; symlinks
-/// are skipped to avoid following loops. Diagnostic only: a basename match is a
-/// hint (filenames can repeat across addons), never an automated resolution.
+/// Find bounded filename matches under `root` for diagnostics. Matches are hints
+/// only because basenames can repeat; symlinks are skipped to avoid loops.
 fn locate_files_under_root_by_name(
     root: &Path,
     wanted_lower: &[String],
@@ -402,11 +349,6 @@ fn locate_files_under_root_by_name(
     found
 }
 
-/// Log a bounded snapshot of the actual on-disk layout for the problem addons in
-/// `summary`: the configured repo root's contents plus, per problem addon, its
-/// path/state and the folder's real contents. Surfaces exactly where the files
-/// live versus where the manifest expects them. Logged at warn since it is only
-/// called for suspect situations.
 fn log_problem_addon_disk_state(repo_name_or_url: &str, summary: &LocalPathAvailability) {
     let root_entries = sample_dir_entries(
         Path::new(summary.repo_root.trim()),
@@ -442,11 +384,6 @@ fn log_problem_addon_disk_state(repo_name_or_url: &str, summary: &LocalPathAvail
         );
     }
 
-    // When expected files did not resolve inside their own addon folders, search
-    // the repo root for those filenames. This captures cross-repo / shared-folder
-    // redirection - content living outside the declared addon folder, which the
-    // per-addon probe above cannot see - directly in the log, so the actual-vs-
-    // expected layout is visible without a manual recursive listing.
     let wanted_lower: Vec<String> = summary
         .sample_missing_files
         .iter()
@@ -482,10 +419,6 @@ fn log_problem_addon_disk_state(repo_name_or_url: &str, summary: &LocalPathAvail
     }
 }
 
-/// Log a bounded on-disk snapshot for a raw set of addon paths under a repo
-/// root. Used by the sync pipeline's pre-download / suspect full-redownload
-/// path, which works with paths rather than a [`LocalPathAvailability`]. For a
-/// missing addon folder it lists the parent so the actual layout is visible.
 pub(crate) fn log_addon_path_disk_state(
     repo_name_or_url: &str,
     repo_root: &str,
@@ -543,20 +476,13 @@ pub(crate) fn suspect_local_path_mismatch(summary: &LocalPathAvailability) -> bo
         return false;
     }
 
-    // Layout/path mismatch: addon folders contain files on disk, but the
-    // manifest's expected files do not resolve at their declared paths. The
-    // content was downloaded and merely lives at unexpected paths (case/layout
-    // drift), so a (re)download would be wrong regardless of the missing ratio
-    // or prior-download evidence. This probe only fires when real on-disk
-    // content was confirmed, so it cannot mask a genuine never-downloaded repo.
+    // Confirmed on-disk content with no expected paths indicates layout drift,
+    // not missing files; require physical evidence before classifying it.
     if summary.layout_mismatch_suspected() {
         return true;
     }
 
-    // 100% of files missing is only a path-mismatch signal if the repo was previously
-    // downloaded (it regressed from a known-good state). A never-downloaded repo in a shared
-    // space - root exists because sibling repos populated it, but this repo's files were never
-    // fetched - is a legitimate first install, not a misconfigured path. Let it proceed.
+    // A populated shared root does not mean this repository was downloaded.
     if summary.missing_files == summary.expected_files {
         return summary.had_prior_local_state;
     }
@@ -582,9 +508,6 @@ pub(crate) fn format_local_path_mismatch_message(
     repo_name_or_url: &str,
     summary: &LocalPathAvailability,
 ) -> String {
-    // Layout/path mismatch: the content is on disk but under unexpected
-    // names/subfolders. The configured path is correct, so the guidance differs
-    // from the "wrong folder" case - re-pointing the path would not help.
     if summary.layout_mismatch_suspected() {
         let sample = summary
             .sample_unresolved_disk_paths
@@ -676,10 +599,7 @@ pub(crate) fn log_local_path_availability(repo_name_or_url: &str, summary: &Loca
 
     if suspect_local_path_mismatch(summary) {
         warn!("{log_message}");
-        // When the situation is suspect (layout mismatch or a large missing
-        // ratio that could drive a near-full redownload), follow up with a
-        // bounded on-disk layout snapshot so the actual vs expected paths are
-        // captured in the logs.
+
         log_problem_addon_disk_state(repo_name_or_url, summary);
     } else {
         info!("{log_message}");
@@ -785,7 +705,6 @@ mod tests {
         assert!(!suspect_local_path_mismatch(&summary));
     }
 
-    /// Mark a tree as previously downloaded by stamping a local checksum on the repository row.
     fn with_prior_local_state(mut tree: Tree) -> Tree {
         if let Some(repo) = tree.repositories.first_mut() {
             repo.local_checksum = "PRIORLOCALCHECKSUM".to_string();
@@ -810,8 +729,6 @@ mod tests {
 
     #[test]
     fn all_files_missing_without_prior_state_is_not_suspect() {
-        // A never-downloaded repo in an existing (shared) root must not be flagged as a
-        // path mismatch - it is a legitimate first install.
         let dir = tempdir().unwrap();
         let tree = test_tree(dir.path(), &["@a", "@b"], 10);
 
@@ -989,8 +906,7 @@ mod tests {
         assert_eq!(summary.existing_addons, 2);
         assert_eq!(summary.missing_addon_dirs, 0);
         assert_eq!(summary.missing_files, 20);
-        // Empty addon folders hold no on-disk content, so this is a genuine
-        // missing download, not a layout mismatch.
+
         assert_eq!(summary.addons_with_disk_content_unresolved, 0);
         assert!(!summary.layout_mismatch_suspected());
         assert!(suspect_local_path_mismatch(&summary));
@@ -998,9 +914,6 @@ mod tests {
 
     #[test]
     fn detects_layout_mismatch_when_content_present_under_unexpected_paths() {
-        // The manifest expects files directly under @a/file_N.pbo, but on disk
-        // they live under @a/real_layout/*.pbo - present, just not where the
-        // manifest points. This is the shared-space / layout-drift scenario.
         let dir = tempdir().unwrap();
         let tree = test_tree(dir.path(), &["@a", "@b"], 10);
         for addon in &tree.mods {
@@ -1027,8 +940,6 @@ mod tests {
 
     #[test]
     fn partial_resolution_is_not_layout_mismatch() {
-        // Some expected files resolve at their declared paths - a normal partial
-        // download/update, not a layout mismatch.
         let dir = tempdir().unwrap();
         let tree = test_tree(dir.path(), &["@a"], 10);
         fs::create_dir_all(&tree.mods[0].local_path).unwrap();
@@ -1057,14 +968,11 @@ mod tests {
 
     #[test]
     fn sparse_disk_content_below_half_is_not_layout_mismatch() {
-        // The folder holds far fewer files than the addon expects (e.g. leftover
-        // junk), so it is not treated as the addon present under a different
-        // layout.
         let dir = tempdir().unwrap();
         let tree = test_tree(dir.path(), &["@a"], 10);
         let addon_dir = Path::new(&tree.mods[0].local_path);
         fs::create_dir_all(addon_dir).unwrap();
-        // 2 stray files vs 10 expected → below the half threshold (needs 5).
+
         fs::write(addon_dir.join("leftover_a.txt"), b"x").unwrap();
         fs::write(addon_dir.join("leftover_b.txt"), b"x").unwrap();
 
@@ -1073,8 +981,6 @@ mod tests {
         assert_eq!(summary.addons_with_disk_content_unresolved, 0);
         assert!(!summary.layout_mismatch_suspected());
     }
-
-    // ── count_disk_files_capped ─────────────────────────────────────────
 
     #[test]
     fn count_disk_files_capped_stops_at_cap() {
@@ -1116,13 +1022,10 @@ mod tests {
         assert_eq!(count_disk_files_capped(&missing, 5, &mut samples, 5), 0);
     }
 
-    // ── addon_diagnostics + sample_dir_entries ──────────────────────────
-
     #[test]
     fn diagnostics_capture_layout_mismatch_and_missing_dir() {
         let dir = tempdir().unwrap();
-        // @a: folder present with content under an unexpected subfolder (layout
-        // mismatch). @b: folder absent entirely (missing dir).
+
         let tree = test_tree(dir.path(), &["@a", "@b"], 6);
         let real_subdir = Path::new(&tree.mods[0].local_path).join("real_layout");
         fs::create_dir_all(&real_subdir).unwrap();
@@ -1157,7 +1060,7 @@ mod tests {
     fn diagnostics_mark_empty_folder_as_files_missing() {
         let dir = tempdir().unwrap();
         let tree = test_tree(dir.path(), &["@a"], 6);
-        fs::create_dir_all(&tree.mods[0].local_path).unwrap(); // empty folder
+        fs::create_dir_all(&tree.mods[0].local_path).unwrap();
 
         let summary = summarize_local_path_availability(&tree);
 
@@ -1204,7 +1107,7 @@ mod tests {
 
         let entries = sample_dir_entries(dir.path(), 3);
 
-        assert_eq!(entries.len(), 4); // 3 entries + the "…" marker
+        assert_eq!(entries.len(), 4);
         assert_eq!(entries.last().unwrap(), "…");
     }
 
@@ -1223,8 +1126,7 @@ mod tests {
     fn locate_files_under_root_finds_matches_in_sibling_dirs() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        // Declared addon folder exists but is empty; the file actually lives in a
-        // sibling/shared folder elsewhere under the root (the redirection case).
+
         fs::create_dir_all(root.join("@addon/addons")).unwrap();
         fs::create_dir_all(root.join("shared/@addon")).unwrap();
         fs::write(root.join("shared/@addon/data.pbo"), b"x").unwrap();
@@ -1268,8 +1170,6 @@ mod tests {
         assert_eq!(found.len(), 1);
     }
 
-    /// Build a `LocalPathAvailability` directly so boundary conditions can be
-    /// exercised without touching the filesystem.
     fn availability(
         root_exists: bool,
         expected_addons: usize,
@@ -1298,8 +1198,6 @@ mod tests {
         }
     }
 
-    // ── missing_file_percent ────────────────────────────────────────────
-
     #[test]
     fn missing_file_percent_zero_expected_returns_zero() {
         let summary = availability(true, 0, 0, 0, 0, false);
@@ -1326,21 +1224,18 @@ mod tests {
 
     #[test]
     fn missing_file_percent_truncates_toward_zero() {
-        // 1/3 ≈ 33.33% → integer floor 33
         let summary = availability(true, 1, 0, 3, 1, true);
         assert_eq!(summary.missing_file_percent(), 33);
     }
-
-    // ── format_local_path_mismatch_message ──────────────────────────────
 
     #[test]
     fn format_message_includes_counts_and_repo_name() {
         let summary = availability(true, 10, 6, 30, 27, true);
         let message = format_local_path_mismatch_message("My Repo", &summary);
         assert!(message.contains("My Repo"));
-        // existing_files/expected_files
+
         assert!(message.contains("3/30 expected files"));
-        // existing_addons/expected_addons
+
         assert!(message.contains("4/10 addon folders"));
     }
 
@@ -1385,12 +1280,8 @@ mod tests {
         assert!(!message.contains("@d"));
     }
 
-    // ── suspect_local_path_mismatch boundaries ──────────────────────────
-
     #[test]
     fn suspect_ignores_repositories_below_minimum_file_count() {
-        // 19 expected files (< SUSPECT_MIN_FILES) all missing, root missing,
-        // prior state present - still not suspect because the sample is too small.
         let summary = availability(false, 1, 1, 19, 19, true);
         assert!(!suspect_local_path_mismatch(&summary));
     }
@@ -1403,8 +1294,6 @@ mod tests {
 
     #[test]
     fn suspect_when_root_missing_even_with_prior_state_false() {
-        // Root absent is a hard signal regardless of prior-download evidence,
-        // as long as the minimum file count is met.
         let summary = availability(false, 2, 0, 20, 0, false);
         assert!(suspect_local_path_mismatch(&summary));
     }
@@ -1420,37 +1309,30 @@ mod tests {
 
     #[test]
     fn suspect_ninety_percent_files_and_half_addons_is_suspect() {
-        // 18/20 files missing (90%), 5/10 addon dirs missing (50%).
         let summary = availability(true, 10, 5, 20, 18, true);
         assert!(suspect_local_path_mismatch(&summary));
     }
 
     #[test]
     fn suspect_false_when_addon_ratio_below_half() {
-        // 18/20 files missing (90%) but only 4/10 addon dirs missing (40%).
         let summary = availability(true, 10, 4, 20, 18, true);
         assert!(!suspect_local_path_mismatch(&summary));
     }
 
     #[test]
     fn suspect_false_when_file_ratio_below_ninety() {
-        // 17/20 files missing (85%), addon dirs all missing.
         let summary = availability(true, 10, 10, 20, 17, true);
         assert!(!suspect_local_path_mismatch(&summary));
     }
 
     #[test]
     fn suspect_partial_missing_under_existing_root_is_not_suspect() {
-        // Half the files missing under an existing root is a normal update, not
-        // a path mismatch.
         let summary = availability(true, 10, 5, 40, 20, true);
         assert!(!suspect_local_path_mismatch(&summary));
     }
 
     #[test]
     fn suspect_true_on_layout_mismatch_even_below_ratio() {
-        // Only 30% of files missing (well below the 90% ratio) with every addon
-        // folder present, but on-disk content is unresolved → still suspect.
         let mut summary = availability(true, 4, 0, 40, 12, true);
         summary.addons_with_disk_content_unresolved = 1;
         assert!(suspect_local_path_mismatch(&summary));
@@ -1458,9 +1340,6 @@ mod tests {
 
     #[test]
     fn suspect_layout_mismatch_overrides_all_missing_without_prior_state() {
-        // 100% missing with no prior-download evidence would normally be treated
-        // as a legitimate first install; confirmed on-disk content flips it to a
-        // layout mismatch so a redownload is not flagged.
         let mut summary = availability(true, 2, 0, 20, 20, false);
         summary.addons_with_disk_content_unresolved = 2;
         assert!(suspect_local_path_mismatch(&summary));
@@ -1475,8 +1354,7 @@ mod tests {
         assert!(message.contains("My Repo"));
         assert!(message.contains("layout or path-casing mismatch"));
         assert!(message.contains("on_disk.pbo"));
-        // Must not give the misleading "re-point the configured path" guidance,
-        // since the path is correct here.
+
         assert!(!message.contains("points to the folder that directly contains"));
     }
 }

@@ -1,6 +1,4 @@
-//! The `benchmarks` table mirrors the record folders so other tooling can
-//! query them through the database. Folders win on every disagreement: the
-//! index is rebuilt from them after a wipe or a hand edit.
+//! Record folders are authoritative; rebuild their database index after wipes or hand edits.
 
 use std::collections::HashSet;
 
@@ -56,8 +54,6 @@ pub async fn delete_record(id: &str) -> Result<(), DbErr> {
     Ok(())
 }
 
-/// Make the table match `records`: insert or refresh every folder, drop rows
-/// whose folder is gone.
 pub async fn reconcile(records: &[BenchmarkRecord]) -> Result<usize, DbErr> {
     let db = FoxyDb::from_handle(init_database().await);
     let known: HashSet<String> = records.iter().map(|record| record.id.clone()).collect();

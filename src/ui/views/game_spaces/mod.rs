@@ -13,12 +13,8 @@ use crate::ui::game_logos::{
 use crate::ui::i18n::tr;
 use crate::ui::types::FoxyView;
 
-/// Fixed logo slot in a game space row so the name column starts at the same
-/// offset for every game.
 const GAME_SPACE_ROW_LOGO_SLOT_WIDTH: f32 = 180.0;
 
-/// Gear glyph size for the sidebar header button, which is as tall as the
-/// logo slot next to it.
 const GAME_SPACE_SETTINGS_ICON_SIZE: f32 = 22.0;
 
 #[derive(Default)]
@@ -477,9 +473,7 @@ impl Foxy {
         }
     }
 
-    /// Enter = default action, Escape = cancel, for the game-space modals
-    /// (keyboard parity per the accessibility conventions). Consumes the keys
-    /// so the list navigation underneath never sees them.
+    /// Game-space modals use Enter to confirm and Escape to cancel; consume both keys so list navigation cannot receive them.
     fn game_space_modal_keys(ui: &Ui) -> (bool, bool) {
         let default_activation = ui.memory(|memory| memory.focused().is_none());
         ui.ctx().input_mut(|input| {

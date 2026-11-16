@@ -25,7 +25,6 @@ const FILE_PART_UPSERT_PARAMS_PER_ROW: usize = 6;
 const FILE_PART_INSERT_WITH_LOCAL_PARAMS_PER_ROW: usize = 9;
 const DOWNLOAD_FILE_TARGET_UPSERT_PARAMS_PER_ROW: usize = 4;
 
-/// A subfile (file part) row staged for the bulk remote-metadata upsert.
 struct PartUpsertRow {
     file_id: i64,
     path: String,
@@ -35,7 +34,6 @@ struct PartUpsertRow {
     data_order: i64,
 }
 
-/// A download_target_file row staged for the bulk queue rebuild.
 struct DownloadTargetRow {
     file_id: i64,
     download_remote_url: String,
@@ -44,20 +42,10 @@ struct DownloadTargetRow {
 }
 
 fn file_part_upsert_chunk_size() -> usize {
-    // Turso writes are fastest in small multi-row statements (see
     crate::core::tasks::init_database::bulk_write_rows_for(FILE_PART_UPSERT_PARAMS_PER_ROW)
 }
 
-/// Build the bulk subfile upsert SQL for `rows` rows. The local_* columns use
-/// inline defaults (0, 0, '') so they consume no bind variables.
-///
-/// When `fresh` is true (a whole-wipe force-redownload / first-download load into
-/// a globally-empty, index-deferred `subfiles` table - see
-/// `after_turso_regression_analysis5.md` P0-b), the statement is a plain `INSERT`:
-/// the table is empty so no conflict can occur, the unique index is dropped, and
-/// dropping the `ON CONFLICT` arm lets the row append touch only the rowid PK.
-/// Otherwise it is `INSERT … ON CONFLICT (file_id, path) DO UPDATE` that refreshes
-/// only remote metadata, preserving any existing local checksums.
+/// Fresh plain inserts are safe only for an empty conflict-free table; upserts preserve existing local checksums.
 fn file_part_upsert_sql(rows: usize, fresh: bool) -> String {
     let placeholders = vec!["(?, ?, 0, 0, ?, ?, '', ?, ?)"; rows].join(", ");
     let insert = format!(
@@ -163,8 +151,6 @@ fn should_prepare_download_work(
     queue_download_targets || patch_plan_metadata_refresh
 }
 
-/// Load existing subfile rows for the given file ids, keyed by `(file_id, path)`.
-/// Chunked under the SQLite bind limit.
 async fn load_parts_by_file_ids(
     db: &FoxyDb,
     file_ids: &[i64],
@@ -184,9 +170,6 @@ async fn load_parts_by_file_ids(
     Ok(map)
 }
 
-/// Clear stale delta patch plans for a batch of files in two bulk transactions
-/// instead of two per file. Callers collect the file IDs that proved
-/// unpatchable during planning and flush them once at the end.
 async fn clear_stale_patch_plans(context: Arc<FoxyContext>, file_ids: &[i64], reason: &str) {
     if file_ids.is_empty() {
         return;
@@ -286,8 +269,7 @@ fn stale_subfile_ids(
     stale
 }
 
-/// Local state a rebuilt part row must keep so the delta planner can still
-/// copy the bytes already on disk.
+/// Preserve local part state so delta planning can reuse bytes already on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CarriedPartLocalState {
     id: u64,
@@ -296,14 +278,7 @@ struct CarriedPartLocalState {
     local_start: u64,
 }
 
-/// Carry the local state of one file's previous part rows onto its rebuilt rows.
-///
-/// `old_parts` must already carry the derived clean state of the previous file.
-/// A clean file stores no part local checksums, so once its remote checksum
-/// changes that state is lost unless `materialize_existing` writes it onto the
-/// rows that keep their key. A row whose key changed (the manifest inserted or
-/// removed an entry before it) takes the state of an unclaimed old row with the
-/// same part path.
+/// Re-keyed rows recover state by part path; clean-file checksums must be materialized before the remote rollup changes.
 fn carried_part_local_state(
     old_parts: &[FoxyModFilePart],
     current_parts: &[&FoxyModFilePart],
@@ -370,9 +345,7 @@ fn carried_part_local_state(
         carried.push(carried_from(current, &old_parts[idx]));
     }
 
-    // Plain-file parts are named after their end offset, so content that moved
-    // keeps its checksum but not its name. Its bytes are still in the local
-    // file at the old offset, which is what a delta copy reads.
+    // Plain-file part names follow end offsets; moved content remains at its old local offset for delta copies.
     let mut unclaimed_by_content: HashMap<(String, u64), Vec<usize>> = HashMap::new();
     for idx in (0..old_parts.len()).filter(|idx| !claimed[*idx] && has_local(&old_parts[*idx])) {
         let old = &old_parts[idx];
@@ -445,7 +418,6 @@ async fn persist_carried_part_local_state(db: &FoxyDb, states: Vec<CarriedPartLo
     }
 }
 
-/// Batch version that handles all files of a mod in a handful of queries instead of per-file round trips.
 pub(crate) async fn remote_file_parts_batch(
     context: Arc<FoxyContext>,
     files: Vec<FilePartsPayload>,
@@ -456,15 +428,12 @@ pub(crate) async fn remote_file_parts_batch(
 
     let db = context.db();
     let force_parts_recheck = context.recheck_level >= RecheckLevel::FILE_PART;
-    // Phase timing (plan.md §4 follow-up): the metadata rebuild's DB work was
-    // opaque in logs, so split prefetch / upsert / reload / delta-planning here to
-    // tell DB cost apart from the caller's HTTP fetch time.
+
     let batch_started = Instant::now();
     let mut upsert_elapsed = Duration::ZERO;
     let mut reload_elapsed = Duration::ZERO;
     let mut upsert_row_count = 0usize;
 
-    // Parse parts upfront
     let mut all_part_rows: Vec<PartRow> = Vec::new();
     let mut order_keys: HashMap<i64, Vec<String>> = HashMap::new();
     let mut file_by_id: HashMap<i64, FoxyModFile> = HashMap::new();
@@ -525,7 +494,6 @@ pub(crate) async fn remote_file_parts_batch(
         context.is_fresh_subfiles_load()
     );
 
-    // Prefetch existing parts for all files in one query
     let prefetch_started = Instant::now();
     let existing_parts: HashMap<(i64, String), FoxyModFilePart> =
         match load_parts_by_file_ids(&db, &file_ids).await {
@@ -578,14 +546,7 @@ pub(crate) async fn remote_file_parts_batch(
     }
 
     let has_part_upserts = !upsert_models.is_empty();
-    // A++ (after_turso_regression_analysis7.md): on a force-redownload into a
-    // globally-empty `subfiles` table, buffer the brand-new part rows for one
-    // background INSERT overlapped with the download instead of writing them inline
-    // on `remote_repository`'s critical path (~22s). Safe because the download queue
-    // is file-level (built below from the manifest, identical via the no-parts
-    // branch when `refreshed_parts` is empty) and, after Step 3b, nothing before the
-    // download reads `subfiles`. Gated on `is_fresh_subfiles_load` so it only applies
-    // to the conflict-free whole-wipe load, never an incremental upsert.
+    // Defer only fresh conflict-free loads; the download queue is file-level and no pre-download reader needs these rows.
     let defer_parts =
         has_part_upserts && context.should_defer_part_inserts() && context.is_fresh_subfiles_load();
     if defer_parts {
@@ -610,17 +571,9 @@ pub(crate) async fn remote_file_parts_batch(
         );
     }
     if has_part_upserts && !defer_parts {
-        // Use raw SQL with 6 bound params per row (file_id, path, remote_length, remote_start,
-        // remote_checksum, data_order). The local_* columns use inline defaults (0, 0, '') so
-        // they don't consume bind variables. ON CONFLICT updates only remote metadata (4 cols),
-        // preserving any existing local checksums from prior hash runs.
-        // Keep all insert chunks in one writer window. SQLite serializes writes even in WAL mode,
-        // so committing every small chunk creates lock handoff churn on part-heavy manifests.
+        // Preserve local checksums on conflict and keep chunks in one writer window to avoid lock handoff churn.
         let chunk_size = file_part_upsert_chunk_size();
-        // P0-b: on a whole-wipe force-redownload the rebuild emptied subfiles and
-        // dropped its indexes, so this load is a conflict-free plain INSERT into a
-        // rowid-PK-only table (4→1 B-trees/row). The metadata rebuild rebuilds the
-        // indexes once after the parallel fan-out completes.
+
         let fresh = context.is_fresh_subfiles_load();
         upsert_row_count = upsert_models.len();
         info!(
@@ -650,12 +603,7 @@ pub(crate) async fn remote_file_parts_batch(
         upsert_elapsed = upsert_started.elapsed();
     }
 
-    // Refresh parts for all files -- skip re-read when nothing was upserted
-    // since existing_parts already has the correct IDs and data. When the insert
-    // was deferred (A++) the rows do not exist yet, so leave `refreshed_parts`
-    // empty: the target build below falls to the file-level (no-parts) branch,
-    // producing the same file-level download targets, and the deferred parts are
-    // inserted in the background before the hasher needs them.
+    // Deferred rows are absent until flush; retain the file-level target path and insert them before the hasher loads the tree.
     let mut refreshed_parts: HashMap<(i64, String), FoxyModFilePart> =
         if !has_part_upserts || defer_parts {
             existing_parts
@@ -684,17 +632,13 @@ pub(crate) async fn remote_file_parts_batch(
             }
         }
     }
-    // Parts carry their file relation in subfiles.file_id. Prune stale rows
-    // directly so all part readers observe the current manifest layout without
-    // maintaining the former file_subfiles junction table.
+
     let stale_subfile_ids: Vec<i64> = if can_prune_stale_parts {
         stale_subfile_ids(&refreshed_parts, &desired_part_ids_by_file, &order_keys)
     } else {
         Vec::new()
     };
 
-    // Delete stale subfile rows from the subfiles table so that Tree::load
-    // (which queries by file_id directly) does not pick up orphaned parts.
     if !stale_subfile_ids.is_empty() {
         let chunk_size = crate::core::tasks::init_database::SQLITE_MAX_VARIABLES
             .saturating_sub(4)
@@ -801,13 +745,11 @@ pub(crate) async fn remote_file_parts_batch(
         return;
     }
 
-    // Build delta plans whenever local part hashes are available. Download target
-    // queueing is optional, but check/update UI estimates also use patch plans.
+    // Build patch plans even when queueing is optional because UI estimates also consume them.
     let mut download_file_models = Vec::new();
     let mut skipped_part_target_rows = 0usize;
     let mut planned_patch_files = 0usize;
-    // Files whose stale patch plan must be cleared. Collected here and flushed in
-    // two bulk transactions after the loop instead of two transactions per file.
+
     let mut patch_clear_file_ids: Vec<i64> = Vec::new();
 
     let plan_loop_started = Instant::now();
@@ -916,11 +858,7 @@ pub(crate) async fn remote_file_parts_batch(
                     );
                 }
             }
-            // Missing-file fast path: a file with no local copy on disk can never
-            // be patched (delta planning requires the current local file) and
-            // always needs a full download. Skip plan_file_patch entirely and just
-            // mark its stale plan for clearing. The metadata probe only runs for
-            // files already proven to need a download, so clean files pay nothing.
+
             let local_file_present = crate::core::utils::profiling::fs::metadata(&file.local_path)
                 .map(|meta| meta.is_file())
                 .unwrap_or(false);
@@ -968,9 +906,7 @@ pub(crate) async fn remote_file_parts_batch(
                     download_local_path: file.local_path.clone(),
                     size: file.length as i64,
                 });
-                // The active downloader consumes file-level targets and delta patch
-                // plans separately. Do not persist one unused queue row per changed
-                // part for part-heavy PBOs.
+                // Keep download targets file-level; the active downloader consumes patch plans separately.
                 skipped_part_target_rows += changed_parts;
             }
         }
@@ -991,9 +927,7 @@ pub(crate) async fn remote_file_parts_batch(
         batch_started.elapsed().as_secs_f64(),
     );
 
-    // Flush all stale patch-plan clears in two bulk transactions after the
-    // metadata fan-out rather than two transactions per mod. A force-redownload
-    // purge already emptied these tables, so skip the no-op deletes.
+    // Skip deletes after a force-redownload purge has already emptied the tables.
     if !patch_clear_file_ids.is_empty() && !context.force_download_targets {
         context.buffer_patch_clear_ids(patch_clear_file_ids);
     }
@@ -1019,13 +953,7 @@ pub(crate) async fn remote_file_parts_batch(
     }
 }
 
-/// Flush every part row staged by the deferred-insert path (A++,
-/// after_turso_regression_analysis7.md) in one background transaction. Runs
-/// concurrently with the download; the pipeline awaits the spawning task before the
-/// incremental hasher loads its tree, so the rows are present by the time any reader
-/// needs them. A plain conflict-free `INSERT` (the deferred load always targets a
-/// globally-empty `subfiles` table - same `fresh=true` SQL as the inline fast path).
-/// No-op when nothing was deferred.
+/// Flush deferred parts before the incremental hasher's tree load; only fresh empty-table rows use plain INSERT.
 pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) -> bool {
     let (mut rows, streamed) = context.take_unpersisted_deferred_parts();
     context.set_deferred_part_inserts_fresh_load(false);
@@ -1037,8 +965,7 @@ pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) -> bo
         }
         return true;
     }
-    // Both subfiles indexes lead with file_id, and the buffer arrives in mod
-    // completion order, so inserting unsorted walks the index B-trees at random.
+    // Sort by file ID to keep both file-leading indexes sequential.
     rows.sort_unstable_by_key(|row| (row.file_id, row.data_order));
     let total = rows.len();
     let db = context.db();
@@ -1088,11 +1015,7 @@ pub(crate) async fn flush_deferred_part_inserts(context: Arc<FoxyContext>) -> bo
     true
 }
 
-/// Commit the part rows one group of manifests appended to the deferred buffer
-/// from `first_row` on, with that group's addon file links, under the part
-/// stream lock. Links land only with their parts because the completeness
-/// checks count files through `addon_files` and probe for just one part row.
-/// A failed group turns the stream off; the regular flushes take over.
+/// Commit links with their part rows so completeness probes cannot see a partially streamed graph.
 pub(crate) async fn persist_streamed_part_group(context: &Arc<FoxyContext>, first_row: usize) {
     if !context.should_stream_part_inserts() {
         return;
@@ -1218,8 +1141,7 @@ fn distinct_file_ids(rows: &[DeferredPartInsert]) -> Vec<i64> {
     ids
 }
 
-/// Stands in for the foreign keys a bulk insert runs without: a purge that
-/// ran since the rows were staged fails the transaction instead of leaving orphans.
+/// Detect a concurrent purge so staged bulk rows cannot become orphans.
 async fn require_parent_rows(txn: &DbTxn<'_>, table: &str, ids: &[i64]) -> Result<(), DbErr> {
     let found = count_existing_ids(txn, table, ids).await?;
     if found != ids.len() {
@@ -1519,18 +1441,14 @@ mod tests {
         assert!(force_full_file_download(true, false));
     }
 
-    // ── part upsert batch sizing ───────────────────────────────────────
-
     #[test]
     fn part_upsert_uses_tuned_small_chunk() {
-        // Turso writes are fastest in small statements (bench_fresh_insert_vs_upsert):
-        // the tuned ~256-row chunk replaces the old bind-variable-maxed 5 460.
         assert_eq!(
             file_part_upsert_chunk_size(),
             crate::core::tasks::init_database::bulk_write_chunk_rows()
         );
         assert_eq!(file_part_upsert_chunk_size(), 256);
-        // Stays safely under the bind-variable ceiling (256 × 6 params ≪ 32 766).
+
         assert!(file_part_upsert_chunk_size() * FILE_PART_UPSERT_PARAMS_PER_ROW < 32_766);
     }
 
@@ -1557,8 +1475,6 @@ mod tests {
 
     #[test]
     fn part_upsert_fresh_mode_is_plain_insert_without_on_conflict() {
-        // P0-b: the index-deferred fresh load drops the ON CONFLICT arm so the
-        // append touches only the rowid PK. Same bind shape, no conflict clause.
         let sql = file_part_upsert_sql(2, true);
         assert_eq!(sql.matches('?').count(), 12);
         assert!(sql.contains("VALUES (?, ?, 0, 0, ?, ?, '', ?, ?)"));
@@ -1594,9 +1510,6 @@ mod tests {
         assert!(should_prepare_download_work(false, true));
     }
 
-    /// Benchmark (`FOXY_BENCH_MANIFEST_DIR=<manifest_cache dir> cargo test --release
-    /// bench_streamed_groups_real_manifests -- --ignored --nocapture`). The record
-    /// case's two streamed groups on real cached manifests, against one flush.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_streamed_groups_real_manifests() {
@@ -1707,10 +1620,6 @@ mod tests {
         }
     }
 
-    /// Benchmark (`cargo test --release bench_deferred_flush_seam -- --ignored --nocapture`).
-    /// The deferred flush through the app's seam, with the record case's row
-    /// count and shape, to compare against the raw engine insert in
-    /// `bench_subfiles_checksum_encoding`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "perf benchmark; run manually with --ignored --nocapture"]
     async fn bench_deferred_flush_seam() {
@@ -2052,7 +1961,6 @@ mod tests {
 
     #[test]
     fn part_upsert_old_9_col_batch_size_was_110() {
-        // Verify old batch size for comparison
         let params_per_row = 9usize;
         let chunk_size = (SQLITE_MAX_VARIABLES / params_per_row)
             .saturating_sub(1)
@@ -2072,23 +1980,21 @@ mod tests {
         );
     }
 
-    // ── SQL placeholder generation ─────────────────────────────────────
-
     #[test]
     fn raw_upsert_placeholder_for_single_row() {
         let sql = file_part_upsert_sql(1, false);
-        // 6 bound params for the one row
+
         assert_eq!(sql.matches('?').count(), 6);
-        // local_length and local_start are inline 0
+
         assert!(sql.contains("0, 0"));
-        // local_checksum is inline empty string
+
         assert!(sql.contains("''"));
     }
 
     #[test]
     fn raw_upsert_placeholder_for_three_rows() {
         let sql = file_part_upsert_sql(3, false);
-        // 3 rows * 6 params = 18
+
         assert_eq!(sql.matches('?').count(), 18);
     }
 
@@ -2097,13 +2003,11 @@ mod tests {
         let sql = file_part_upsert_sql(1, false);
         assert!(sql.contains("ON CONFLICT (file_id, path)"));
         assert!(sql.contains("DO UPDATE SET"));
-        // Should NOT update local_* columns
+
         assert!(!sql.contains("local_checksum = excluded"));
         assert!(!sql.contains("local_length = excluded"));
         assert!(!sql.contains("local_start = excluded"));
     }
-
-    // ── download target batch sizing ───────────────────────────────────
 
     #[test]
     fn stale_subfile_ids_keeps_all_when_every_part_is_desired() {
@@ -2137,8 +2041,6 @@ mod tests {
 
     #[test]
     fn stale_subfile_ids_ignores_files_absent_from_manifest_map() {
-        // A file with parts in the DB but no entry in the manifest map at all
-        // must not be pruned (we only prune files whose manifest has a layout).
         let refreshed_parts =
             HashMap::from([((10, "orphan".to_owned()), test_part(20, 10, "orphan"))]);
         let desired = HashMap::from([(10, HashSet::new())]);

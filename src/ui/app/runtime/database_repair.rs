@@ -21,7 +21,8 @@ impl Foxy {
     }
 
     pub(crate) fn refresh_live_database_repair_requirement(&mut self) {
-        if self.database_wipe_in_flight
+        if !self.client_db_admission.allows()
+            || self.database_wipe_in_flight
             || self
                 .pending_db_schema_wipe
                 .is_some_and(|prompt| prompt.blocking)
@@ -84,19 +85,29 @@ impl Foxy {
             discard = ui.add_enabled(!self.database_wipe_in_flight, egui::Button::new(self.t("Discard corrupt database and rebuild"))).clicked();
             self.render_export_logs_button(ui);
         });
-        if discard {
+        if discard && let Some(scope) = self.capture_worker_scope() {
             self.database_wipe_in_flight = true;
             self.recheck_all_after_database_wipe = true;
             let tx = self.database_wipe_tx.clone();
-            std::thread::spawn(move || {
+            let admission = self.client_db_admission.clone();
+            let repaint = ctx.clone();
+            self.database_wipe_worker = Some(std::thread::spawn(move || {
+                if !crate::ui::app::admit_database_section(&admission) {
+                    return;
+                }
                 let result =
                     crate::core::tasks::db_turso::discard_corrupt_database().and_then(|()| {
                         tokio::runtime::Runtime::new()
                             .map_err(|err| err.to_string())?
                             .block_on(crate::core::tasks::init_database::wipe_database_live())
                     });
-                let _ = tx.send(result);
-            });
+                let _ = tx.send(crate::ui::app::DatabaseWipeDelivery {
+                    space_id: scope.space_id().to_string(),
+                    generation: scope.generation(),
+                    outcome: result,
+                });
+                repaint.request_repaint();
+            }));
         }
     }
 

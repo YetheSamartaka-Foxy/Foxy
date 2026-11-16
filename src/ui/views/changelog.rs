@@ -6,7 +6,6 @@ use log::info;
 
 const EMBEDDED_CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 
-/// Pre-parsed element from the embedded changelog markdown.
 #[derive(Clone)]
 enum ChangelogElement {
     Heading1(String),
@@ -50,7 +49,6 @@ fn changelog_versions(elements: &[ChangelogElement]) -> Vec<&str> {
         .collect()
 }
 
-/// Lazily-initialized parsed changelog elements.
 static PARSED_CHANGELOG: std::sync::LazyLock<Vec<ChangelogElement>> =
     std::sync::LazyLock::new(parse_changelog);
 

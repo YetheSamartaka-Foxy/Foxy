@@ -117,8 +117,6 @@ pub(super) async fn diagnose_patch_output_segments(
     Ok(mismatches)
 }
 
-/// One op inside a copy run, carried into the blocking copy so part
-/// boundaries are hashed inside the sequential stream.
 #[derive(Debug, Clone)]
 pub(super) struct RunPart {
     pub(super) op_idx: usize,
@@ -129,22 +127,15 @@ pub(super) struct RunPart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RunStop {
     Cancelled,
-    /// The part that was in flight restarts from its beginning on resume.
-    Paused {
-        next_part: usize,
-    },
+
+    Paused { next_part: usize },
 }
 
 pub(super) struct RunOutcome {
-    /// `(index within the run, streamed checksum)` for every part completed.
     pub(super) hashes: Vec<(usize, String)>,
     pub(super) stop: Option<RunStop>,
 }
 
-/// Copy `parts[first_part..]` as one sequential stream from `source` to
-/// `output`, hashing each part boundary on the way. Cancel and pause are
-/// checked per chunk, never per op, so a multi-hundred-megabyte run still
-/// stops promptly. Positional I/O: nothing seeks.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn copy_run_blocking(
     source: &std::fs::File,
@@ -225,8 +216,6 @@ pub(super) fn copy_run_blocking(
     Ok(RunOutcome { hashes, stop: None })
 }
 
-/// Stream a copy run, resuming after pauses, and return the streamed checksum
-/// of every part (`None` for a part whose source range lies outside the file).
 #[allow(clippy::too_many_arguments)]
 async fn copy_run_with_hashes(
     source: Arc<std::fs::File>,
@@ -239,8 +228,7 @@ async fn copy_run_with_hashes(
     cancel_rx: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<Vec<Option<String>>> {
     let mut hashes: Vec<Option<String>> = vec![None; parts.len()];
-    // Source ranges are contiguous, so once one part runs past the file every
-    // later part does too; only the leading valid prefix is streamed.
+
     let mut readable_parts = 0usize;
     let mut cursor = source_start;
     for part in parts.iter() {
@@ -294,12 +282,6 @@ async fn copy_run_with_hashes(
     }
 }
 
-/// Assemble one batch of output in `buffer` (copy runs read from `source`,
-/// inserts from `blob`), hash every op's bytes, and write the batch with one
-/// positional call. Returns `(op index, streamed checksum)` for every op in the
-/// batch; `None` marks an op whose bytes could not be read (a source range past
-/// the end of the file, or a read error), which the caller repairs from the
-/// network. Only a failed output write is an error.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_batch_blocking(
     source: &std::fs::File,
@@ -328,11 +310,8 @@ pub(super) fn apply_batch_blocking(
         Ok(at..end)
     };
 
-    // (op index, readable) in output order; readable is false until the
-    // bytes for that op landed in the buffer.
     let mut op_states: Vec<(usize, bool)> = Vec::new();
-    // Source reads are issued in source order so a rotational disk sweeps
-    // forward once per batch instead of following the output layout.
+    // Read source ranges in order to reduce rotational-disk seeks.
     let mut copy_reads: Vec<(u64, std::ops::Range<usize>, std::ops::Range<usize>)> = Vec::new();
 
     for segment in &segments[batch.segment_range.clone()] {
@@ -412,7 +391,7 @@ pub(super) fn apply_batch_blocking(
         .into_iter()
         .map(|(op_idx, readable)| {
             let op = &ops[op_idx];
-            // A readable op's slice was bounds-checked by `span` when read.
+
             let checksum = readable.then(|| {
                 let at = buffer_offset(op.dest_start);
                 let mut hasher = FlexHasher::from_checksum(&op.target_checksum);
@@ -426,8 +405,6 @@ pub(super) fn apply_batch_blocking(
     Ok(checksums)
 }
 
-/// Per-file copy fallback accounting shared by the batched and streamed apply
-/// paths, including the abort rule for a plan whose source turns out wrong.
 struct CopyFallbackTracker {
     copy_ops_total: usize,
     attempted_ops: usize,
@@ -474,9 +451,6 @@ impl CopyFallbackTracker {
     }
 }
 
-/// Settle one op after its bytes were assembled: a streamed checksum equal to
-/// the target is done; anything else is repaired by downloading that range
-/// straight into the output (subject to the copy abort rule).
 #[allow(clippy::too_many_arguments)]
 async fn settle_op(
     context: &Arc<FoxyContext>,
@@ -492,9 +466,7 @@ async fn settle_op(
     if is_copy {
         tracker.attempt(op);
     }
-    // Verify against target_checksum (the expected output), not
-    // source_checksum, so the check remains correct even if the two
-    // checksums diverge due to planning edge cases.
+    // Verify against the target checksum because source and target digests may differ.
     if streamed.is_some_and(|actual| checksum_matches(&op.target_checksum, actual)) {
         return Ok(());
     }
@@ -626,8 +598,6 @@ pub(crate) async fn apply_patch_to_temp_file(
         let batch_started = std::time::Instant::now();
 
         let streamed: Vec<(usize, Option<String>)> = if batch.is_oversized(APPLY_BATCH_BYTES) {
-            // One segment past the batch budget: stream it through the fixed
-            // copy buffer with per-chunk pause and cancel checks.
             match &segments[batch.segment_range.start] {
                 ApplySegment::CopyRun {
                     op_range,
@@ -880,8 +850,6 @@ pub(crate) async fn cleanup_patch_artifacts(
     Ok(())
 }
 
-/// Compute a whole-file integrity hash for diagnostic logging.
-/// Uses BLAKE3 (local-only, never compared to remote server checksums).
 pub(super) async fn compute_file_integrity_hash(path: &Path) -> anyhow::Result<String> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -903,8 +871,7 @@ pub(super) async fn compute_file_integrity_hash(path: &Path) -> anyhow::Result<S
 }
 
 pub(super) async fn restore_backup(target_path: &Path, backup_path: &Path) -> anyhow::Result<()> {
-    // Remove the failed patched file unconditionally - handle NotFound gracefully
-    // instead of a TOCTOU exists() check.
+    // Remove unconditionally to avoid an exists-check race; NotFound is harmless.
     match fs::remove_file(target_path).await {
         Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}

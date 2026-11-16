@@ -317,8 +317,7 @@ impl Foxy {
         self.launch_repository_with_steam_guard(effective, server, repo_name, launch_label)
     }
 
-    /// A game build the repository downloaded starts its own executable, never
-    /// a Steam install.
+    /// A downloaded game build launches its own executable, not a Steam install.
     fn repository_launch_uses_steam(&self, effective: &Repository) -> bool {
         effective.game_build.is_none()
             && crate::core::game::registry()
@@ -363,6 +362,9 @@ impl Foxy {
         repo_name: &str,
         launch_label: &str,
     ) -> LaunchDispatchResult {
+        if !self.client_db_admission.allows() {
+            return LaunchDispatchResult::Failed;
+        }
         let Some(command) = self.create_launch_command(effective, server) else {
             let module = crate::core::game::registry().active();
             if !module.capabilities().repository_launch {
@@ -491,10 +493,7 @@ impl Foxy {
             repo_name, server.address, server.port
         );
 
-        // Query the server status off the UI thread (DNS resolution + UDP
-        // round-trip). The join decision resumes in `poll_pending_join_status`
-        // once a fresh status arrives, so a slow or unreachable server can no
-        // longer freeze the UI.
+        // Run DNS and UDP server-status checks off-thread so slow servers cannot freeze the UI.
         let (query_id, started_at, result_rx) = self.start_join_server_status_query(server);
         self.pending_join_status_query = Some(PendingJoinStatusQuery {
             repo_name: repo_name.to_string(),
@@ -507,15 +506,11 @@ impl Foxy {
         self.needs_repaint = true;
     }
 
-    /// Resume a pending Join once its background server-status query resolves,
-    /// or give up after a timeout so the join action never wedges if the worker
-    /// fails to deliver a result.
+    /// Resume Join when the background status query returns; timeout prevents a missing worker result from wedging the action.
     pub(crate) fn poll_pending_join_status(&mut self, ctx: &egui::Context) {
         const JOIN_STATUS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
-        // Peek by reference first: the common case is "still waiting", and the
-        // pending query embeds a full `Repository`, so we must not clone it
-        // every frame just to find nothing ready.
+        // Inspect the pending query by reference to avoid cloning its full repository while it is still waiting.
         let Some(pending) = self.pending_join_status_query.as_ref() else {
             return;
         };
@@ -525,10 +520,9 @@ impl Foxy {
             .filter(|result| result.matches_pending(pending.query_id, pending.started_at))
             .map(|result| result.status);
         if status.is_none() && pending.started_at.elapsed() < JOIN_STATUS_QUERY_TIMEOUT {
-            return; // still waiting - no clone, no take
+            return;
         }
 
-        // A status is ready, or we've timed out: now consume the pending query.
         let pending = self
             .pending_join_status_query
             .take()
@@ -563,8 +557,6 @@ impl Foxy {
         }
     }
 
-    /// Apply the join decision now that a server status is known. Mirrors the
-    /// logic that previously ran synchronously in `try_join_repository_server`.
     fn continue_join_after_status(
         &mut self,
         ctx: &egui::Context,
@@ -644,6 +636,10 @@ impl Foxy {
             return;
         }
 
+        let Some(scope) = self.capture_worker_scope() else {
+            info!("Join addon preflight was not started because client workers are quiesced");
+            return;
+        };
         self.pending_join_preflight_query = Some(PendingJoinPreflightQuery {
             query_id: NEXT_JOIN_PREFLIGHT_QUERY_ID.fetch_add(1, Ordering::Relaxed),
             repo_name: repo_name.to_string(),
@@ -671,6 +667,9 @@ impl Foxy {
             .expect("preflight request was just installed")
             .query_id;
         let repaint_ctx = self.repaint_ctx.clone().or_else(|| Some(ctx.clone()));
+        let admission = self.client_db_admission.clone();
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
         self.join_preflight_worker = Some(std::thread::spawn(move || {
             let started_at = Instant::now();
             info!(
@@ -683,17 +682,25 @@ impl Foxy {
                     address, port, err
                 )
             });
-            let display_names = if database_metadata_available {
+            let display_names = if database_metadata_available
+                && crate::ui::app::admit_database_section(&admission)
+            {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build();
                 match rt {
-                    Ok(rt) => rt.block_on(async {
-                        let db = crate::core::db::FoxyDb::from_handle(
-                            crate::core::tasks::init_database::init_database().await,
-                        );
-                        load_addon_display_name_snapshot(&db, &repo_urls).await
-                    }),
+                    Ok(rt) => {
+                        let admission = admission.clone();
+                        rt.block_on(async move {
+                            if !crate::ui::app::admit_database_section(&admission) {
+                                return Default::default();
+                            }
+                            let db = crate::core::db::FoxyDb::from_handle(
+                                crate::core::tasks::init_database::init_database().await,
+                            );
+                            load_addon_display_name_snapshot(&db, &repo_urls).await
+                        })
+                    }
                     Err(err) => {
                         warn!(
                             "Join addon preflight worker failed to build DB runtime for display-name snapshot: {}",
@@ -731,6 +738,8 @@ impl Foxy {
             if tx
                 .send(JoinPreflightQueryResult {
                     query_id,
+                    space_id,
+                    generation,
                     address,
                     port,
                     result,
@@ -904,9 +913,7 @@ impl Foxy {
         true
     }
 
-    /// Adds the Creator DLC differences to the join modal. Skipped when the
-    /// server's DLC list could not be decoded, since an unknown list must not
-    /// be read as "the server runs no DLCs".
+    /// Treat undecodable server DLC data as unknown, not as an empty requirement list.
     fn merge_join_preflight_dlc_changes(
         state: &mut Option<crate::ui::app::PendingJoinPreflightState>,
         effective: &Repository,
@@ -981,8 +988,7 @@ impl Foxy {
         })
     }
 
-    /// The server answered its status query, so a failed addon query is shown
-    /// with Retry and Join without addon check instead of ending the Join.
+    /// If status succeeds but addon lookup fails, offer retry or Join without addon checking.
     pub(crate) fn present_join_addon_query_failure(
         &mut self,
         ctx: &egui::Context,
@@ -1050,10 +1056,7 @@ impl Foxy {
         }
     }
 
-    /// Evaluate the TeamSpeak running gate for a join. Returns
-    /// `(ts3_required, ts3_running)`. `ts3_required` is true only when the
-    /// per-repo/global check is enabled and the repository ships `.ts3_plugin`
-    /// files. Synchronous - acceptable for a user-initiated join action.
+    /// The TeamSpeak gate applies only when enabled and the repository has `.ts3_plugin` files.
     fn evaluate_ts3_join_gate(&self, effective: &Repository, repo_name: &str) -> (bool, bool) {
         if !crate::core::game::registry()
             .active()
@@ -1079,10 +1082,7 @@ impl Foxy {
         (true, running)
     }
 
-    /// Evaluate the Steam running gate. Returns `(steam_required, steam_running)`.
-    /// `steam_required` is true whenever the per-repo/global check is enabled,
-    /// since Steam must be running for Arma 3 to launch. Synchronous - acceptable
-    /// for a user-initiated launch/join action.
+    /// When enabled, the Steam gate requires Steam for Arma 3 launch and Join.
     fn evaluate_steam_launch_gate(&self, effective: &Repository, repo_name: &str) -> (bool, bool) {
         if !self.repository_launch_uses_steam(effective)
             || !self.repo_check_steam_running_before_launch(effective)
@@ -1097,12 +1097,7 @@ impl Foxy {
         (true, running)
     }
 
-    /// Convergence point for the plain "Launch" button (no server to join).
-    ///
-    /// When the Steam-running check is enabled and Steam is not running, this
-    /// opens the pre-launch modal so the user can start Steam first. Otherwise
-    /// it launches directly (the Steam guard still auto-starts Steam as a
-    /// fallback when the check is disabled).
+    /// Plain Launch opens preflight when the enabled Steam check fails; otherwise it launches directly.
     pub(crate) fn present_launch_preflight(
         &mut self,
         ctx: &egui::Context,
@@ -1111,9 +1106,7 @@ impl Foxy {
     ) {
         let (steam_required, steam_running) = self.evaluate_steam_launch_gate(effective, repo_name);
         let steam_attention = steam_required && !steam_running;
-        // A plain launch has no server requirement list, so the only addon check
-        // it runs is for enabled external addons whose files are missing - these
-        // would otherwise be dropped silently at launch.
+        // Without server requirements, plain and editor launch only warn about enabled external addons whose files are missing.
         let unavailable_enabled = Self::unavailable_enabled_external_addons(
             effective,
             &self.repository_view_state.repositories,
@@ -1271,8 +1264,7 @@ impl Foxy {
         } else {
             Vec::new()
         };
-        // The missing-addons check always runs: an enabled external addon whose
-        // files are gone would be dropped silently when the editor launches.
+        // Always warn when the editor would silently skip a missing enabled external addon.
         let unavailable_enabled = Self::unavailable_enabled_external_addons(
             effective,
             &self.repository_view_state.repositories,
@@ -1293,11 +1285,7 @@ impl Foxy {
         self.launch_editor_with_mission(ctx, effective, mission, repo_name);
     }
 
-    /// Launch Arma 3 with a mission loaded in Eden Editor.
-    ///
-    /// Constructs the same base command as a normal launch (flags + mods),
-    /// but instead of server connection params, passes the mission.sqm path
-    /// as a positional argument to open it in the editor.
+    /// Eden launch uses the normal flags and mods, then passes `mission.sqm` as the editor's positional argument.
     pub(super) fn launch_editor_with_mission(
         &mut self,
         _ctx: &egui::Context,
@@ -1305,6 +1293,9 @@ impl Foxy {
         mission: &EditorMission,
         repo_name: &str,
     ) {
+        if !self.client_db_admission.allows() {
+            return;
+        }
         let now = Instant::now();
         if let Some(until) = self.editor_launch_cooldown_until
             && until > now

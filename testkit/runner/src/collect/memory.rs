@@ -1,23 +1,5 @@
-//! Process memory sampling for the memory lane.
-//!
-//! The kit measures Foxy's own footprint from outside the process, so the
-//! numbers are not perturbed by an allocator hook inside the binary under test
-//! and a memory row can be recorded for any operation, not only the ones that
-//! already publish telemetry.
-//!
-//! Two counters are read per sample and they answer different questions.
-//! `PrivateUsage` is private commit: memory the process asked for and has not
-//! given back, which is what an allocation regression moves. `WorkingSetSize`
-//! is resident pages, which the OS trims under pressure, so it tracks what the
-//! machine feels rather than what Foxy holds. Both are recorded; the ledger
-//! gates on commit. The process I/O read counter rides along: it counts every
-//! byte the process read, page-cache hits included, so it exposes re-reads a
-//! disk counter would hide. Process user and kernel CPU time ride along too,
-//! so an operation reports what it cost the machine as well as how long it took.
-//!
-//! Off Windows only the process's total CPU time is read, through `sysinfo`:
-//! nothing there counts private commit or the working set the same way, so
-//! those figures are left out rather than approximated.
+//! Private commit tracks allocations; residency is OS-trimmed and I/O counts include page-cache reads.
+//! Only CPU time is comparable off Windows; unsupported memory counters stay absent.
 
 use serde_json::{Map, Value, json};
 use std::{
@@ -162,11 +144,7 @@ impl Watch {
             loop {
                 let pid = target.lock().ok().and_then(|slot| *slot);
                 if let Some(pid) = pid {
-                    // A `startup` operation replaces the app mid-watch. The
-                    // samples taken before the restart belong to the process
-                    // that is going away, and carrying them over would report
-                    // the outgoing app's footprint as the new one's starting
-                    // point.
+                    // Discard outgoing-process samples on startup replacement; otherwise the new process inherits the old footprint.
                     if current != Some(pid) {
                         current = Some(pid);
                         samples.clear();
@@ -193,11 +171,7 @@ impl Watch {
         }
     }
 
-    /// Stop sampling and reduce the series to the ledger's memory block.
-    ///
-    /// The settle window runs first: without it the last sample lands while the
-    /// operation's transient buffers are still alive and every row would report
-    /// its peak as its retained footprint.
+    /// Sample the quiet tail before reporting retained memory; transient buffers at completion would report peak as retained.
     pub fn finish(mut self) -> Value {
         if !self.settle.is_zero() {
             thread::sleep(self.settle);
@@ -232,9 +206,7 @@ fn summarize(samples: &[Sample], interval: Duration, settle_ms: u64, threads: us
         });
     }
     let last_ms = samples[samples.len() - 1].elapsed_ms;
-    // The settle window is where a retained figure is honest, so read it from
-    // the quiet tail rather than from the single last sample, which can catch a
-    // collection that has not run yet.
+    // Use the quiet tail rather than one last sample, which may precede delayed collection.
     let tail_start = last_ms.saturating_sub(settle_ms);
     let footprints: Option<Vec<(u64, Footprint)>> = samples
         .iter()
@@ -247,8 +219,6 @@ fn summarize(samples: &[Sample], interval: Duration, settle_ms: u64, threads: us
         .collect();
     let mut stats = Map::new();
     if let Some(footprints) = &footprints {
-        // The reduced numbers say how much; the series says where, which is
-        // the difference between a one-time cache fill and a leak.
         let series = footprints
             .iter()
             .map(|(elapsed_ms, footprint)| {
@@ -302,7 +272,6 @@ fn summarize(samples: &[Sample], interval: Duration, settle_ms: u64, threads: us
     Value::Object(stats)
 }
 
-/// Commit, residency, fault and read figures over a non-empty series.
 fn footprint_stats(footprints: &[(u64, Footprint)], tail_start: u64) -> Value {
     let first = footprints[0].1;
     let last = footprints[footprints.len() - 1].1;
@@ -332,9 +301,7 @@ fn footprint_stats(footprints: &[(u64, Footprint)], tail_start: u64) -> Value {
         "peak_private_bytes": peak,
         "median_private_bytes": sorted[sorted.len() / 2],
         "retained_private_bytes": retained,
-        // Growth over the operation, floored at zero: a negative number would
-        // only mean the operation started while an earlier one was still
-        // releasing, and a signed metric there is noise, not a saving.
+        // Floor growth at zero: ongoing cleanup from earlier work is not a saving attributable to this operation.
         "growth_private_bytes": retained.saturating_sub(start),
         "transient_private_bytes": peak.saturating_sub(retained),
         "peak_working_set_bytes": footprints.iter().map(|(_, f)| f.working_set).max(),
@@ -379,7 +346,6 @@ fn average_machine_cpu_percent(samples: &[Sample], tail_start: u64, threads: usi
     machine_cpu_percent(first, last, threads)
 }
 
-/// Highest CPU use over any span of at least `window_ms`.
 fn peak_machine_cpu_percent(samples: &[Sample], window_ms: u64, threads: usize) -> Option<f64> {
     let mut peak: Option<f64> = None;
     let mut end = 0;
@@ -470,7 +436,6 @@ mod tests {
 
     #[test]
     fn cpu_is_reported_as_a_share_of_every_thread() {
-        // The helper burns 2.5 processor seconds per second.
         let samples: Vec<Sample> = (0..=20).map(|i| sample(i * 100, 100)).collect();
         let stats = summarize(&samples, INTERVAL, 0, 10);
         assert_eq!(stats["cpu_threads"], 10);
@@ -482,7 +447,7 @@ mod tests {
     #[test]
     fn the_cpu_peak_is_the_busiest_full_window() {
         let mut samples: Vec<Sample> = (0..=30).map(|i| sample(i * 100, 100)).collect();
-        // Idle for the first second, then twice the helper's rate.
+
         for sample in &mut samples {
             let busy_ms = sample.elapsed_ms.saturating_sub(1_000);
             sample.counters.cpu = busy_ms * 50_000;

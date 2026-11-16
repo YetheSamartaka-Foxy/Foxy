@@ -3,9 +3,6 @@
 
 use std::path::Path;
 
-/// Logical cluster of the file's first data extent. `None` when the file has
-/// no extent of its own (a small file lives inside its MFT record), the extent
-/// is unallocated, or the platform has no such query.
 #[cfg(windows)]
 pub(super) fn first_cluster(path: &Path) -> Option<u64> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -52,7 +49,7 @@ pub(super) fn first_cluster(path: &Path) -> Option<u64> {
     }
     // SAFETY: LARGE_INTEGER is a union over the same 64 bits.
     let lcn = unsafe { *output.Extents[0].Lcn.QuadPart() };
-    // A sparse or virtual extent reports -1.
+
     u64::try_from(lcn).ok()
 }
 
@@ -61,8 +58,6 @@ pub(super) fn first_cluster(_path: &Path) -> Option<u64> {
     None
 }
 
-/// Reorder `items` by first cluster, those without one last in path order.
-/// Returns how many had a cluster.
 pub(super) fn sort_by_first_cluster<T>(
     items: &mut Vec<T>,
     clusters: Vec<Option<u64>>,

@@ -19,24 +19,16 @@ use super::transfer::{
 };
 use super::{ATTEMPT_LIMIT, BUFFERED_WRITE_CAPACITY};
 
-/// Fallback re-check for a worker parked above the current per-file range cap.
-/// Cap growth itself arrives on `range_cap_changed`; this only covers a worker
-/// that was not yet waiting when the notification fired.
+/// Recheck the cap after a missed notification so parked workers cannot remain asleep.
 const WORKER_GATE_RECHECK: Duration = Duration::from_millis(250);
 
 const RANGE_PART_META_VERSION: u32 = 1;
 
-/// Sidecar path holding completed-chunk state for a ranged `.foxy.part` file.
 pub(super) fn range_part_meta_path(path: &str) -> String {
     format!("{}.foxy.part.meta", path)
 }
 
-/// Persistent record of which chunks of a ranged download already completed.
-///
-/// Ranged downloads pre-allocate the full `.foxy.part` file and fill it out of
-/// order, so the part length alone cannot say how much real data it holds.
-/// This sidecar (`<file>.foxy.part.meta`) is updated after each chunk fully
-/// hits disk, which makes ranged downloads resumable across app restarts.
+/// File length cannot identify completed ranges because ranged downloads preallocate the part file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct RangePartMeta {
     version: u32,
@@ -59,8 +51,6 @@ impl RangePartMeta {
         chunk_count_for(self.file_size, self.chunk_size)
     }
 
-    /// Parse and validate sidecar bytes. Returns `None` for any malformed or
-    /// inconsistent state so callers fall back to a fresh download.
     pub(super) fn parse(bytes: &[u8]) -> Option<Self> {
         let mut meta: Self = serde_json::from_slice(bytes).ok()?;
         if meta.version != RANGE_PART_META_VERSION || meta.file_size == 0 || meta.chunk_size == 0 {
@@ -75,7 +65,6 @@ impl RangePartMeta {
         Some(meta)
     }
 
-    /// Synchronously load and validate a sidecar file (for blocking contexts).
     pub(super) fn load_sync(meta_path: &str) -> Option<Self> {
         let bytes = std::fs::read(meta_path).ok()?;
         Self::parse(&bytes)
@@ -85,7 +74,6 @@ impl RangePartMeta {
         self.completed.iter().copied().collect()
     }
 
-    /// Total bytes covered by completed chunks (last chunk may be short).
     pub(super) fn completed_bytes(&self) -> u64 {
         self.completed
             .iter()
@@ -110,8 +98,6 @@ fn chunk_len_at(index: u64, file_size: u64, chunk_size: u64) -> u64 {
     chunk_size.min(file_size.saturating_sub(start))
 }
 
-/// Chunk indices fully covered by a sequential prefix of `part_len` bytes.
-/// Used to adopt an append-style part file from a previous simple download.
 fn prefix_completed_chunks(part_len: u64, file_size: u64, chunk_size: u64) -> Vec<u32> {
     if chunk_size == 0 || part_len == 0 {
         return Vec::new();
@@ -121,21 +107,16 @@ fn prefix_completed_chunks(part_len: u64, file_size: u64, chunk_size: u64) -> Ve
     (0..full_chunks).map(|idx| idx as u32).collect()
 }
 
-/// How an existing `.foxy.part` (and optional sidecar) should be handled when
-/// a ranged download starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PartInitPlan {
-    /// No usable prior state - truncate and download everything.
     Fresh,
-    /// Resume a ranged part: these chunk indices are already on disk.
+
     ResumeChunks(Vec<u32>),
-    /// Every byte is already on disk (previous session finished the transfer
-    /// but did not promote). Skip the download; later hashing verifies it.
+
     AlreadyComplete,
 }
 
-/// Decide resume strategy. Returns the plan plus the chunk grid to use -
-/// resuming must reuse the grid recorded in the sidecar, not the current one.
+/// Resume with the sidecar's recorded chunk grid, not a newly computed grid.
 fn plan_part_init(
     part_len: Option<u64>,
     meta: Option<&RangePartMeta>,
@@ -156,22 +137,18 @@ fn plan_part_init(
                     )
                 }
             } else if download_total >= file_size {
-                // Append-style download finished but was never promoted.
                 (PartInitPlan::AlreadyComplete, chunk_target)
             } else {
-                // Full-length part without completion records is a ranged
-                // pre-allocation with unknown contents - cannot be trusted.
+                // Full-length preallocation without completion records has unknown contents and cannot be trusted.
                 (PartInitPlan::Fresh, chunk_target)
             }
         }
         Some(len) if len < file_size => {
             if meta.is_some() {
-                // Ranged parts are always full length; a short part with a
-                // sidecar is inconsistent state.
+                // A short ranged part with a sidecar is inconsistent because ranged parts are preallocated to full length.
                 (PartInitPlan::Fresh, chunk_target)
             } else {
-                // Adopt the sequential prefix from a previous append-style
-                // (simple) download; only the boundary chunk is re-fetched.
+                // Adopt a sequential prefix and refetch its boundary chunk.
                 (
                     PartInitPlan::ResumeChunks(prefix_completed_chunks(
                         len,
@@ -186,12 +163,6 @@ fn plan_part_init(
     }
 }
 
-/// Chunk size for one ranged file.
-///
-/// Equal-size chunks whose count fills whole waves of `workers`, so a file
-/// never ends on a partly populated wave: with a fixed 8 MiB grid a 424 MiB
-/// file runs 48 chunks in parallel and then 5 alone, and that straggler wave
-/// is the tail of a download run.
 pub(super) fn range_chunk_size_for(
     total_size: u64,
     workers: usize,
@@ -212,17 +183,14 @@ pub(super) fn range_chunk_size_for(
         .clamp(min_chunk, max_chunk)
 }
 
-/// A single HTTP range request job for a portion of a file.
 struct RangeJob {
-    /// Index of this chunk in the fixed chunk grid.
     index: u32,
-    /// Byte offset where this chunk starts in the file.
+
     start: u64,
-    /// Byte offset where this chunk ends (inclusive).
+
     end: u64,
 }
 
-/// Build range jobs for the chunks not present in `completed`.
 fn missing_range_jobs(total_size: u64, chunk_size: u64, completed: &HashSet<u32>) -> Vec<RangeJob> {
     if chunk_size == 0 {
         return Vec::new();
@@ -245,9 +213,7 @@ fn missing_range_jobs(total_size: u64, chunk_size: u64, completed: &HashSet<u32>
     jobs
 }
 
-/// Serialized writer for the resume sidecar. Chunk completions are recorded
-/// best-effort: a failed sidecar write degrades resume granularity, never the
-/// download itself.
+/// Sidecar write failures reduce resume granularity but must not fail the download.
 struct RangeMetaWriter {
     meta_path: String,
     state: Mutex<RangePartMeta>,
@@ -263,7 +229,6 @@ impl RangeMetaWriter {
         renamed
     }
 
-    /// Write the current state to disk (atomic replace via temp + rename).
     async fn persist(&self) {
         let state = self.state.lock().await;
         if let Err(err) = Self::persist_locked(&self.meta_path, &state).await {
@@ -288,7 +253,6 @@ impl RangeMetaWriter {
     }
 }
 
-/// Per-file state shared across all range workers downloading that file.
 struct RangeFileState {
     file_id: u64,
     url: Arc<str>,
@@ -311,22 +275,12 @@ fn prepare_part_file(
     }
     let profiled = crate::core::utils::profiling::FsTimer::start();
     let file = options.open(part_path)?;
-    // Pre-allocate (fresh) or extend an adopted shorter part to full length.
+
     file.set_len(total_size)?;
     profiled.stop("preallocate", total_size);
     Ok(file)
 }
 
-/// Download a large file using a pool of range workers pulling from a shared queue.
-///
-/// The file is decomposed into fixed-size chunks. A pool of workers pulls chunks
-/// from the queue, acquires a global range permit, downloads, and writes to the
-/// correct offset. Workers above the current fair-share cap stay parked, so when
-/// the global queue drains (tail of the run, or a single-file download) the
-/// remaining files automatically ramp up to more parallel connections.
-///
-/// Completed chunks are recorded in a `.foxy.part.meta` sidecar after their data
-/// is on disk, so an interrupted ranged download resumes in the next session.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn download_large_file_with_range_queue(
     context: Arc<crate::core::models::context::FoxyContext>,
@@ -351,7 +305,6 @@ pub(super) async fn download_large_file_with_range_queue(
     let part_path = format!("{}.foxy.part", path);
     let meta_path = range_part_meta_path(&path);
 
-    // Inspect prior part/sidecar state off the async runtime.
     let (plan, chunk_size) = {
         let part_path = part_path.clone();
         let meta_path = meta_path.clone();
@@ -395,8 +348,6 @@ pub(super) async fn download_large_file_with_range_queue(
 
     let jobs = missing_range_jobs(total_size as u64, chunk_size, &completed_set);
 
-    // Reset progress counters to verified on-disk state. Mirrors the simple
-    // path, which re-stores progress at every resume/restart boundary.
     download_total.store(resumed_bytes as usize, Ordering::SeqCst);
     download_cycle.store(0, Ordering::SeqCst);
 
@@ -411,8 +362,7 @@ pub(super) async fn download_large_file_with_range_queue(
         meta_path: meta_path.clone(),
         state: Mutex::new(resume_meta),
     });
-    // Persist the initial sidecar so a crash during the first chunks already
-    // has a valid grid recorded (fresh start) or adopted prefix state.
+    // Persist the grid before chunks start so a crash can resume on the same layout.
     meta_writer.persist().await;
 
     if !completed_set.is_empty() {
@@ -438,8 +388,7 @@ pub(super) async fn download_large_file_with_range_queue(
 
     let queue = Arc::new(Mutex::new(VecDeque::from(jobs)));
 
-    // Spawn up to the per-file ceiling; workers above the current fair-share
-    // cap stay parked until queue pressure drops and the cap grows.
+    // Park workers above the fair-share cap until active queue pressure drops.
     let worker_count = scheduler
         .limits
         .max_ranges_per_file
@@ -497,7 +446,7 @@ pub(super) async fn download_large_file_with_range_queue(
                 if first_error.is_none() || is_missing_remote_file(&err) {
                     first_error = Some(err);
                 }
-                // Drain the queue so other workers exit quickly
+
                 queue.lock().await.clear();
             }
             Err(join_err) => {
@@ -533,16 +482,13 @@ pub(super) async fn download_large_file_with_range_queue(
         );
     }
 
-    // Drop the shared file handle before rename
     drop(state);
 
-    // The transfer is complete; the sidecar has served its purpose.
     remove_range_meta(&meta_path).await;
 
     Ok(total_bytes)
 }
 
-/// Remove a resume sidecar, ignoring not-found.
 pub(super) async fn remove_range_meta(meta_path: &str) {
     let profiled = crate::core::utils::profiling::FsTimer::start();
     let removed = tokio::fs::remove_file(meta_path).await;
@@ -574,8 +520,7 @@ async fn range_worker(
     loop {
         wait_for_download_resume(&mut pause_rx, &mut cancel_rx).await?;
 
-        // Fair-share gate: workers above the current per-file cap park until
-        // the global queue drains and the cap grows (tail ramp-up).
+        // Park workers above the per-file cap until global queue pressure drops.
         if worker_id >= scheduler.current_per_file_range_cap() {
             if queue.lock().await.is_empty() {
                 return Ok(());
@@ -599,7 +544,6 @@ async fn range_worker(
 
         ensure_not_cancelled(&cancel_rx)?;
 
-        // Acquire global range permit
         let _permit = scheduler
             .range_permits
             .clone()
@@ -635,12 +579,10 @@ async fn range_worker(
                 state
                     .completed_bytes
                     .fetch_add(bytes as usize, Ordering::Relaxed);
-                // Record after the chunk's data is fully written so the
-                // sidecar never claims bytes that are not on disk.
+                // Persist completion only after data is written so sidecars never claim absent bytes.
                 state.meta_writer.mark_complete(job.index).await;
             }
             Err(err) => {
-                // On failure, clear the queue to stop other workers
                 queue.lock().await.clear();
                 return Err(err);
             }
@@ -774,7 +716,6 @@ async fn download_one_range(
                 .range_retries
                 .fetch_add(1, Ordering::Relaxed);
 
-            // Flush buffer before reconnect
             if !write_buf.is_empty() {
                 let flush_offset = buf_offset;
                 buf_offset += write_buf.len() as u64;
@@ -787,7 +728,6 @@ async fn download_one_range(
                 io_write_count += 1;
             }
 
-            // Reconnect from where we left off
             let resume_start = start + bytes_received;
             if resume_start > end {
                 break;
@@ -815,7 +755,6 @@ async fn download_one_range(
         }
     }
 
-    // Flush remaining buffer
     if !write_buf.is_empty() {
         let file = state.part_file.clone();
         let offset = buf_offset;
@@ -855,7 +794,6 @@ async fn download_one_range(
 mod tests {
     use super::*;
 
-    /// Full chunk grid with nothing completed (test convenience).
     fn build_range_jobs(total_size: u64, chunk_size: u64) -> Vec<RangeJob> {
         missing_range_jobs(total_size, chunk_size, &HashSet::new())
     }
@@ -907,12 +845,12 @@ mod tests {
 
     #[test]
     fn build_range_jobs_large_file() {
-        let size = 500 * 1024 * 1024; // 500 MB
-        let chunk = 8 * 1024 * 1024; // 8 MB
+        let size = 500 * 1024 * 1024;
+        let chunk = 8 * 1024 * 1024;
         let jobs = build_range_jobs(size, chunk);
-        // 500 / 8 = 62.5 → 63 chunks
+
         assert_eq!(jobs.len(), 63);
-        // Verify contiguity and index ordering
+
         for i in 1..jobs.len() {
             assert_eq!(jobs[i].start, jobs[i - 1].end + 1);
             assert_eq!(jobs[i].index, jobs[i - 1].index + 1);
@@ -930,8 +868,6 @@ mod tests {
         assert_eq!(jobs[0].end, 199);
     }
 
-    // ── RangePartMeta ──────────────────────────────────────────────────
-
     #[test]
     fn range_part_meta_roundtrip() {
         let mut meta = RangePartMeta::new(250, 100);
@@ -939,7 +875,7 @@ mod tests {
         let parsed = RangePartMeta::parse(&meta.serialize()).expect("valid sidecar");
         assert_eq!(parsed.file_size, 250);
         assert_eq!(parsed.chunk_size, 100);
-        // Parse normalizes ordering and dedupes
+
         assert_eq!(parsed.completed, vec![0, 2]);
     }
 
@@ -953,7 +889,7 @@ mod tests {
     #[test]
     fn range_part_meta_rejects_out_of_range_index() {
         let mut meta = RangePartMeta::new(250, 100);
-        meta.completed = vec![3]; // grid has chunks 0..=2
+        meta.completed = vec![3];
         assert!(RangePartMeta::parse(&meta.serialize()).is_none());
     }
 
@@ -967,11 +903,9 @@ mod tests {
     fn range_part_meta_completed_bytes_counts_short_last_chunk() {
         let mut meta = RangePartMeta::new(250, 100);
         meta.completed = vec![0, 2];
-        // Chunk 0 is 100 bytes, chunk 2 is the 50-byte tail.
+
         assert_eq!(meta.completed_bytes(), 150);
     }
-
-    // ── prefix_completed_chunks ────────────────────────────────────────
 
     #[test]
     fn prefix_chunks_cover_only_full_chunks() {
@@ -980,8 +914,6 @@ mod tests {
         assert_eq!(prefix_completed_chunks(100, 1000, 100), vec![0]);
         assert_eq!(prefix_completed_chunks(250, 1000, 100), vec![0, 1]);
     }
-
-    // ── plan_part_init ─────────────────────────────────────────────────
 
     #[test]
     fn plan_fresh_when_no_part_file() {

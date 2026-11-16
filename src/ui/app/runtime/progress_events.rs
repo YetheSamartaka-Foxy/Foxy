@@ -61,9 +61,15 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn poll_repository_db_wipe_results(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         loop {
             match self.repository_db_wipe_rx.try_recv() {
                 Ok(result) => {
+                    if !self.scoped_result_applies(&result.space_id, result.generation) {
+                        continue;
+                    }
                     self.pending_repository_db_wipes
                         .remove(&result.repository_url);
                     self.pending_repository_force_redownloads
@@ -99,9 +105,7 @@ impl Foxy {
                                 == 1;
                             self.repo_db_reset_pending_recheck
                                 .insert(result.repository_url.clone());
-                            // The diff and progress history belong to whichever
-                            // repository is syncing or awaiting confirmation; a
-                            // purge of another one (a deletion) must leave them.
+                            // A purge only clears progress for its own repository; another repository's sync or confirmation state must remain.
                             let diff_owner = self
                                 .syncing_repository
                                 .or(self.update_ready_repo)
@@ -209,33 +213,44 @@ impl Foxy {
         }
     }
 
-    /// Drain completed global database wipe results.
     pub(in crate::ui::app) fn poll_database_wipe_result(&mut self, ctx: &egui::Context) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         loop {
             match self.database_wipe_rx.try_recv() {
-                Ok(Ok(())) => {
-                    let repair_required = self.pending_db_schema_wipe.is_some();
-                    self.database_wipe_in_flight = false;
-                    self.pending_db_schema_wipe = None;
-                    self.show_db_schema_wipe_prompt = false;
-                    self.fs_watch_index_dirty = true;
-                    self.show_success_toast(self.t("Database wiped successfully"));
-                    if repair_required && self.startup_tasks_started {
-                        self.start_database_startup_tasks();
+                Ok(delivery) => {
+                    if !self.scoped_result_applies(&delivery.space_id, delivery.generation) {
+                        continue;
                     }
-                    if self.startup_tasks_started
-                        && std::mem::take(&mut self.recheck_all_after_database_wipe)
-                    {
-                        self.queue_recheck_all_repositories();
+                    match delivery.outcome {
+                        Ok(()) => {
+                            let repair_required = self.pending_db_schema_wipe.is_some();
+                            self.database_wipe_in_flight = false;
+                            self.pending_db_schema_wipe = None;
+                            self.show_db_schema_wipe_prompt = false;
+                            self.fs_watch_index_dirty = true;
+                            self.show_success_toast(self.t("Database wiped successfully"));
+                            if repair_required && self.startup_tasks_started {
+                                self.start_database_startup_tasks();
+                            }
+                            if self.startup_tasks_started
+                                && std::mem::take(&mut self.recheck_all_after_database_wipe)
+                            {
+                                self.queue_recheck_all_repositories();
+                            }
+                            self.needs_repaint = true;
+                            self.resume_database_launch(ctx);
+                        }
+                        Err(err) => {
+                            self.database_wipe_in_flight = false;
+                            self.recheck_all_after_database_wipe = false;
+                            self.show_error_toast(
+                                self.t("Failed to wipe database") + &format!(": {err}"),
+                            );
+                            self.needs_repaint = true;
+                        }
                     }
-                    self.needs_repaint = true;
-                    self.resume_database_launch(ctx);
-                }
-                Ok(Err(err)) => {
-                    self.database_wipe_in_flight = false;
-                    self.recheck_all_after_database_wipe = false;
-                    self.show_error_toast(self.t("Failed to wipe database") + &format!(": {err}"));
-                    self.needs_repaint = true;
                 }
                 Err(StdTryRecvError::Empty) => break,
                 Err(StdTryRecvError::Disconnected) => {
@@ -246,9 +261,7 @@ impl Foxy {
         }
     }
 
-    /// A failed download (including a force redownload that stopped before
-    /// touching local files) has no modal left open to show the error, so it is
-    /// surfaced as a toast plus the selected repository's completion banner.
+    /// Surface failed downloads in a toast and completion banner because no modal remains open to show the error.
     fn report_download_failure(
         &mut self,
         repo_index: Option<usize>,
@@ -284,9 +297,15 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn poll_addon_delete_results(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         loop {
             match self.addon_delete_result_rx.try_recv() {
                 Ok(result) => {
+                    if !self.scoped_result_applies(&result.space_id, result.generation) {
+                        continue;
+                    }
                     let delete_key = Self::normalize_path_for_addon_match(&result.addon_path);
                     self.pending_addon_deletes.remove(&delete_key);
 
@@ -338,6 +357,9 @@ impl Foxy {
     }
 
     pub fn poll_backend_progress(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         const MAX_PROGRESS_EVENTS_PER_POLL: usize = 512;
         let mut processed_events = 0usize;
 
@@ -347,7 +369,6 @@ impl Foxy {
                 break;
             }
 
-            // Limit the mutable borrow of backend_progress_rx to this block.
             let evt = {
                 let Some(rx) = self.backend_progress_rx.as_mut() else {
                     break;
@@ -372,8 +393,7 @@ impl Foxy {
                             let instance = Self::repo_instance_key(&repo.address, &repo.path);
                             self.finish_queued_update_launch(&instance, false);
                         }
-                        // No terminal event will arrive, so a bulk or scheduled run
-                        // would otherwise wait for this repository forever.
+                        // Count a missing terminal event as failure so bulk and scheduled runs cannot wait forever.
                         self.record_repository_space_bulk_completion(
                             last_repo, last_mode, false, false,
                         );
@@ -470,9 +490,7 @@ impl Foxy {
                             );
                         }
                     } else {
-                        // Don't let a background recheck of another repository
-                        // overwrite the diff currently displayed for a repo whose
-                        // download just finished (keeps its summary/cards intact).
+                        // Keep another repository's recheck from replacing the completed-download summary currently shown in the update modal.
                         let preserve_completed_download = self.download_finished
                             && self.download_finished_repo.is_some()
                             && self.syncing_repository != self.download_finished_repo;
@@ -490,8 +508,7 @@ impl Foxy {
                     self.needs_repaint = true;
                 }
                 ProgressEvent::SiblingPropagation { repo_urls } => {
-                    // Propagation settles only the addons a sibling shares with the
-                    // synced repository; its own quick scan decides what is left.
+                    // Settle shared addons only; the synced repository's quick scan handles the rest.
                     self.queue_quick_scan_for_urls(repo_urls.clone());
                     self.needs_repaint = true;
                 }
@@ -538,9 +555,7 @@ impl Foxy {
                     memory_bytes,
                 } => {
                     if self.current_sync_mode == Some(SyncMode::Download) {
-                        // Snapshot live running totals so the in-progress download
-                        // summary card reflects real values instead of staying at
-                        // zero until the final `Finished` event recomputes them.
+                        // Snapshot live totals so the in-progress summary reflects work before the terminal event.
                         let downloaded_bytes = self.total_downloaded_bytes;
                         let stage_elapsed = self.download_stage_started_at.map(|t| t.elapsed());
                         if let Some(summary) = self.download_summary.as_mut() {
@@ -699,8 +714,7 @@ impl Foxy {
                         .copied()
                         .unwrap_or((0.0, 0, 0, 0, 0));
 
-                    // Core retries can emit transient lower snapshots for an addon.
-                    // Keep UI progress monotonic to avoid visual flicker/backtracking.
+                    // Keep displayed addon progress monotonic when core retries emit lower intermediate snapshots.
                     let merged_files_total = prev_files_total.max(*files_total);
                     let merged_files_done =
                         prev_files_done.max((*files_done).min(merged_files_total));
@@ -798,8 +812,7 @@ impl Foxy {
                         self.recheck_progress_peak =
                             Some(self.recheck_progress_peak.unwrap_or(0.0).max(fraction));
                     }
-                    // Throttle repaints for hash progress to avoid overwhelming
-                    // the renderer during heavy operations (thousands of events).
+                    // Throttle hash-progress repaints under high event volume.
                     let now = Instant::now();
                     let should_repaint = *checked_files == *total_files
                         || *checked_parts == *total_parts
@@ -926,8 +939,7 @@ impl Foxy {
                     self.syncing_repository = None;
                     self.current_sync_mode = None;
                     self.active_sync_selection = None;
-                    // A sync is what first writes a repository's addon rows, and
-                    // the watcher indexes those only when it starts.
+                    // The filesystem watcher indexes addon rows when it starts, so the first sync must create them.
                     if finished_successfully {
                         self.mark_fs_watch_index_dirty();
                     }
@@ -1127,7 +1139,6 @@ impl Foxy {
                             self.open_update_after_sync = false;
                         }
                     } else if last_mode == Some(SyncMode::Download) {
-                        // A failed download just set its own failure banner.
                         if !matches!(evt, ProgressEvent::Failed(_)) {
                             self.completed_repository_check_banner = None;
                         }
@@ -1147,10 +1158,7 @@ impl Foxy {
                                 self.repo_db_reset_pending_recheck.remove(&normalized_url);
                                 self.clear_active_update_session_for_url(&repo_address, &repo_path);
                                 self.clear_pending_update_cache_for_url(&repo_address, &repo_path);
-                                // The download fully synced this repository, so a
-                                // queued startup recheck is redundant - and running
-                                // it would reset the finished-download summary the
-                                // update modal is still displaying.
+                                // A completed download already synced the repository; another recheck would erase its visible summary.
                                 let queue_len = self.startup_recheck_queue.len();
                                 let completed_path = Self::repo_instance_path_key(&repo_path);
                                 self.startup_recheck_queue.retain(|(address, path, _)| {
@@ -1196,7 +1204,7 @@ impl Foxy {
 
                         self.maybe_auto_fill_app_update_url_from_metadata();
 
-                        // Queue a repo.json metadata refresh for modes that talk to the server.
+                        // Refresh repository metadata only for modes that query the server.
                         if let Some(idx) = last_repo
                             && matches!(
                                 last_mode,
@@ -1375,8 +1383,7 @@ impl Foxy {
                                         || summary.after_download_hash_duration > Duration::ZERO
                                 });
                             if has_backend_hash_summary {
-                                // The core emits `Hash {total}s` for display after sending
-                                // authoritative cumulative/after-download hash durations.
+                                // `Hash {total}s` is display-only; authoritative cumulative hash durations are emitted separately.
                             } else if let Some(parsed_duration) =
                                 Self::parse_hash_stage_duration_label(label)
                             {
@@ -1452,9 +1459,7 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn stage_label_uses_hash_counter(label: &str) -> bool {
-        // Only actual hashing stages should keep the hash counter visible.
-        // Persistence stages ("Saving parts X/Y", "Updating files X/Y", etc.)
-        // carry their own progress in the label and should clear the counter.
+        // Only hashing stages retain the hash counter; persistence stages report progress in their own label.
         label == "Calculating file hashes"
             || label == "Recalculating file hashes"
             || Self::hashing_files_stage_has_progress(label)
@@ -1464,8 +1469,7 @@ impl Foxy {
         label == "Hashing..." || label.starts_with("Hashing downloaded files")
     }
 
-    /// A cancel takes a few seconds to wind the work down, and the stages it
-    /// still reports must not replace the cancelling state shown on request.
+    /// Keep the cancelling state visible while cancellation unwinds through later stages.
     fn stage_hidden_by_cancel(cancel_requested: bool, label: &str) -> bool {
         cancel_requested && !matches!(label, "Cancelling..." | "Reverting changes")
     }

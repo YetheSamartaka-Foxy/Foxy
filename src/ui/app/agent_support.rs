@@ -1,14 +1,4 @@
-//! Process-global state shared between the agent-gui driver
-//! ([`super::agent_driver`]) and ordinary UI code paths that must consult it
-//! without holding a `Foxy` reference: the native-dialog interception slot
-//! (the `dialog` command) and the driver-controlled virtual clock (the `clock`
-//! command).
-//!
-//! Everything here is intentionally tiny and lock-light so the UI thread never
-//! blocks on it. All of it is inert when the agent-gui driver is not running:
-//! [`agent_gui_active`] starts `false`, the clock offset starts at zero and is
-//! never frozen, and no dialog response is queued - so a normal user run sees
-//! real wall-clock time and real native pickers.
+//! Share the driver virtual clock and queued native-picker responses with UI code that has no `Foxy` reference; all state is inert outside agent-gui.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -21,7 +11,6 @@ use once_cell::sync::Lazy;
 /// interception so a normal user run never has its file pickers hijacked.
 static AGENT_GUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Arbitrary monotonic epoch for the virtual clock's freeze bookkeeping.
 static PROCESS_START: Lazy<Instant> = Lazy::new(Instant::now);
 
 pub fn set_agent_gui_active(active: bool) {
@@ -32,22 +21,19 @@ pub fn agent_gui_active() -> bool {
     AGENT_GUI_ACTIVE.load(Ordering::Relaxed)
 }
 
-// ── Native dialog interception (the `dialog` command) ───────────────────────
-
-/// A response pre-registered for the next native file/folder picker.
+// Pre-register a response for the next native file or folder picker.
 #[derive(Clone, Debug)]
 pub enum QueuedDialog {
     /// Return this path from the next picker (as if the user picked it).
     Path(PathBuf),
-    /// Cancel the next picker (as if the user dismissed it).
+
     Cancel,
 }
 
 static QUEUED_DIALOG: Mutex<Option<QueuedDialog>> = Mutex::new(None);
 /// Set while the app is actually blocked inside a real native picker.
 static DIALOG_OPEN: AtomicBool = AtomicBool::new(false);
-/// Count of native pickers the queue has intercepted, so `dialog pending` can
-/// report whether the slot has been consumed.
+
 static DIALOG_INTERCEPTED: AtomicU64 = AtomicU64::new(0);
 
 pub fn queue_dialog_response(response: QueuedDialog) {
@@ -62,7 +48,6 @@ pub fn clear_dialog_response() {
     }
 }
 
-/// Peek the queued response without consuming it (for `dialog pending`).
 pub fn dialog_queued() -> Option<QueuedDialog> {
     QUEUED_DIALOG.lock().ok().and_then(|slot| slot.clone())
 }
@@ -79,12 +64,7 @@ fn take_queued() -> Option<QueuedDialog> {
     QUEUED_DIALOG.lock().ok().and_then(|mut slot| slot.take())
 }
 
-/// Consult the queued response before spawning a real native picker.
-///
-/// When agent-gui mode is active and a response is queued, returns it instead
-/// of blocking the UI thread on a native dialog the headless harness can never
-/// see or dismiss. Otherwise runs `real` (the actual `rfd` picker) and tracks
-/// the open/closed window around it.
+/// Use queued responses only in agent-gui mode; otherwise invoke the real picker and track its open state.
 fn intercept_single(real: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
     if agent_gui_active()
         && let Some(queued) = take_queued()
@@ -101,24 +81,19 @@ fn intercept_single(real: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
     result
 }
 
-/// Folder picker wrapper. See [`intercept_single`].
 pub fn pick_folder(real: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
     intercept_single(real)
 }
 
-/// Single-file picker (open) wrapper. See [`intercept_single`].
 pub fn pick_file(real: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
     intercept_single(real)
 }
 
-/// Save-file picker wrapper. See [`intercept_single`].
 pub fn save_file(real: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
     intercept_single(real)
 }
 
-/// Multi-file picker wrapper. A queued single path is returned as a one-element
-/// list; a queued cancel returns `None`. Part of the complete picker-wrapper
-/// surface; no multi-select call site exists yet.
+/// A queued path becomes a one-item result; a queued cancel returns `None`.
 #[allow(dead_code)]
 pub fn pick_files(real: impl FnOnce() -> Option<Vec<PathBuf>>) -> Option<Vec<PathBuf>> {
     if agent_gui_active()
@@ -136,21 +111,17 @@ pub fn pick_files(real: impl FnOnce() -> Option<Vec<PathBuf>>) -> Option<Vec<Pat
     result
 }
 
-// ── Virtual clock (the `clock` command) ─────────────────────────────────────
-
-/// Virtual time added on top of real elapsed time (milliseconds).
+// Virtual time is real elapsed time plus an offset, optionally frozen.
 static CLOCK_OFFSET_MS: AtomicU64 = AtomicU64::new(0);
-/// True while logical time is paused.
+
 static CLOCK_FROZEN: AtomicBool = AtomicBool::new(false);
-/// Real milliseconds (since [`PROCESS_START`]) captured when freezing began;
-/// only meaningful while `CLOCK_FROZEN` is set.
+
 static CLOCK_FREEZE_REAL_MS: AtomicU64 = AtomicU64::new(0);
 
 fn real_millis() -> u64 {
     PROCESS_START.elapsed().as_millis() as u64
 }
 
-/// Jump logical time forward by `ms`, firing time-based behaviors on demand.
 pub fn clock_advance(ms: u64) {
     CLOCK_OFFSET_MS.fetch_add(ms, Ordering::Relaxed);
 }
@@ -162,8 +133,7 @@ pub fn clock_freeze() {
     }
 }
 
-/// Resume logical time without a jump: the wall-clock interval spent frozen is
-/// removed from the offset so virtual time continues where it paused.
+/// Resume without a time jump by removing the frozen wall-clock interval from the virtual offset.
 pub fn clock_resume() {
     if CLOCK_FROZEN.swap(false, Ordering::Relaxed) {
         let frozen_for = real_millis().saturating_sub(CLOCK_FREEZE_REAL_MS.load(Ordering::Relaxed));
@@ -172,9 +142,7 @@ pub fn clock_resume() {
     }
 }
 
-/// Virtual elapsed since `base`: real elapsed plus the advance offset, with
-/// forward progress paused while frozen. With the default (offset 0, not
-/// frozen) this equals `base.elapsed()`, so non-agent runs are unaffected.
+/// Virtual elapsed is real elapsed plus the advance offset; freezing pauses progress, while default settings match wall time.
 pub fn virtual_elapsed(base: Instant) -> Duration {
     let real = base.elapsed();
     let offset = Duration::from_millis(CLOCK_OFFSET_MS.load(Ordering::Relaxed));
@@ -188,7 +156,6 @@ pub fn virtual_elapsed(base: Instant) -> Duration {
     total
 }
 
-/// `(offset_ms, frozen)` for the `clock` response.
 pub fn clock_state() -> (u64, bool) {
     (
         CLOCK_OFFSET_MS.load(Ordering::Relaxed),

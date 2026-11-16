@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "game": "arma3",
+  "platform": "windows_x64",
+  "app_id": 233780,
+  "branch": "public",
+  "build_id": 10000001,
+  "change_number": 20000002,
+  "depots": [
+    {
+      "depot_id": 233781,
+      "manifest_gid": "1000000000000000001"
+    },
+    {
+      "depot_id": 233782,
+      "manifest_gid": "1000000000000000002"
+    }
+  ],
+  "files": 2,
+  "bytes": 32201000,
+  "inventory_blake3": "0000000000000000000000000000000000000000000000000000000000000001",
+  "executable": {
+    "path": "arma3server_x64.exe",
+    "bytes": 32200952,
+    "blake3": "0000000000000000000000000000000000000000000000000000000000000002"
+  }
+}

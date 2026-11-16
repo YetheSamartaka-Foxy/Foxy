@@ -351,7 +351,7 @@ impl Foxy {
                             ui.add_space(horizontal_padding);
                         });
                     }
-                }); // End ScrollArea
+                });
 
             if repo_data_changed {
                 if let Some(repo) = self.repository_view_state.repositories.get_mut(repo_index) {
@@ -374,7 +374,6 @@ impl Foxy {
                     self.save_repositories();
                 }
             } else if ui_state_changed {
-                // UI-only filter controls should not persist repository data.
             }
 
             if let Some((addon_name, addon_directory_path, action)) = addon_context_action {

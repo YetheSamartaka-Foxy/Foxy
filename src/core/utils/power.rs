@@ -1,19 +1,15 @@
-//! The machine's power state, recorded with benchmarks and hash runs: on
-//! battery or a power-saving plan, disk and CPU power management can slow a
-//! run by more than any code change being measured.
+//! Power-saving policies change CPU/storage timings, so benchmark comparisons must capture power state.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PowerStatus {
-    /// `ac`, `battery` or empty when unknown.
     pub source: String,
     pub battery_percent: Option<u8>,
     pub battery_saver: bool,
-    /// Friendly name of the active power plan, in the system language.
+
     pub plan: String,
-    /// The Windows 10/11 power mode slider (`best-efficiency`, `balanced`,
-    /// `best-performance`, ...), empty when the system has none.
+
     pub mode: String,
 }
 
@@ -55,7 +51,7 @@ pub fn sample() -> PowerStatus {
             1 => "ac".to_owned(),
             _ => String::new(),
         };
-        // 128 means no system battery; 255 means the status is unknown.
+
         if raw.BatteryFlag & 128 == 0 && raw.BatteryLifePercent <= 100 {
             status.battery_percent = Some(raw.BatteryLifePercent);
         }

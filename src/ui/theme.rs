@@ -1,13 +1,4 @@
-//! Theme import/export and built-in presets.
-//!
-//! A theme is a portable snapshot of the user-customizable presentation:
-//! per-view font sizes and the palette colors. Themes are serialized as JSON so
-//! they can be shared between installs and distributed as defaults.
-//!
-//! Parsing is intentionally tolerant: a theme file only needs to carry the keys
-//! it wants to override. Missing keys fall back to the built-in defaults by
-//! merging the parsed JSON over a serialized default, which keeps older theme
-//! files forward-compatible as new font/color keys are added.
+//! Theme files are partial portable snapshots; missing keys inherit defaults so older files remain forward-compatible.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,8 +7,7 @@ use serde_json::Value;
 use crate::ui::fonts::FontSizes;
 use crate::ui::palette::{PaletteColors, RgbColor};
 
-/// Current on-disk theme schema version. Bump when the meaning of existing keys
-/// changes in a way that needs migration; additive keys do not require a bump.
+/// Bump this version only when existing key meanings require migration; additive keys remain compatible.
 pub const THEME_FORMAT_VERSION: u32 = 1;
 
 /// A portable snapshot of the customizable presentation settings.
@@ -38,7 +28,6 @@ fn default_version() -> u32 {
 }
 
 impl Theme {
-    /// Build a theme from the current font sizes and palette colors.
     pub fn from_current(
         name: impl Into<String>,
         font_sizes: FontSizes,
@@ -52,18 +41,11 @@ impl Theme {
         }
     }
 
-    /// Serialize the theme to pretty JSON suitable for writing to a file.
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
 
-    /// Parse a theme from JSON.
-    ///
-    /// Missing keys are tolerated: the parsed values are merged over the
-    /// built-in defaults so partial or older theme files still load. Font sizes
-    /// are clamped to their valid ranges. An error is returned only when the
-    /// JSON is malformed, is not an object, or carries a value of the wrong type
-    /// for a known key.
+    /// Partial themes merge over defaults; font sizes are clamped. Errors are limited to malformed JSON, non-object roots, or wrong types for known keys.
     pub fn from_json(json: &str) -> Result<Self, ThemeError> {
         let root: Value =
             serde_json::from_str(json).map_err(|err| ThemeError::Malformed(err.to_string()))?;
@@ -95,8 +77,7 @@ impl Theme {
     }
 }
 
-/// Errors produced while parsing a theme file. The variants stay
-/// machine-distinguishable so the UI can map them to localized messages.
+/// Keep parse errors distinguishable so the UI can map each one to localized text.
 #[derive(Debug)]
 pub enum ThemeError {
     /// The input was not valid JSON.
@@ -121,9 +102,6 @@ impl std::fmt::Display for ThemeError {
 
 impl std::error::Error for ThemeError {}
 
-/// Deserialize `root[key]` into `T`, merging any present keys over a serialized
-/// `T::default()`. This lets a theme override only the keys it cares about while
-/// every other key (including ones added in newer builds) keeps its default.
 fn merge_over_default<T>(root: &Value, key: &str) -> Result<T, ThemeError>
 where
     T: Default + Serialize + DeserializeOwned,
@@ -141,8 +119,6 @@ where
     })
 }
 
-/// Recursively overlay `overrides` onto `base`. Objects are merged key by key;
-/// any other value type replaces the base value outright.
 fn merge_value(base: &mut Value, overrides: &Value) {
     match (base, overrides) {
         (Value::Object(base_map), Value::Object(override_map)) => {
@@ -163,22 +139,18 @@ const fn rgb(r: u8, g: u8, b: u8) -> RgbColor {
     RgbColor { r, g, b }
 }
 
-/// A named, built-in theme preset the user can apply with one click.
 pub struct ThemePreset {
-    /// English key, also used as the i18n lookup key for the button label.
     pub name: &'static str,
     /// Palette applied by this preset. Font sizes always reset to defaults.
     pub palette: PaletteColors,
 }
 
 impl ThemePreset {
-    /// Materialize this preset into a full [`Theme`].
     pub fn to_theme(&self) -> Theme {
         Theme::from_current(self.name, FontSizes::default(), self.palette.clone())
     }
 }
 
-/// The built-in presets distributed with the app, in display order.
 pub fn builtin_presets() -> Vec<ThemePreset> {
     vec![
         ThemePreset {

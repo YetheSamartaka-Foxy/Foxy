@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "intent": {
+    "intent": {
+      "schema_version": 1,
+      "installation_key": "v1_0000000000000000_00000000000000000000000000000000",
+      "context_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "transaction_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "transaction_evidence": "{\"schema_version\":1,\"context_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"game_space_id\":\"alpha\",\"game_id\":\"arma3\",\"instance_id\":\"server_00000000000000000000000000000001\",\"owner\":{\"owner_id\":\"fixture_owner\",\"owner_generation\":1,\"game_space_id\":\"alpha\",\"instance_id\":\"server_00000000000000000000000000000001\",\"operation_id\":\"reviewed_switch\",\"run_generation\":1},\"installation_key\":\"v1_0000000000000000_00000000000000000000000000000000\",\"catalog_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"selection_generation\":1,\"selection_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"previous\":null,\"previous_fingerprint\":null,\"next\":{\"schema_version\":1,\"context_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"game_space_id\":\"alpha\",\"game_id\":\"arma3\",\"instance_id\":\"server_00000000000000000000000000000001\",\"generation\":1,\"installation_key\":\"v1_0000000000000000_00000000000000000000000000000000\",\"deployment\":{\"preparation_id\":\"prepared_0000000000000000000000000000000000000000000000000000000000000000\",\"record_id\":\"deployment_0000000000000000000000000000000000000000000000000000000000000000\",\"manifest_fingerprint\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"owner\":{\"owner_id\":\"fixture_owner\",\"owner_generation\":1,\"game_space_id\":\"alpha\",\"instance_id\":\"server_00000000000000000000000000000001\",\"operation_id\":\"reviewed_switch\",\"run_generation\":1}},\"destinations\":{\"active_state\":\"activation/active.json\",\"journal\":\"activation/journal.json\",\"candidate\":\"prepared/prepared_0000000000000000000000000000000000000000000000000000000000000000\",\"predecessor\":null}}",
+      "previous_state_fingerprint": null,
+      "next_state_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "owner": {
+        "owner_id": "fixture_owner",
+        "owner_generation": 1,
+        "game_space_id": "alpha",
+        "instance_id": "server_00000000000000000000000000000001",
+        "operation_id": "reviewed_switch",
+        "run_generation": 1
+      }
+    },
+    "fingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "journal": {
+    "schema_version": 1,
+    "context_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "game_space_id": "alpha",
+    "game_id": "arma3",
+    "instance_id": "server_00000000000000000000000000000001",
+    "owner": {
+      "owner_id": "fixture_owner",
+      "owner_generation": 1,
+      "game_space_id": "alpha",
+      "instance_id": "server_00000000000000000000000000000001",
+      "operation_id": "reviewed_switch",
+      "run_generation": 1
+    },
+    "installation_key": "v1_0000000000000000_00000000000000000000000000000000",
+    "catalog_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "selection_generation": 1,
+    "selection_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "previous": null,
+    "previous_fingerprint": null,
+    "next": {
+      "schema_version": 1,
+      "context_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "game_space_id": "alpha",
+      "game_id": "arma3",
+      "instance_id": "server_00000000000000000000000000000001",
+      "generation": 1,
+      "installation_key": "v1_0000000000000000_00000000000000000000000000000000",
+      "deployment": {
+        "preparation_id": "prepared_0000000000000000000000000000000000000000000000000000000000000000",
+        "record_id": "deployment_0000000000000000000000000000000000000000000000000000000000000000",
+        "manifest_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "owner": {
+        "owner_id": "fixture_owner",
+        "owner_generation": 1,
+        "game_space_id": "alpha",
+        "instance_id": "server_00000000000000000000000000000001",
+        "operation_id": "reviewed_switch",
+        "run_generation": 1
+      }
+    },
+    "destinations": {
+      "active_state": "activation/active.json",
+      "journal": "activation/journal.json",
+      "candidate": "prepared/prepared_0000000000000000000000000000000000000000000000000000000000000000",
+      "predecessor": null
+    }
+  },
+  "active": null,
+  "active_fingerprint": null,
+  "outcome": "aborted",
+  "resolver": {
+    "owner_id": "fixture_resolver",
+    "owner_generation": 2,
+    "game_space_id": "alpha",
+    "instance_id": "server_00000000000000000000000000000001",
+    "operation_id": "resolve_switch",
+    "run_generation": 2
+  }
+}

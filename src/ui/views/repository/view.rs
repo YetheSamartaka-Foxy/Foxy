@@ -16,15 +16,8 @@ use eframe::egui::{
 use log::info;
 
 impl Foxy {
-    /// Fixed height (in points) reserved for the repository banner image. Kept
-    /// constant so the layout does not shift when switching between repositories
-    /// whose images have different dimensions.
     pub(crate) const REPO_BANNER_HEIGHT: f32 = 160.0;
 
-    /// Renders the standardized repository banner image into a fixed-height
-    /// region. The image is scaled to fit within the banner height while
-    /// preserving its aspect ratio and centered horizontally. When `hidden` is
-    /// true, nothing is drawn and no vertical space is reserved.
     pub(crate) fn render_repository_banner_image(&self, ui: &mut Ui, checksum: &str, hidden: bool) {
         if hidden {
             return;
@@ -272,7 +265,7 @@ impl Foxy {
                                         });
                                     }
 
-                                    // Arma 3 profile dropdown
+
                                     if !self.detected_arma3_profiles.is_empty()
                                         && crate::core::game::registry()
                                             .active()
@@ -481,7 +474,7 @@ impl Foxy {
                                             repo_name
                                         );
                                         refresh_servers_action = Some(Box::new(move |app| {
-                                            // Re-fetch repo.json to update servers list first.
+
                                             if !is_local {
                                                 app.pending_repo_metadata_refresh.push(idx);
                                             }
@@ -527,7 +520,7 @@ impl Foxy {
                         ui.add_space(10.0);
                     }
 
-                    // Legacy protocol warning - shown for repos not using FoxyMode (BLAKE3).
+
                     if self
                         .repo_foxy_mode_for_address(&repo_address)
                         .is_some_and(|is_foxy| !is_foxy)
@@ -688,8 +681,7 @@ impl Foxy {
                         }
                         ui.add_space(10.0);
                     } else if let Some(action_banner) = action_banner {
-                        // The download summary banner can be dismissed directly,
-                        // without first opening (and then closing) the summary.
+                        // Allow dismissing the summary banner without opening the summary modal.
                         let allow_dismiss = action_banner.action
                             == RepositoryActionBannerAction::UpdateSummary;
                         let response = self
@@ -750,7 +742,7 @@ impl Foxy {
 
                     let (enable_server_list, enable_editor_mission_list) = {
                         let repo = &self.repository_view_state.repositories[selected_idx];
-                        // A downloaded game without servers would only show an empty list.
+
                         let has_servers = repo.game_build.is_none() || !repo.servers.is_empty();
                         (
                             self.repo_enable_server_list(repo) && has_servers,
@@ -906,8 +898,6 @@ impl Foxy {
     }
 }
 
-/// Outer width a [`egui::ComboBox`] needs for `text` without wrapping, clamped to
-/// `max_width`. Used to give the combo a wrap-aware slot in a wrapping row.
 fn combo_slot_width(ui: &Ui, text: &str, max_width: f32) -> f32 {
     let galley = ui.painter().layout_no_wrap(
         text.to_owned(),

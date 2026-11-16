@@ -14,14 +14,12 @@ pub struct RepositoryServer {
     pub battle_eye: bool,
 }
 
-/// The published folder that holds a custom game's build, named by the
-/// repository's `repo.json` `gameBuild`. It is synced like any addon but is
-/// never listed, toggled, or passed to the game as a mod.
+/// A custom game's published build folder is synced like an addon but never listed, toggled, or passed as a mod.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
 pub struct RepositoryGameBuild {
-    /// Published folder name, as in the repository's addon manifests.
+    /// Published folder name from the repository addon manifest.
     pub addon: String,
-    /// Executable path relative to that folder, with `/` separators.
+    /// Executable path relative to the game-build folder, using `/` separators.
     pub executable: String,
 }
 
@@ -124,8 +122,7 @@ pub struct Repository {
     pub check_ts3_running_before_join: Option<bool>,
     #[serde(default)]
     pub check_steam_running_before_launch: Option<bool>,
-    /// Per-repository override for hiding the repository banner image.
-    /// None = use the global setting.
+    /// `None` inherits the global banner-image setting.
     #[serde(default)]
     pub hide_repo_image: Option<bool>,
 
@@ -169,8 +166,7 @@ pub struct Repository {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game_build: Option<RepositoryGameBuild>,
 
-    /// The Arma 3 player profile name to use for this repository.
-    /// None = use the auto-detected active profile (or default).
+    /// `None` uses the detected active Arma 3 profile or its default.
     #[serde(default)]
     pub arma3_profile: Option<String>,
 
@@ -464,9 +460,7 @@ pub struct DownloadSummary {
 }
 
 impl DownloadSummary {
-    /// Returns `true` when at least one mod, file, or part was actually updated.
-    /// A summary with all-zero counts is a no-op download and should not be
-    /// persisted as an update notice.
+    /// A zero-count download is a no-op and must not become an update notice.
     pub fn has_meaningful_content(&self) -> bool {
         self.mods_updated > 0 || self.files_updated > 0 || self.parts_updated > 0
     }
@@ -516,10 +510,7 @@ pub struct UpdateSummaryNotice {
     #[serde(default)]
     pub pending_ack_count: u32,
     pub summary: DownloadSummary,
-    // Snapshot of the per-mod diff at the time the download completed, so the
-    // update summary modal can restore the correct "Mods to be updated" list
-    // per repository. Older persisted notices without this field fall back to
-    // an empty list.
+    // Persist the completion-time diff so each repository's update modal can restore its own addon list; older notices default to empty.
     #[serde(default)]
     pub mods: Vec<ModDiffSummary>,
 }
@@ -533,14 +524,12 @@ pub struct ActiveUpdateSession {
     pub mods: Vec<ModDiffSummary>,
 }
 
-/// What the user has selected in the repository view - either a server or a mission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepositorySelection {
     Server(usize),
     Mission(usize),
 }
 
-/// Cached mission list for the currently viewed repository.
 #[derive(Debug, Clone)]
 pub struct CachedMissionList {
     pub profile_name: String,

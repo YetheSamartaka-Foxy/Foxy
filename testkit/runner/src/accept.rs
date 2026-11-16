@@ -2,11 +2,7 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::path::Path;
 
-/// Accept a baseline from the rows a finished run already wrote to its
-/// `summary.json`, so a run made without `--accept` (or one whose acceptance
-/// was refused by a kit bug) does not have to be repeated. The run itself must
-/// have been made on a clean worktree; the current tree's state is irrelevant
-/// because the measured binary is the one the rows record.
+/// Baseline eligibility follows the recorded run's clean worktree and measured binary, independent of the current checkout.
 pub fn execute(repo_root: &Path, run_dir: &Path) -> Result<Value> {
     let summary = crate::case::read_json(&run_dir.join("summary.json"))
         .with_context(|| format!("read run summary in {}", run_dir.display()))?;

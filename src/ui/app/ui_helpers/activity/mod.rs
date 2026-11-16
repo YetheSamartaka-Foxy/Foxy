@@ -28,9 +28,7 @@ use egui::{Color32, Id, Pos2, Rect, Ui, vec2};
 use super::spinner::{progress_frame_interval, request_frame_after};
 use crate::ui::app::Foxy;
 
-/// The animation clock of one frame. Reduce motion zeroes egui's animation
-/// time; the activity visuals then draw their current state without moving
-/// and ask for no frames of their own.
+/// Reduced motion zeroes animation time and prevents these visuals from requesting frames.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Motion {
     time: f64,
@@ -53,18 +51,15 @@ impl Motion {
         self.animate
     }
 
-    /// Seconds on the animation clock; 0 while motion is reduced.
     pub(crate) fn time(self) -> f64 {
         self.time
     }
 
-    /// Position inside a cycle of `period` seconds, in `0.0..1.0`. Reduced in
-    /// f64 first so the phase stays smooth after days of uptime.
+    /// Reduce phase in `f64` to remain smooth after long uptime.
     pub(crate) fn cycle(self, period: f64) -> f32 {
         self.cycle_ago(period, 0.0)
     }
 
-    /// Where the same cycle stood `seconds` ago.
     pub(crate) fn cycle_ago(self, period: f64, seconds: f64) -> f32 {
         if period <= 0.0 {
             return 0.0;
@@ -93,13 +88,10 @@ pub(crate) fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
-/// 0 at both ends and 1 in the middle of `0.0..=1.0`, with flat shoulders.
 pub(crate) fn bump(t: f32) -> f32 {
     (PI * t.clamp(0.0, 1.0)).sin().powi(2)
 }
 
-/// Stable pseudo-random value in `0.0..1.0`, so per-cell jitter and phases
-/// stay put from frame to frame.
 pub(crate) fn noise(index: u32, seed: u32) -> f32 {
     let mut x = index.wrapping_mul(0x9E37_79B9) ^ seed.wrapping_mul(0x85EB_CA6B);
     x ^= x >> 16;
@@ -118,15 +110,11 @@ pub(crate) fn fade(color: Color32, opacity: f32) -> Color32 {
     Foxy::color_with_alpha(color, opacity)
 }
 
-/// `color` at `intensity`, added onto what lies below it so it glows instead
-/// of covering.
 pub(crate) fn additive(color: Color32, intensity: f32) -> Color32 {
     fade(color, intensity).additive()
 }
 
-/// Where one particle stands in its endlessly repeating life: `0.0..1.0`
-/// through the current life, and which life it is, so each life can start in
-/// a new place. Lives last between `periods` seconds, staggered per particle.
+/// Particle phase is `0..1` within its current life; each life can start at a new position, with duration staggered by `periods`.
 pub(crate) fn particle_life(
     index: u32,
     time: f64,
@@ -142,7 +130,6 @@ fn point_at(center: Pos2, radius: f32, angle: f32) -> Pos2 {
     center + radius * vec2(angle.cos(), angle.sin())
 }
 
-/// Points along an arc from `start`, sweeping `sweep` radians clockwise on screen.
 fn arc_points(center: Pos2, radius: f32, start: f32, sweep: f32) -> Vec<Pos2> {
     let steps = ((sweep.abs() / TAU) * 48.0).ceil().max(2.0) as usize;
     (0..=steps)
@@ -157,9 +144,7 @@ struct RiseMemory {
     pass: u64,
 }
 
-/// Seconds since `on` last turned true for `id`. A state that is already true
-/// when first drawn, or again after its view was off screen, starts no
-/// transition, so returning to a finished view does not replay its effects.
+/// Returning to an already-active or off-screen view starts no transition, so completed effects do not replay.
 pub(crate) fn rise_age(ui: &Ui, id: Id, on: bool) -> Option<f64> {
     let now = ui.input(|i| i.time);
     let pass = ui.ctx().cumulative_pass_nr();
@@ -182,14 +167,12 @@ pub(crate) fn rise_age(ui: &Ui, id: Id, on: bool) -> Option<f64> {
     (memory.on && memory.since.is_finite()).then(|| (now - memory.since).max(0.0))
 }
 
-/// `0.0..1.0` through a one-shot effect of `duration` seconds that started when
-/// `on` turned true, or `None` once it has played or when motion is reduced.
+/// One-shot progress is `0..1` until its duration elapses, then `None`; reduced motion disables it.
 pub(crate) fn rise_effect(ui: &Ui, id: Id, on: bool, duration: f64) -> Option<f32> {
     let age = rise_age(ui, id, on)?;
     (Motion::of(ui).animates() && age < duration).then(|| (age / duration) as f32)
 }
 
-/// The repaint delay a frame asks for once fonts and layout have settled.
 #[cfg(test)]
 fn settled_repaint_delay(animation_time: f32, add: impl Fn(&mut Ui)) -> std::time::Duration {
     let ctx = egui::Context::default();

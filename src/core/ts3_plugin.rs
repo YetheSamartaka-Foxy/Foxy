@@ -5,19 +5,15 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
-/// Information about a detected TS3 plugin file inside a repository addon.
 #[derive(Debug, Clone)]
 pub struct Ts3PluginInfo {
-    /// Display-friendly addon folder name (e.g. `@task_force_radio`).
     pub addon_name: String,
-    /// Absolute path to the `.ts3_plugin` file.
+
     pub plugin_path: PathBuf,
-    /// BLAKE3 hex hash (first 32 chars) of the file content.
+
     pub file_hash: String,
 }
 
-/// A detected repository TS3 plugin together with its verified state in the
-/// TeamSpeak 3 client.
 #[derive(Debug, Clone)]
 pub struct Ts3PluginStatus {
     pub info: Ts3PluginInfo,
@@ -25,8 +21,6 @@ pub struct Ts3PluginStatus {
     pub is_up_to_date: bool,
 }
 
-/// Verdict of a best-effort lookup of installed TeamSpeak plugin files. The
-/// per-file diagnostics behind it are logged by the lookup itself.
 #[derive(Debug, Clone)]
 pub struct Ts3InstalledPluginLookup {
     pub is_installed: bool,
@@ -39,10 +33,6 @@ struct Ts3ExpectedInstalledFile {
     package_hash: String,
 }
 
-/// Scan a single repository local path for `.ts3_plugin` files.
-///
-/// Walks one level of addon directories (folders starting with `@`) and checks
-/// up to two subdirectory levels for any `*.ts3_plugin` file.
 pub fn scan_repository_for_ts3_plugins(repo_path: &str) -> Vec<Ts3PluginInfo> {
     let base = Path::new(repo_path);
     if !base.is_dir() {
@@ -77,7 +67,7 @@ pub fn scan_repository_for_ts3_plugins(repo_path: &str) -> Vec<Ts3PluginInfo> {
         let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        // Only scan addon folders (start with @)
+
         if !dir_name.starts_with('@') {
             continue;
         }
@@ -97,13 +87,10 @@ pub fn scan_repository_for_ts3_plugins(repo_path: &str) -> Vec<Ts3PluginInfo> {
     results
 }
 
-/// Normalized key used to collapse repository paths that point at the same
-/// folder (case, separator, and trailing-slash variants).
 fn repository_path_key(path: &str) -> String {
     path.replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
-/// Scan all repository paths and collect TS3 plugin info.
 pub fn scan_all_repositories_for_ts3_plugins(repo_paths: &[String]) -> Vec<Ts3PluginInfo> {
     // Repositories joined to a game space share one folder, so the same path
     // usually arrives once per repository; crawling it each time is pure waste.
@@ -123,7 +110,7 @@ pub fn scan_all_repositories_for_ts3_plugins(repo_paths: &[String]) -> Vec<Ts3Pl
         all.extend(scan_repository_for_ts3_plugins(path));
     }
     let before_dedup = all.len();
-    // Deduplicate by plugin path
+
     all.sort_by(|a, b| a.plugin_path.cmp(&b.plugin_path));
     all.dedup_by(|a, b| a.plugin_path == b.plugin_path);
     info!(
@@ -134,10 +121,7 @@ pub fn scan_all_repositories_for_ts3_plugins(repo_paths: &[String]) -> Vec<Ts3Pl
     all
 }
 
-/// Scan the given repository paths and verify every detected plugin against the
-/// files installed in the TeamSpeak 3 client.
-///
-/// Both halves read and hash files, so callers must run this on a worker thread.
+/// Run plugin scanning and verification on a worker: both synchronously read and hash files.
 pub fn resolve_ts3_plugin_statuses(repo_paths: &[String]) -> Vec<Ts3PluginStatus> {
     scan_all_repositories_for_ts3_plugins(repo_paths)
         .into_iter()
@@ -164,7 +148,6 @@ fn collect_ts3_plugins_recursive(
         return;
     }
 
-    // Detect symlink loops by tracking canonical paths
     let canonical = match dir.canonicalize() {
         Ok(p) => p,
         Err(e) => {
@@ -253,8 +236,6 @@ fn hash_reader(reader: &mut impl Read) -> Result<String, std::io::Error> {
     Ok(hasher.finalize().to_hex()[..32].to_uppercase())
 }
 
-/// Search common TeamSpeak 3 client plugin folders for files installed by a
-/// repository `.ts3_plugin` package.
 pub fn lookup_installed_teamspeak_plugin(package_path: &Path) -> Ts3InstalledPluginLookup {
     let search_name = package_path
         .file_stem()
@@ -622,7 +603,6 @@ fn format_string_list(items: &[String]) -> String {
     format!("[{}]", items.join(", "))
 }
 
-/// Check whether a TeamSpeak 3 client process is currently running.
 #[cfg(target_os = "windows")]
 pub fn is_teamspeak_running() -> bool {
     match crate::core::utils::process::any_process_running(TEAMSPEAK_CLIENT_EXES) {
@@ -663,7 +643,6 @@ pub fn is_teamspeak_running() -> bool {
     }
 }
 
-/// Client executable file names, 64-bit preferred over 32-bit.
 #[cfg(target_os = "windows")]
 const TEAMSPEAK_CLIENT_EXES: &[&str] = &[
     "ts3client_win64.exe",
@@ -671,7 +650,6 @@ const TEAMSPEAK_CLIENT_EXES: &[&str] = &[
     "ts3client.exe",
 ];
 
-/// Candidate TeamSpeak 3 install directories to probe on Windows.
 #[cfg(target_os = "windows")]
 fn teamspeak_install_dir_candidates() -> Vec<PathBuf> {
     let mut bases = Vec::new();
@@ -690,8 +668,6 @@ fn teamspeak_install_dir_candidates() -> Vec<PathBuf> {
     bases
 }
 
-/// Build the ordered list of candidate TeamSpeak 3 client executable paths to
-/// probe on Windows. Earlier entries are preferred (64-bit before 32-bit).
 #[cfg(target_os = "windows")]
 fn teamspeak_client_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -703,7 +679,6 @@ fn teamspeak_client_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-/// Find a TeamSpeak 3 client executable inside `dir` (64-bit preferred).
 #[cfg(target_os = "windows")]
 pub fn teamspeak_client_exe_in(dir: &Path) -> Option<PathBuf> {
     TEAMSPEAK_CLIENT_EXES
@@ -730,8 +705,6 @@ pub fn teamspeak_client_exe_in(dir: &Path) -> Option<PathBuf> {
     .find(|candidate| candidate.is_file())
 }
 
-/// Best-effort detection of the TeamSpeak 3 client install directory, used to
-/// pre-fill the setting when it is unset (mirrors the Arma 3 directory probe).
 #[cfg(target_os = "windows")]
 pub fn detect_teamspeak_directory() -> Option<PathBuf> {
     let found = teamspeak_install_dir_candidates()
@@ -762,8 +735,6 @@ pub fn detect_teamspeak_directory() -> Option<PathBuf> {
         .find(|dir| teamspeak_client_exe_in(dir).is_some())
 }
 
-/// The TeamSpeak 3 client directory Foxy would use: the configured one when
-/// it holds a client executable, otherwise the auto-detected install.
 pub fn resolve_teamspeak_directory(configured_dir: &str) -> Option<PathBuf> {
     let configured_dir = configured_dir.trim();
     if !configured_dir.is_empty() {
@@ -775,8 +746,6 @@ pub fn resolve_teamspeak_directory(configured_dir: &str) -> Option<PathBuf> {
     detect_teamspeak_directory()
 }
 
-/// The `Version` declared in the package's `package.ini`, if the archive has
-/// one. Only the ini is read, never the plugin payload.
 pub fn read_package_version(package_path: &Path) -> Option<String> {
     let file = fs::File::open(package_path).ok()?;
     let mut archive = ZipArchive::new(file).ok()?;
@@ -810,11 +779,6 @@ fn parse_package_ini_version(contents: &str) -> Option<String> {
     })
 }
 
-/// Launch the installed TeamSpeak 3 client (not connected to any server).
-///
-/// Prefers the user-configured install directory; when that is unset or invalid
-/// it falls back to probing well-known install locations. Returns an `Err` with
-/// a user-facing message when the client cannot be found or started.
 pub fn launch_teamspeak(configured_dir: &str) -> Result<(), String> {
     let configured_dir = configured_dir.trim();
     info!(
@@ -846,15 +810,11 @@ pub fn launch_teamspeak(configured_dir: &str) -> Result<(), String> {
             "Found TeamSpeak 3 client executable: {}",
             sanitize_log_path(&exe)
         );
-        // Launch through the shell (`start`) rather than spawning the exe
-        // directly. The TeamSpeak client may be manifested to require
-        // administrator rights; a direct `CreateProcess` would fail with
-        // ERROR_ELEVATION_REQUIRED (os error 740), whereas the shell honors
-        // elevation and shows the normal UAC consent prompt.
+        // ShellExecute honors TeamSpeak's elevation manifest; direct CreateProcess may fail with ERROR_ELEVATION_REQUIRED.
         let mut command = std::process::Command::new("cmd");
         command
             .args(["/c", "start", "", &exe.display().to_string()])
-            .creation_flags(0x08000000); // CREATE_NO_WINDOW
+            .creation_flags(0x08000000);
         if let Some(dir) = exe.parent() {
             command.current_dir(dir);
         }
@@ -900,8 +860,6 @@ pub fn launch_teamspeak(configured_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Launch the `.ts3_plugin` file with the OS default handler.
-/// Opens through the platform default handler, with Linux opener fallbacks.
 pub fn open_ts3_plugin(path: &Path) -> Result<(), String> {
     info!("Opening TS3 plugin: {}", sanitize_log_path(path));
 
@@ -910,7 +868,7 @@ pub fn open_ts3_plugin(path: &Path) -> Result<(), String> {
         use std::os::windows::process::CommandExt;
         std::process::Command::new("cmd")
             .args(["/c", "start", "", &path.display().to_string()])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .creation_flags(0x08000000)
             .spawn()
             .map_err(|e| format!("Failed to open TS3 plugin: {}", e))?;
     }
@@ -994,7 +952,7 @@ mod tests {
         fs::write(addon.join("radio.ts3_plugin"), b"plugin data").unwrap();
 
         let repo_path = tmp.path().to_str().unwrap().to_string();
-        // Pass same path twice - should dedup
+
         let results = scan_all_repositories_for_ts3_plugins(&[repo_path.clone(), repo_path]);
         assert_eq!(results.len(), 1);
     }
@@ -1017,8 +975,7 @@ mod tests {
         let addon = tmp.path().join("@radio").join("teamspeak");
         fs::create_dir_all(&addon).unwrap();
         let package = addon.join("foxy_test_plugin.ts3_plugin");
-        // A payload name that cannot exist in a real TeamSpeak plugins folder,
-        // so the verdict does not depend on what the test machine has installed.
+
         write_test_ts3_package(
             &package,
             &[("plugins/foxy_test_unmatched_marker.txt", b"x".as_slice())],
@@ -1053,7 +1010,7 @@ mod tests {
         let hash = compute_plugin_hash(&file).unwrap();
         assert_eq!(hash.len(), 32);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
-        // Ensure uppercase
+
         assert_eq!(hash, hash.to_uppercase());
     }
 
@@ -1215,8 +1172,7 @@ VERSION = \"2.1\"
     #[test]
     fn teamspeak_client_candidates_prefer_64bit_and_include_known_exes() {
         let candidates = teamspeak_client_candidates();
-        // The probe order must list the 64-bit client before the 32-bit one so
-        // we prefer it when both are installed.
+
         let win64 = candidates
             .iter()
             .position(|p| p.ends_with("ts3client_win64.exe"));
@@ -1229,7 +1185,7 @@ VERSION = \"2.1\"
                 "64-bit client should be probed before 32-bit"
             );
         }
-        // Every candidate must live under a TeamSpeak 3 Client folder.
+
         assert!(candidates.iter().all(|p| p.parent().is_some_and(|parent| {
             parent
                 .file_name()

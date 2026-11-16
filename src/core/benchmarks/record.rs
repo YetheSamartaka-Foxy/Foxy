@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 pub const BENCHMARK_RECORD_VERSION: u32 = 2;
 
-/// Which user action the benchmark measured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum BenchmarkKind {
     Recheck,
@@ -27,7 +26,6 @@ impl BenchmarkKind {
         BenchmarkKind::AddonForceRedownload,
     ];
 
-    /// Stable identifier used in file names, the DB index and filters.
     pub fn slug(self) -> &'static str {
         match self {
             BenchmarkKind::Recheck => "recheck",
@@ -40,7 +38,6 @@ impl BenchmarkKind {
         }
     }
 
-    /// English label; the UI translates it through i18n.
     pub fn label(self) -> &'static str {
         match self {
             BenchmarkKind::Recheck => "Recheck",
@@ -157,7 +154,6 @@ pub struct BenchmarkStageMark {
     pub label: String,
 }
 
-/// A row of the `PIPELINE SUMMARY` table the core logs at the end of a run.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BenchmarkStage {
     pub name: String,
@@ -165,9 +161,8 @@ pub struct BenchmarkStage {
     pub details: String,
 }
 
-/// Summary rows the sync pipeline records with the whole action's elapsed
-/// time when it exits early, including names retained for older saved records.
-/// They enclose the other stages, so a stage chart must not draw them as peers.
+/// Whole-action rows emitted on early exit; these enclose stages and must not
+/// appear as peers in stage charts.
 pub const ACTION_TOTAL_STAGES: &[&str] = &[
     "download_skip_after_quick_verify",
     "prepare_download_total",
@@ -242,18 +237,16 @@ pub struct BenchmarkMetrics {
     pub peak_download_bps: f64,
     pub peak_memory_bytes: u64,
     pub avg_cpu_percent: f64,
-    /// Process user and kernel CPU time over the capture; 0 in older records.
+
     #[serde(default)]
     pub cpu_user_ms: u64,
     #[serde(default)]
     pub cpu_kernel_ms: u64,
     pub hash_files_total: u64,
     pub hash_parts_total: u64,
-    /// Pending updates the check found (0 for downloads).
+
     pub pending_updates: u64,
-    /// Conditions that must match before this record may be a measured-time
-    /// reference. Empty legacy fields are derived from the record and its SOL
-    /// lines when the comparison key is built.
+
     #[serde(default)]
     pub compatibility: BenchmarkCompatibility,
 }
@@ -294,7 +287,7 @@ pub struct BenchmarkRecord {
     #[serde(default)]
     pub notes: String,
     pub kind: BenchmarkKind,
-    /// Unix seconds when the action started.
+
     pub started_at: i64,
     pub started_at_local: String,
     pub finished_at_local: String,
@@ -314,14 +307,14 @@ pub struct BenchmarkRecord {
     pub metrics: BenchmarkMetrics,
     #[serde(default)]
     pub stages: Vec<BenchmarkStage>,
-    /// `SOL op=...` lines from the log frame, one key/value map per line.
+
     #[serde(default)]
     pub sol: Vec<BTreeMap<String, String>>,
     #[serde(default)]
     pub samples: Vec<BenchmarkSample>,
     #[serde(default)]
     pub stage_marks: Vec<BenchmarkStageMark>,
-    /// Name of the log slice file beside the record, when one was written.
+
     #[serde(default)]
     pub log_file: Option<String>,
     #[serde(default)]
@@ -333,7 +326,6 @@ impl BenchmarkRecord {
         self.elapsed_ms as f64 / 1000.0
     }
 
-    /// Text the list search matches against.
     pub fn search_haystack(&self) -> String {
         let mut text = String::new();
         for part in [
@@ -355,8 +347,6 @@ impl BenchmarkRecord {
         text.to_lowercase()
     }
 
-    /// The rate that best summarises the action: download speed for
-    /// transfers, hashed files per second for checks.
     pub fn headline_rate(&self) -> Option<(f64, &'static str)> {
         if self.kind.transfers_files() && self.metrics.avg_download_bps > 0.0 {
             return Some((self.metrics.avg_download_bps, "B/s"));
@@ -369,7 +359,6 @@ impl BenchmarkRecord {
     }
 }
 
-/// Keep at most `max_points` samples, evenly spaced, always retaining the last.
 pub fn downsample_samples(samples: &[BenchmarkSample], max_points: usize) -> Vec<BenchmarkSample> {
     if max_points == 0 || samples.len() <= max_points {
         return samples.to_vec();

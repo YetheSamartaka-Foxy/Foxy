@@ -26,16 +26,9 @@ impl StartupStoragePath {
     }
 }
 
-/// Free-space floor for the drives Foxy writes its own state through.
-///
-/// A heuristic, and deliberately generous: Foxy stages multi-gigabyte addon
-/// downloads and backups through these paths while the database and its WAL grow
-/// on the same volume. A drive that runs out mid-sync does not fail cleanly -
-/// writes start erroring part-way through, which lands the local state in the
-/// same silently-wrong shape a stale schema does.
+/// Leave headroom because downloads, backups, the database, and its WAL share Foxy's state volume.
 pub const CRITICAL_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
-/// Roles whose drive backs Foxy's own writes rather than the game install.
 const SPACE_CRITICAL_ROLES: &[&str] = &[
     "database",
     "app_data",
@@ -45,30 +38,19 @@ const SPACE_CRITICAL_ROLES: &[&str] = &[
     "backups",
 ];
 
-/// Whether `role` sits on a drive too full for Foxy to work through safely.
 pub fn role_space_is_critical(role: &str, available: u64) -> bool {
     SPACE_CRITICAL_ROLES.contains(&role) && available < CRITICAL_FREE_BYTES
 }
 
-/// What the background storage check hands back to the UI.
 #[derive(Clone, Debug, Default)]
 pub struct StartupDiagnosticsReport {
-    /// A drive Foxy writes its own state through is below [`CRITICAL_FREE_BYTES`].
     pub low_space: bool,
-    /// Filesystem findings for the storage paths and the repository
-    /// manifests, already logged; advisories included.
+
     pub storage_issues: Vec<StorageIssue>,
 }
 
-/// Log the startup system summary off the launch path.
-///
-/// Building it refreshes every sysinfo subsystem and enumerates drives, network
-/// interfaces and GPUs, which costs a few hundred milliseconds of pure wall
-/// clock. None of it gates the first frame, so it runs on its own thread and
-/// reports back only what the UI needs: whether a drive Foxy writes through is
-/// critically full, and which paths sit on a filesystem Foxy cannot use safely
-/// (`conventions/SPEED_OF_LIGHT.md` O8). `repositories` must be empty when the
-/// database is not safe to open (lock conflict, pending schema wipe).
+/// Collect system details off the launch path; only Foxy-write volumes and unsafe filesystems gate startup.
+/// Do not query repositories until database ownership and schema checks pass.
 pub fn spawn_startup_system_diagnostics(
     storage_paths: Vec<StartupStoragePath>,
     repositories: Vec<StartupRepositoryInstance>,
@@ -83,9 +65,6 @@ pub fn spawn_startup_system_diagnostics(
     rx
 }
 
-/// The storage half of [`spawn_startup_system_diagnostics`] alone, for a
-/// runtime game-space switch that brings new paths and repositories without
-/// re-describing the machine.
 pub fn spawn_storage_compat_check(
     storage_paths: Vec<StartupStoragePath>,
     repositories: Vec<StartupRepositoryInstance>,
@@ -123,7 +102,6 @@ fn storage_compat_report(
     }
 }
 
-/// Volume-level findings for every distinct `(role, path)`.
 fn volume_compat_issues(
     storage_paths: &[StartupStoragePath],
     prober: &VolumeProber,
@@ -151,9 +129,6 @@ fn volume_compat_issues(
     issues
 }
 
-/// Manifest-derived findings per repository instance: files the destination
-/// filesystem cannot hold, and paths that reach the Windows `MAX_PATH` limit.
-/// One aggregate query per repository, no tree load, no file access.
 fn repository_limit_issues(
     repositories: &[StartupRepositoryInstance],
     prober: &VolumeProber,
@@ -239,8 +214,6 @@ fn repository_limit_issues(
     issues
 }
 
-/// One `storage_fs:` line per distinct `(role, path)` describing the volume
-/// behind it, for the startup summary and the diagnostics export.
 pub fn storage_volume_lines(storage_paths: &[StartupStoragePath]) -> Vec<String> {
     let prober = VolumeProber::new();
     let mut lines = Vec::new();
@@ -280,8 +253,6 @@ pub fn storage_volume_lines(storage_paths: &[StartupStoragePath]) -> Vec<String>
     lines
 }
 
-/// One `low_space:` line per role whose drive is below [`CRITICAL_FREE_BYTES`].
-/// Empty when every Foxy-owned path has headroom.
 pub fn low_space_warning_lines(storage_paths: &[StartupStoragePath]) -> Vec<String> {
     let disks = Disks::new_with_refreshed_list();
     let mut lines = Vec::new();
@@ -407,7 +378,6 @@ fn cpu_summary_line(system: &System) -> String {
     )
 }
 
-// ── #1 uptime & boot time ──────────────────────────────────────────────────
 fn uptime_summary_line() -> String {
     let uptime = System::uptime();
     let boot = System::boot_time();
@@ -441,7 +411,6 @@ fn format_duration_secs(total: u64) -> String {
     parts.join(" ")
 }
 
-// ── #4 locale, language & timezone ──────────────────────────────────────────
 fn locale_summary_line() -> String {
     let env_lang = ["LC_ALL", "LANG", "LANGUAGE", "LC_MESSAGES"]
         .into_iter()
@@ -465,13 +434,12 @@ fn locale_summary_line() -> String {
 fn os_ui_locale() -> String {
     use winapi::um::winnls::GetUserDefaultLocaleName;
 
-    // LOCALE_NAME_MAX_LENGTH is 85 wide chars.
     let mut buffer = [0u16; 85];
     let written = unsafe { GetUserDefaultLocaleName(buffer.as_mut_ptr(), buffer.len() as i32) };
     if written <= 0 {
         return "<unknown>".to_string();
     }
-    // `written` includes the trailing null terminator.
+
     let len = (written as usize).saturating_sub(1);
     String::from_utf16_lossy(&buffer[..len])
 }
@@ -481,7 +449,6 @@ fn os_ui_locale() -> String {
     "<unknown>".to_string()
 }
 
-// ── #10 power / battery status ──────────────────────────────────────────────
 #[cfg(target_os = "windows")]
 fn power_summary_line() -> String {
     use winapi::um::winbase::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
@@ -513,7 +480,6 @@ fn power_summary_line() -> String {
     "power: unavailable on this platform".to_string()
 }
 
-// ── #6 elevation / privilege level ──────────────────────────────────────────
 fn privilege_summary_line() -> String {
     match crate::core::utils::deelevate::is_process_elevated() {
         Some(true) => "elevation: elevated=yes".to_string(),
@@ -522,7 +488,6 @@ fn privilege_summary_line() -> String {
     }
 }
 
-// ── #5 display scaling / DPI ────────────────────────────────────────────────
 #[cfg(target_os = "windows")]
 fn display_scale_summary_lines() -> Vec<String> {
     use winapi::um::winuser::GetDpiForSystem;
@@ -542,7 +507,6 @@ fn display_scale_summary_lines() -> Vec<String> {
     vec!["display_scale: per-monitor scaling is logged by the UI layer".to_string()]
 }
 
-// ── #7 network interface summary ────────────────────────────────────────────
 fn network_summary_lines() -> Vec<String> {
     let networks = Networks::new_with_refreshed_list();
     if networks.is_empty() {
@@ -552,7 +516,7 @@ fn network_summary_lines() -> Vec<String> {
     let mut names: Vec<&String> = networks.keys().collect();
     names.sort();
     let mut lines = Vec::new();
-    // MAC and IP addresses are intentionally omitted to avoid logging PII.
+
     for name in names {
         let data = &networks[name];
         lines.push(format!(
@@ -567,7 +531,6 @@ fn network_summary_lines() -> Vec<String> {
     lines
 }
 
-// ── #8 antivirus / Defender state (Windows Security Center) ─────────────────
 #[cfg(target_os = "windows")]
 fn antivirus_summary_lines() -> Vec<String> {
     match query_windows_antivirus() {
@@ -578,9 +541,9 @@ fn antivirus_summary_lines() -> Vec<String> {
             .iter()
             .map(|product| {
                 let state = product.product_state;
-                // Bit layout of productState (undocumented but stable):
-                //   0x1000 in the middle byte => real-time protection enabled
-                //   0x10 in the low byte      => definitions out of date
+
+
+
                 let realtime = state & 0x1000 != 0;
                 let up_to_date = state & 0x10 == 0;
                 format!(
@@ -632,7 +595,6 @@ fn query_windows_antivirus() -> Result<Vec<AntivirusInfo>, wmi::WMIError> {
         .collect())
 }
 
-// ── #2 free space for app-relevant paths ────────────────────────────────────
 fn path_space_summary_lines(storage_paths: &[StartupStoragePath]) -> Vec<String> {
     let disks = Disks::new_with_refreshed_list();
 
@@ -693,7 +655,6 @@ fn disk_for_path<'a>(path: &Path, disks: &'a Disks) -> Option<&'a sysinfo::Disk>
         .max_by_key(|disk| disk.mount_point().as_os_str().len())
 }
 
-// ── #9 process & environment basics ─────────────────────────────────────────
 fn process_summary_line(system: &System) -> String {
     let pid = std::process::id();
     let parent = sysinfo::get_current_pid()
@@ -785,11 +746,7 @@ fn query_windows_gpus() -> Result<Vec<GpuInfo>, wmi::WMIError> {
         .collect())
 }
 
-/// Enumerate every storage device the OS reports, regardless of whether Foxy
-/// uses it. Intended for the diagnostics export so support can see the full
-/// drive inventory (e.g. a slow external disk holding a repo). The startup log
-/// keeps using [`used_drive_summary_lines`] to stay focused on app-relevant
-/// drives.
+/// Include all reported drives in diagnostic exports, including external repository disks.
 pub fn all_storage_devices_lines() -> Vec<String> {
     let disks = Disks::new_with_refreshed_list();
     if disks.is_empty() {
@@ -1021,8 +978,6 @@ mod tests {
 
     #[test]
     fn low_space_threshold_is_a_floor_not_a_ratio() {
-        // The August 2026 field report: 5.6 GiB free on a 930 GiB system drive
-        // holding the database, logs, temp and backups.
         assert!(role_space_is_critical("database", 5 * 1024 * 1024 * 1024));
         assert!(!role_space_is_critical("database", CRITICAL_FREE_BYTES));
         assert!(!role_space_is_critical(
@@ -1033,8 +988,6 @@ mod tests {
 
     #[test]
     fn emits_all_diagnostic_sections() {
-        // Exercises every collector end-to-end (including the platform-specific
-        // ones) and asserts each section is present without panicking.
         let paths = vec![StartupStoragePath::new("test-repo", std::env::temp_dir())];
         let lines = startup_system_diagnostics_lines(&paths);
         let joined = lines.join("\n");
@@ -1065,20 +1018,16 @@ mod tests {
 
     #[test]
     fn all_storage_devices_lines_never_empty() {
-        // Always returns at least one line: a device row, or the explicit
-        // "none reported" fallback when the OS lists no disks.
         let lines = all_storage_devices_lines();
         assert!(!lines.is_empty());
         assert!(lines.iter().all(|line| line.starts_with("storage_device:")));
     }
 
-    // ── format_bytes ────────────────────────────────────────────────────
-
     #[test]
     fn format_bytes_small_values_use_bytes() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
-        // One byte below a MiB still reports raw bytes.
+
         assert_eq!(format_bytes(1024 * 1024 - 1), "1048575 B");
     }
 
@@ -1092,8 +1041,6 @@ mod tests {
     fn format_bytes_gib_boundary() {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.00 GiB");
     }
-
-    // ── format_duration_secs ────────────────────────────────────────────
 
     #[test]
     fn format_duration_minute_boundary() {
@@ -1115,8 +1062,6 @@ mod tests {
         assert_eq!(format_duration_secs(2 * 86_400 + 5), "2d 0h 0m 5s");
     }
 
-    // ── optional_value ──────────────────────────────────────────────────
-
     #[test]
     fn optional_value_returns_trimmed_present_value() {
         assert_eq!(
@@ -1136,18 +1081,13 @@ mod tests {
         assert_eq!(optional_value(Some("   ".to_string())), "<unknown>");
     }
 
-    // ── env_presence ────────────────────────────────────────────────────
-
     #[test]
     fn env_presence_unset_variable_reports_unset() {
-        // A key that is exceedingly unlikely to exist in any test environment.
         assert_eq!(
             env_presence("FOXY_DIAGNOSTICS_DEFINITELY_UNSET_VAR_XYZ"),
             "unset"
         );
     }
-
-    // ── normalized_path ─────────────────────────────────────────────────
 
     #[test]
     fn normalized_path_keeps_absolute_paths() {
@@ -1163,8 +1103,6 @@ mod tests {
         let normalized = normalized_path(Path::new("relative/dir"));
         assert!(normalized.is_absolute());
     }
-
-    // ── drive_key_for_mount ─────────────────────────────────────────────
 
     #[cfg(not(target_os = "windows"))]
     #[test]
@@ -1192,8 +1130,6 @@ mod tests {
             Some("C:".to_string())
         );
     }
-
-    // ── StartupStoragePath ──────────────────────────────────────────────
 
     #[test]
     fn startup_storage_path_stores_role_and_path() {

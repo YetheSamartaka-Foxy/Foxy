@@ -6,8 +6,6 @@ use crate::ui::app::Foxy;
 use crate::ui::palette;
 
 impl Foxy {
-    /// Modal chrome for prompts that need the user's attention before anything
-    /// else: the regular modal frame with a heavy danger-colored border.
     pub(crate) fn danger_modal_chrome(&self, ctx: &egui::Context) -> Frame {
         self.modal_window_chrome(ctx)
             .stroke(Stroke::new(2.0, self.color_error()))
@@ -17,7 +15,6 @@ impl Foxy {
         RichText::new(title).color(self.color_error()).strong()
     }
 
-    /// Tinted, bordered panel with a warning glyph beside the key message.
     pub(crate) fn render_danger_callout(&self, ui: &mut Ui, message: String) {
         let danger = self.color_error();
         let glyph_size = egui::TextStyle::Body.resolve(ui.style()).size * 2.4;
@@ -50,8 +47,7 @@ impl Foxy {
             });
     }
 
-    /// Full-width destructive-colored button for the action a prompt recommends.
-    /// It takes keyboard focus while nothing else holds it, so Enter confirms it.
+    /// The recommended destructive action receives keyboard focus so Enter confirms it.
     pub(crate) fn add_danger_primary_button(
         &self,
         ui: &mut Ui,
@@ -115,7 +111,6 @@ impl Foxy {
         response
     }
 
-    /// Frameless, dimmed button for the discouraged alternative in a prompt.
     pub(crate) fn add_secondary_prompt_button(&self, ui: &mut Ui, label: String) -> Response {
         let response =
             ui.add(Button::new(RichText::new(label).color(self.color_text_dim())).frame(false));

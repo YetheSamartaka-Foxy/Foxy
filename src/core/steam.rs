@@ -61,12 +61,6 @@ pub fn ensure_steam_running(steam_directory: &str) -> Result<SteamEnsureResult, 
     Err("Timed out waiting for Steam to start".to_string())
 }
 
-/// Start the Steam client without waiting for it to come up.
-///
-/// Unlike [`ensure_steam_running`], this returns as soon as the process has
-/// been spawned, which keeps the UI responsive when the user clicks a
-/// "Launch Steam" button in the pre-launch modal. The running state is then
-/// re-polled by the caller via [`is_steam_running`].
 pub fn launch_steam(steam_directory: &str) -> Result<(), String> {
     let Some(steam_launch) = resolve_steam_launch_command(steam_directory) else {
         return Err(
@@ -78,8 +72,6 @@ pub fn launch_steam(steam_directory: &str) -> Result<(), String> {
     spawn_steam(&steam_launch)
 }
 
-/// Start Steam without this process's elevation, so the game Steam launches
-/// does not end up with an admin token it would inherit from Foxy.
 fn spawn_steam(steam_launch: &SteamLaunchCommand) -> Result<(), String> {
     let args: Vec<std::ffi::OsString> = steam_launch
         .args
@@ -238,7 +230,6 @@ fn is_snap_steam_data_root(path: &Path) -> bool {
         .contains("snap/steam/common/.local/share/Steam")
 }
 
-/// Returns the Arma 3 executable path within the given directory.
 #[allow(dead_code)]
 pub fn arma3_executable_path(arma3_dir: &Path) -> PathBuf {
     arma3_dir.join(ARMA3_EXECUTABLE)
@@ -322,7 +313,6 @@ pub fn arma3_mission_argument(command: &Command, path: &Path) -> std::ffi::OsStr
     path.as_os_str().to_owned()
 }
 
-/// Validates whether the given path is a valid Arma 3 installation directory.
 pub fn is_valid_arma3_dir(path: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -331,7 +321,6 @@ pub fn is_valid_arma3_dir(path: &Path) -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        // On Linux via Proton, check for the exe or the addons directory
         path.exists() && (path.join(ARMA3_EXECUTABLE).exists() || path.join("addons").exists())
     }
 
@@ -449,7 +438,6 @@ pub fn detect_steam_install_directory() -> Option<PathBuf> {
             }
         }
 
-        // Check STEAM_DIR environment variable as a final fallback
         if let Ok(steam_dir) = std::env::var("STEAM_DIR") {
             let path = PathBuf::from(steam_dir);
             if path.join("steamapps").exists() || path.join("SteamApps").exists() {
@@ -537,9 +525,7 @@ fn read_steam_libraryfolders(steam_root: &Path) -> Vec<PathBuf> {
     folders
 }
 
-/// The installed Steam build id of an app, read from its `appmanifest_*.acf`.
-/// Two players on the same game patch report the same value, which is what
-/// makes it comparable in a shared state checksum.
+/// Steam appmanifest build IDs compare installed game patches in shared state checksums.
 pub fn steam_app_build_id(steam_directory: &str, app_id: u32) -> Option<String> {
     for library_root in steam_library_roots(steam_directory) {
         let Some(steamapps) = find_child_dir_case_insensitive(&library_root, "steamapps") else {
@@ -771,8 +757,7 @@ mod tests {
     #[test]
     fn resolve_steam_executable_with_whitespace_only_falls_back() {
         let result = resolve_steam_executable_path("   ");
-        // Falls back to auto-detect; on CI this may be None
-        // The key test is that it doesn't return "   /steam.exe"
+
         if let Some(path) = &result {
             assert!(!path.to_string_lossy().contains("   "));
         }

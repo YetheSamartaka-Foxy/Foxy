@@ -758,10 +758,7 @@ impl Foxy {
         }
     }
 
-    /// Global UI scale slider. The slider edits a pending value; the change is
-    /// applied to the egui zoom factor (100% = native platform scale) only when
-    /// the user clicks Apply. Reset restores the default 100% immediately.
-    /// Returns true when the applied value changed and should be persisted.
+    /// The slider applies scale only on Apply; Reset immediately restores native 100% scale.
     fn render_ui_scale_slider(&mut self, ui: &mut Ui, horizontal_padding: f32) -> bool {
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
@@ -832,9 +829,7 @@ impl Foxy {
         .inner
     }
 
-    /// Theme presets plus import/export controls, shown at the top of the
-    /// customization tab. Applying a preset or importing a file replaces both
-    /// the font sizes and palette colors and persists immediately.
+    /// Applying or importing a theme replaces font sizes and palette colors and saves immediately.
     fn render_theme_management(&mut self, ui: &mut Ui, horizontal_padding: f32) {
         ui.heading(tr("Themes"));
         ui.horizontal(|ui| {
@@ -913,9 +908,7 @@ impl Foxy {
         });
     }
 
-    /// Replace the current font sizes and palette with `theme`, clamp font
-    /// sizes to valid ranges, and persist. The palette color cache rebuilds on
-    /// the next frame, so the change is visible immediately.
+    /// Apply a theme, clamp font sizes, and persist; cached palette colors rebuild next frame.
     fn apply_theme(&mut self, theme: Theme) {
         self.settings_view_state.font_sizes = theme.font_sizes;
         self.settings_view_state.palette_colors = theme.palette_colors;

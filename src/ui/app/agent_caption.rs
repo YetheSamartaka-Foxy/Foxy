@@ -9,9 +9,7 @@ const MAX_TEXT_WIDTH: f32 = 520.0;
 const PADDING: egui::Vec2 = vec2(22.0, 16.0);
 const LINE_GAP: f32 = 6.0;
 
-/// A scene title an agent GUI scenario shows over the app before a scene, so
-/// a person watching knows what comes next. Scenario text is English only and
-/// never translated.
+/// English-only scene caption shown by an agent GUI scenario.
 #[derive(Debug)]
 pub(crate) struct AgentCaption {
     pub(crate) title: String,
@@ -21,7 +19,6 @@ pub(crate) struct AgentCaption {
 }
 
 impl AgentCaption {
-    /// Paints the caption, or returns `false` once its time is up.
     pub(crate) fn paint(&self, ctx: &egui::Context, now: Instant) -> bool {
         if now >= self.until {
             return false;
@@ -92,7 +89,6 @@ impl AgentCaption {
     }
 }
 
-/// Fades in over the first `FADE` and out over the last.
 fn fade_opacity(elapsed: Duration, remaining: Duration) -> f32 {
     let ramp = |span: Duration| (span.as_secs_f32() / FADE.as_secs_f32()).clamp(0.0, 1.0);
     ramp(elapsed).min(ramp(remaining))

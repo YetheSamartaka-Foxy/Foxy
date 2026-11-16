@@ -78,9 +78,6 @@ impl Foxy {
         }
     }
 
-    /// Render the "Editor Missions" section in the repository detail view.
-    ///
-    /// Called from `render_repository_view()` after `render_repository_servers_section()`.
     pub(super) fn render_editor_missions_section(
         &mut self,
         ui: &mut Ui,
@@ -239,8 +236,6 @@ impl Foxy {
             return;
         }
 
-        // Mission rows paint their text from a persistent galley cache so
-        // scrolling never re-shapes the name/terrain/date; see `galley_cache`.
         let name_font = TextStyle::Body.resolve(ui.style());
         let badge_base_font = TextStyle::Button.resolve(ui.style());
         let date_font = TextStyle::Small.resolve(ui.style());
@@ -359,9 +354,7 @@ impl Foxy {
                             let desired_badge_width =
                                 (base_text_width + badge_horizontal_padding).max(badge_min_width);
                             let badge_width = desired_badge_width.min(badge_max_width);
-                            // A long terrain name on a narrow window needs a smaller
-                            // font; that galley is width-dependent and uncommon, so it
-                            // is shaped live rather than cached.
+
                             let badge_galley = if desired_badge_width > badge_max_width
                                 && base_text_width > 0.0
                             {
@@ -539,7 +532,6 @@ impl Foxy {
         }
     }
 
-    /// Determine which Arma 3 profile to use for a given repository.
     pub(crate) fn resolve_arma3_profile_for_repo(&self, repo_idx: usize) -> Option<String> {
         if !crate::core::game::registry()
             .active()
@@ -550,7 +542,6 @@ impl Foxy {
         }
         let repo = self.repository_view_state.repositories.get(repo_idx)?;
 
-        // 1. Repository-specific override
         if let Some(ref profile) = repo.arma3_profile
             && self
                 .detected_arma3_profiles
@@ -560,25 +551,17 @@ impl Foxy {
             return Some(profile.clone());
         }
 
-        // 2. Auto-detected active profile
         if let Some(ref active) = self.detected_active_arma3_profile {
             return Some(active.clone());
         }
 
-        // 3. Default profile
         self.detected_arma3_profiles
             .iter()
             .find(|p| p.is_default)
             .map(|p| p.name.clone())
     }
 
-    /// Missions to render for `profile_name`, never blocking the frame.
-    ///
-    /// A fresh cache is served directly. Otherwise a background scan starts and
-    /// the previous list for the same profile is served while it runs, because
-    /// walking a profile with hundreds of missions costs hundreds of
-    /// milliseconds and this runs on the first painted frame
-    /// (`conventions/SPEED_OF_LIGHT.md` O8).
+    /// Serve cached missions immediately; otherwise scan in the background and retain the prior list. Profile scans can delay first paint (O8).
     pub(crate) fn missions_for_render(&mut self, profile_name: &str) -> Vec<EditorMission> {
         if let Some(cache) = self.cached_missions.as_ref()
             && cache.profile_name == profile_name
@@ -595,9 +578,19 @@ impl Foxy {
     }
 
     fn request_mission_scan(&mut self, profile_name: &str) {
+        if self
+            .mission_scan_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return;
+        }
         if self.mission_scan_in_flight.as_deref() == Some(profile_name) {
             return;
         }
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
         let Some(profile_path) = self
             .detected_arma3_profiles
             .iter()
@@ -616,15 +609,26 @@ impl Foxy {
         self.mission_scan_in_flight = Some(profile_name.to_string());
         let profile_name = profile_name.to_string();
         let repaint_ctx = self.repaint_ctx.clone();
-        std::thread::spawn(move || {
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
+        if let Some(finished) = self.mission_scan_worker.take()
+            && finished.join().is_err()
+        {
+            log::warn!("Mission scan worker failed.");
+        }
+        self.mission_scan_worker = Some(std::thread::spawn(move || {
             let missions = crate::core::arma3_missions::scan_profile_missions(&profile_path);
-            let _ = tx.send(CachedMissionList {
-                profile_name,
-                missions,
-                scanned_at: Instant::now(),
+            let _ = tx.send(crate::ui::app::MissionScanDelivery {
+                space_id,
+                generation,
+                list: CachedMissionList {
+                    profile_name,
+                    missions,
+                    scanned_at: Instant::now(),
+                },
             });
             Self::request_background_repaint(repaint_ctx.as_ref());
-        });
+        }));
     }
 
     pub(crate) fn poll_mission_scan(&mut self) {
@@ -632,8 +636,16 @@ impl Foxy {
             return;
         };
         match rx.try_recv() {
-            Ok(cache) => {
-                self.cached_missions = Some(cache);
+            Ok(delivery) => {
+                let active_space = crate::core::game::spaces::active_game_space().space_id;
+                if crate::ui::app::current_worker_result(
+                    &self.server_query_generation,
+                    &active_space,
+                    &delivery.space_id,
+                    delivery.generation,
+                ) {
+                    self.cached_missions = Some(delivery.list);
+                }
                 self.mission_scan_rx = None;
                 self.mission_scan_in_flight = None;
                 self.needs_repaint = true;
@@ -646,8 +658,7 @@ impl Foxy {
         }
     }
 
-    /// Get cached missions or scan the profile directory. Blocking; only for
-    /// user-initiated mission actions that need the current on-disk list.
+    /// This blocking scan is reserved for user-initiated actions that need the current mission list.
     pub(crate) fn get_or_scan_missions(&mut self, profile_name: &str) -> Vec<EditorMission> {
         if let Some(ref cache) = self.cached_missions
             && cache.profile_name == profile_name

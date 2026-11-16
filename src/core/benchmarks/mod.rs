@@ -1,5 +1,3 @@
-//! Saved performance benchmarks of user-triggered repository actions.
-
 pub mod best;
 pub mod export;
 pub mod index;

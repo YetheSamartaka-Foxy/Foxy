@@ -6,7 +6,6 @@ use crate::ui::app::Foxy;
 use crate::ui::i18n::fmt_bytes;
 
 impl Foxy {
-    /// "Save this run as a benchmark?" modal shown after a benchmarked action.
     pub(crate) fn render_benchmark_save_prompt(&mut self, ctx: &egui::Context) {
         let Some(draft) = self.benchmark_prompt.as_ref() else {
             return;

@@ -37,28 +37,17 @@ impl GameRegistry {
             .map(|module| module.as_ref())
     }
 
-    /// All registered game modules, in registration order. Feeds the game
-    /// space creation UI/CLI.
     pub fn available(&self) -> impl Iterator<Item = &dyn GameModule> {
         self.modules.iter().map(|module| module.as_ref())
     }
 
-    /// The module of the active game space, or `None` when the space names a
-    /// game this build does not register (hand-edited `games.json`, or a
-    /// downgrade from a build that had more modules).
+    /// Hand-edited or downgraded registries may name an unregistered game; keep it unknown instead of silently substituting.
     pub fn active_module(&self) -> Option<&dyn GameModule> {
         self.get(&spaces::active_game_space().game_id)
     }
 
-    /// The module of the active game space, falling back to the default module
-    /// when the space names an unregistered game.
-    ///
-    /// The fallback exists so read-only callers (labels, capability queries)
-    /// keep working, but it is deliberately loud: silently treating an unknown
-    /// space as Arma 3 would let auto-detection write an Arma path into it and
-    /// let an Arma-shaped launch plan run against a foreign install. Callers
-    /// that act on the module should use [`Self::active_module`] and refuse the
-    /// operation when it is `None`.
+    /// Return the active module or the default for read-only callers. Operations
+    /// must use [`Self::active_module`] and refuse unknown game IDs.
     pub fn active(&self) -> &dyn GameModule {
         let active = spaces::active_game_space();
         match self.get(&active.game_id) {
@@ -79,4 +68,34 @@ impl GameRegistry {
 pub fn registry() -> &'static GameRegistry {
     static REGISTRY: OnceLock<GameRegistry> = OnceLock::new();
     REGISTRY.get_or_init(GameRegistry::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::game::DedicatedServerSupport;
+
+    #[test]
+    fn dedicated_server_support_is_separate_from_client_features() {
+        for game in ["arma3", "reforger"] {
+            assert_eq!(
+                registry().get(game).unwrap().dedicated_server_support(),
+                DedicatedServerSupport::WorkInProgress
+            );
+        }
+        for game in ["generic", "twwh3"] {
+            assert_eq!(
+                registry().get(game).unwrap().dedicated_server_support(),
+                DedicatedServerSupport::Unsupported
+            );
+        }
+        assert!(registry().get("unknown").is_none());
+        assert!(
+            !registry()
+                .get("reforger")
+                .unwrap()
+                .capabilities()
+                .steam_workshop
+        );
+    }
 }

@@ -1,17 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-/// Holds the checksum(s) for a hashed item, depending on generation mode.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Checksums {
-    /// Placeholder before checksums are computed. Panics if accessed.
     #[default]
     Pending,
-    /// SwiftyMode: MD5 only.
+
     Md5(String),
-    /// FoxyMode: BLAKE3 only.
+
     Blake3(String),
-    /// HybridMode: both computed in a single I/O pass.
-    Hybrid { md5: String, blake3: String },
+
+    Hybrid {
+        md5: String,
+        blake3: String,
+    },
 }
 
 impl Checksums {
@@ -41,7 +42,6 @@ impl Checksums {
     }
 }
 
-/// A single contiguous byte range within a file (PBO entry or whole file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilePart {
     pub path: String,
@@ -50,7 +50,6 @@ pub struct FilePart {
     pub length: u64,
 }
 
-/// A file within a mod folder, with its computed parts and checksum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModFile {
     pub relative_path: String,
@@ -60,7 +59,6 @@ pub struct ModFile {
     pub data_order: usize,
 }
 
-/// A processed mod (addon folder) with its files and computed checksum.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessedMod {
     pub mod_name: String,
@@ -70,8 +68,6 @@ pub struct ProcessedMod {
     pub enabled: bool,
     pub client_side: bool,
 }
-
-// --- Config types (input JSON) ---
 
 /// The game a repository is published for. It selects the server launch
 /// line `create` prints and which manifest keys make sense; the mod folders
@@ -99,16 +95,12 @@ impl RepoGame {
     }
 }
 
-/// How files that are not PBO or PAC1 archives are split into parts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Chunking {
-    /// 5 MB parts at fixed offsets, the historical layout.
     #[default]
     Fixed,
-    /// Part boundaries chosen from the file content, so an inserted or removed
-    /// byte only changes the parts around it. Meant for game executables and
-    /// data archives that are rebuilt between releases.
+
     Content,
 }
 
@@ -148,14 +140,10 @@ pub struct RepoConfig {
     pub servers: Vec<ServerEntry>,
     #[serde(rename = "dlcContent", default)]
     pub dlc_content: Option<DlcContent>,
-    /// Launch scripts or server configs whose existing launch parameters are
-    /// rewritten with the generated line. Relative entries resolve from the
-    /// directory of the config file that lists them.
+
     #[serde(rename = "modLineFiles", default)]
     pub mod_line_files: Vec<String>,
-    /// The folder under `basePath` that holds a custom game's build. It is
-    /// published as a required mod, and clients show it as the game instead
-    /// of an addon and launch its executable.
+
     #[serde(rename = "gameBuild", default)]
     pub game_build: Option<GameBuildConfig>,
 }
@@ -163,9 +151,9 @@ pub struct RepoConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GameBuildConfig {
     pub folder: String,
-    /// Relative to `folder`; normalized to `/` separators on load.
+
     pub executable: String,
-    /// The published folder name, filled in when the config is loaded.
+
     #[serde(skip)]
     pub mod_name: String,
 }
@@ -177,9 +165,7 @@ pub struct GameBuildJson {
     pub executable: String,
 }
 
-/// Arma 3 DLC suggestions published in `repo.json` as `dlcContent`. Config
-/// authors may write either the object form (`{"gm": true}`) or a list of
-/// codes (`["gm", "spe"]`); both normalize to the object form on output.
+/// dlcContent accepts object or code-list input and normalizes to the object form published in repo.json.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct DlcContent {
     pub csla: bool,
@@ -296,8 +282,6 @@ pub struct RepoBasicAuthentication {
     pub password: String,
 }
 
-// --- Output types for repo.json ---
-
 #[derive(Debug, Serialize)]
 pub struct RepoJson {
     #[serde(rename = "repoName")]
@@ -310,7 +294,7 @@ pub struct RepoJson {
     #[serde(skip_serializing_if = "Chunking::is_fixed")]
     pub chunking: Chunking,
     pub checksum: String,
-    /// Present when FoxyMode or HybridMode is used. Indicates the Foxy protocol version.
+
     #[serde(rename = "foxyMode", skip_serializing_if = "Option::is_none")]
     pub foxy_mode: Option<String>,
     #[serde(rename = "requiredMods")]
@@ -350,8 +334,6 @@ pub struct ModEntry {
     pub client_side: bool,
 }
 
-// --- Output types for mod.srf ---
-
 #[derive(Debug, Serialize)]
 pub struct SrfManifest {
     #[serde(rename = "Name")]
@@ -388,8 +370,6 @@ pub struct SrfPart {
     pub length: u64,
 }
 
-// --- Output types for foxy_addon.json (per-mod, FoxyMode) ---
-
 #[derive(Debug, Serialize)]
 pub struct FoxyAddonJson {
     pub name: String,
@@ -418,8 +398,6 @@ pub struct FoxyAddonPart {
     pub length: u64,
 }
 
-// --- Output type for foxy_addons.json (repo-level, FoxyMode) ---
-
 #[derive(Debug, Serialize)]
 pub struct FoxyAddonsJson {
     pub version: String,
@@ -432,7 +410,6 @@ pub struct FoxyAddonsJson {
     pub optional_mods: Vec<ModEntry>,
 }
 
-/// A resolved mod reference after wildcard expansion.
 #[derive(Debug, Clone)]
 pub struct ResolvedMod {
     pub mod_name: String,
@@ -443,7 +420,6 @@ pub struct ResolvedMod {
     pub chunking: Chunking,
 }
 
-/// A discovered file within a mod, ready for processing.
 #[derive(Debug, Clone)]
 pub struct DiscoveredFile {
     pub absolute_path: std::path::PathBuf,
@@ -466,8 +442,6 @@ fn is_false(value: &bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Checksums accessors ─────────────────────────────────────────────
 
     #[test]
     fn md5_variant_returns_md5() {
@@ -535,8 +509,6 @@ mod tests {
         assert!(matches!(cs, Checksums::Pending));
     }
 
-    // ── Serde defaults ──────────────────────────────────────────────────
-
     #[test]
     fn default_enabled_is_true() {
         assert!(default_enabled());
@@ -546,8 +518,6 @@ mod tests {
     fn default_repo_version_value() {
         assert_eq!(default_repo_version(), "3.2.0.0");
     }
-
-    // ── RepoConfig deserialization ──────────────────────────────────────
 
     #[test]
     fn repo_config_minimal() {
@@ -591,8 +561,6 @@ mod tests {
             Some("https://example.com/update/".to_string())
         );
     }
-
-    // ── dlcContent deserialization ──────────────────────────────────────
 
     #[test]
     fn repo_config_without_dlc_content_is_none() {
@@ -659,8 +627,6 @@ mod tests {
         );
     }
 
-    // ── ServerEntry deserialization ──────────────────────────────────────
-
     #[test]
     fn server_entry_minimal() {
         let json = r#"{"name": "Main", "address": "1.2.3.4", "port": "2302"}"#;
@@ -670,8 +636,6 @@ mod tests {
         assert!(entry.password.is_empty());
         assert!(!entry.battle_eye);
     }
-
-    // ── RepoJson serialization ──────────────────────────────────────────
 
     #[test]
     fn repo_json_skips_none_foxy_mode() {

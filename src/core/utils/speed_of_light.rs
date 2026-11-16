@@ -1,40 +1,24 @@
-//! Speed-of-light (SoL) performance accounting.
-//!
-//! Canonical math and log-line grammar for the `SOL op=...` lines defined in
-//! `conventions/SPEED_OF_LIGHT.md`. Every crucial operation emits one SOL line
-//! at info level so efficiency ratios can be recomputed from log files alone.
-//!
-//! Core equations (see the convention doc for derivations):
-//! - `T_ideal = W / R_light` (E1)
-//! - `sol_raw = T_ideal / T_actual = R_actual / R_light` (E2); the legacy
-//!   `sol` field is `sol_raw` clamped to `[0, 1]`.
+//! Canonical math and log-line grammar for `SOL op=...` performance records.
+//! See `conventions/SPEED_OF_LIGHT.md`; keep log fields compatible with parsers.
 
 use std::time::Duration;
 
-/// Grammar revision of the line this module renders. Bump when keys are
-/// appended so consumers can tell which fields a line is guaranteed to carry.
 pub(crate) const METRIC_VERSION: u32 = 2;
 
-/// Where the reference rate ("light") for an SoL ratio came from.
 pub(crate) enum SolLight {
-    /// User-configured bandwidth cap in bytes/sec; a policy ceiling.
     LimiterCap(u64),
-    /// Best demonstrated sampler-window throughput within the same run,
-    /// in bytes/sec. Compares the run against its own peak, not physics.
+
     PeakSample(u64),
-    /// No absolute reference is available; the rate is tracked against the
-    /// best previously recorded run for the same machine instead.
+
     SelfBaseline,
 }
 
-/// What kind of comparison a ratio answers (convention section 2.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SolMetricKind {
-    /// `T_lb / T_actual` against a modeled or policy bound.
     ModeledBound,
-    /// `R_average / R_peak_window` of the same run.
+
     PeakConsistency,
-    /// No valid reference; only the actual time is meaningful.
+
     None,
 }
 
@@ -48,16 +32,14 @@ impl SolMetricKind {
     }
 }
 
-/// Whether the reference produced a usable ratio, and why not otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SolReferenceStatus {
     Ok,
-    /// No light rate is knowable for this line.
+
     Missing,
-    /// The raw ratio exceeds one: the reference is not a lower bound for
-    /// this run, or the timer scopes differ.
+
     AboveBound,
-    /// The actual duration is zero or non-finite; no ratio is computable.
+
     InvalidActual,
 }
 
@@ -109,10 +91,8 @@ pub(crate) fn ideal_seconds(work_bytes: u64, light_bytes_per_sec: u64) -> Option
     Some(work_bytes as f64 / light_bytes_per_sec as f64)
 }
 
-/// E2 without clamping: `T_ideal / T_actual`, finite and nonnegative.
-/// Returns `None` when either input is non-finite or negative, or the actual
-/// duration is not positive. A result above one is evidence about the
-/// reference, so it is kept rather than folded into `1.0`.
+/// Preserve finite nonnegative T_ideal/T_actual above one as evidence about the reference.
+/// Invalid inputs or nonpositive actual duration have no ratio.
 pub(crate) fn sol_ratio_raw(ideal_secs: f64, actual_secs: f64) -> Option<f64> {
     if !ideal_secs.is_finite() || !actual_secs.is_finite() {
         return None;
@@ -129,8 +109,6 @@ pub(crate) fn sol_ratio(ideal_secs: f64, actual_secs: f64) -> Option<f64> {
     sol_ratio_raw(ideal_secs, actual_secs).map(|ratio| ratio.clamp(0.0, 1.0))
 }
 
-/// Per-line derived numbers, so callers can assert on the arithmetic rather
-/// than on the rendered text.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SolFigures {
     pub(crate) actual_secs: f64,
@@ -178,18 +156,8 @@ pub(crate) fn op_id_extra(operation_id: Option<&str>) -> Option<(&'static str, S
         .map(|id| ("op_id", id.to_string()))
 }
 
-/// Render the canonical SOL log line.
-///
-/// Grammar (stable; parsers depend on it - only append new keys, never rename):
-/// `SOL op=<op> actual_s=<secs> [work_bytes=<n> actual_bps=<n>]
-///  [light_bps=<n> ideal_s=<secs>] sol=<ratio|na> light_src=<src>
-///  actual_ns=<n> sol_raw=<ratio|na> metric_kind=<kind>
-///  reference_status=<status> metric_version=<n>[ k=v ...]`
-///
-/// `work_bytes`/`actual_bps` are omitted for operations whose work is not
-/// byte-denominated (pass `work_bytes = 0` and carry counts in `extras`).
-/// `sol` stays clamped for legacy readers; `sol_raw` keeps ratios above one
-/// and `actual_ns` keeps sub-millisecond durations that `actual_s` rounds away.
+/// SOL log keys are a stable parser contract: append fields without renaming existing keys.
+/// Keep raw ratios and nanosecond precision; non-byte work uses count extras instead of byte fields.
 pub(crate) fn sol_line(
     op: &str,
     work_bytes: u64,
@@ -279,9 +247,7 @@ mod tests {
 
     #[test]
     fn zero_work_against_a_light_is_a_zero_ratio_not_na() {
-        // Zero bytes have a zero ideal; the ratio is 0 and the status is ok.
-        // Callers with zero-work operations should use a latency model or
-        // `SelfBaseline` instead of pretending this is throughput.
+        // Zero-byte throughput has zero ideal time; zero-work operations should use latency or SelfBaseline models.
         let figures = sol_figures(0, Duration::from_secs(1), &SolLight::LimiterCap(10));
         assert_eq!(figures.sol_raw, Some(0.0));
         assert_eq!(figures.reference_status, SolReferenceStatus::Ok);
@@ -330,7 +296,6 @@ mod tests {
 
     #[test]
     fn unit_conversion_from_megabits_is_decimal() {
-        // 8 Mbps = 1,000,000 bytes/s; 10 MB in 10 s at that cap is the light.
         let cap = 8_u64 * 125_000;
         let figures = sol_figures(
             10_000_000,

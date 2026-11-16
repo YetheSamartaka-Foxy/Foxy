@@ -1,10 +1,3 @@
-//! Periodic process and machine resource lines for extended diagnostics.
-//!
-//! Sampling runs on its own thread and only while the switch is on. Idle
-//! samples are thinned to a heartbeat so a machine that sits in the tray does
-//! not fill the log; anything Foxy is actively doing (CPU, disk or network
-//! traffic above a small floor) is logged at the full interval.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -56,7 +49,6 @@ pub(crate) struct Sample {
 }
 
 impl Sample {
-    /// Whether the interval saw enough work to be worth its own log line.
     pub(crate) fn is_active(&self) -> bool {
         self.process_cpu_percent >= ACTIVE_CPU_PERCENT
             || self.disk_read_bytes + self.disk_written_bytes >= ACTIVE_IO_BYTES
@@ -85,8 +77,6 @@ impl Sample {
     }
 }
 
-/// Decide whether a sample gets logged: active samples always, idle ones only
-/// once `IDLE_HEARTBEAT` has passed since the last logged line.
 pub(crate) fn should_log(sample: &Sample, since_last_log: Duration, heartbeat: Duration) -> bool {
     sample.is_active() || since_last_log >= heartbeat
 }
@@ -101,8 +91,7 @@ impl Sampler {
     fn new() -> Option<Self> {
         let pid = get_current_pid().ok()?;
         let mut system = System::new();
-        // The first CPU reading is always zero; prime it so the first logged
-        // sample carries a real value.
+
         system.refresh_cpu_usage();
         system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),

@@ -4,14 +4,12 @@ use std::path::{Path, PathBuf};
 
 use crate::types::ProcessedMod;
 
-/// Where the collected `.bikey` files are written and which extra sources feed it.
 #[derive(Debug, Clone)]
 pub struct KeyCollectionOptions<'a> {
     pub dest: &'a Path,
     pub additional_sources: &'a [PathBuf],
 }
 
-/// Outcome of a key collection pass, used for the `create` summary.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct KeyCollectionReport {
     pub copied: usize,
@@ -19,7 +17,6 @@ pub struct KeyCollectionReport {
     pub conflicts: Vec<String>,
 }
 
-/// True for files Arma treats as server keys.
 pub fn is_key_file(path: &str) -> bool {
     Path::new(path)
         .extension()
@@ -27,7 +24,6 @@ pub fn is_key_file(path: &str) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("bikey"))
 }
 
-/// Key files inside the generated repository, in `(mod, file)` discovery order.
 pub fn generated_key_paths(output_dir: &Path, mods: &[ProcessedMod]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for m in mods {
@@ -40,7 +36,6 @@ pub fn generated_key_paths(output_dir: &Path, mods: &[ProcessedMod]) -> Vec<Path
     paths
 }
 
-/// Key files found by walking a user-supplied directory (or the file itself).
 pub fn additional_key_paths(source: &Path) -> Result<Vec<PathBuf>> {
     if source.is_file() {
         return Ok(if is_key_file(&source.to_string_lossy()) {
@@ -68,11 +63,7 @@ pub fn additional_key_paths(source: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Copies every generated and additional key into a single flat `keys/` folder.
-///
-/// Keys are keyed by file name because that is how Arma loads them: two distinct
-/// sources sharing a name would overwrite each other, so a byte-different clash is
-/// reported instead of silently taking the last writer.
+/// Arma loads keys by filename, so byte-different name collisions must fail instead of overwriting a key.
 pub fn collect_keys(
     output_dir: &Path,
     mods: &[ProcessedMod],
@@ -81,8 +72,6 @@ pub fn collect_keys(
     collect_key_paths(generated_key_paths(output_dir, mods), options)
 }
 
-/// [`collect_keys`] over an explicit list of generated key files, for callers
-/// whose mods live in several output directories.
 pub fn collect_key_paths(
     generated: Vec<PathBuf>,
     options: &KeyCollectionOptions<'_>,

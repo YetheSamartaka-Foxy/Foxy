@@ -25,8 +25,6 @@ pub(crate) async fn calculate_hashes(
     let _ = calculate_hashes_with_tree(context, repository_url, None, progress_tx).await;
 }
 
-/// Runs the full hash pipeline and returns the computed tree for reuse by callers
-/// (e.g. content-hash refresh), avoiding a redundant Tree::load.
 pub(crate) async fn calculate_hashes_with_tree(
     context: Arc<FoxyContext>,
     repository_url: &str,
@@ -99,16 +97,11 @@ pub(super) fn derived_clean_part_indices(
     clean_indices
 }
 
-/// The background flush issues plain conflict-free `INSERT`s, so it is only safe
-/// when the buffered rows were staged during a fresh `subfiles` load. Gate on the
-/// buffer marker, not tree provenance, since a preloaded tree says nothing about
-/// whether the deferred rows are conflict-free.
+/// Plain deferred inserts are safe only for buffers marked from a fresh, conflict-free subfiles load.
 fn should_insert_part_metadata_in_background(context: &FoxyContext) -> bool {
     context.deferred_part_count() > 0 && context.deferred_part_inserts_are_fresh_load()
 }
 
-/// Insert the deferred manifest part rows while the files hash; rows the
-/// rebuild already streamed are skipped by the flush.
 pub(super) fn start_background_part_metadata_insert(
     context: &Arc<FoxyContext>,
 ) -> Option<tokio::task::JoinHandle<bool>> {
@@ -126,8 +119,6 @@ pub(super) fn start_background_part_metadata_insert(
     }))
 }
 
-/// Persist deferred manifest part rows when the hash pass is skipped. Returns
-/// `false` only when rows were pending and the insert failed.
 async fn flush_deferred_parts_without_hash_pass(
     context: &Arc<FoxyContext>,
     data_tree: &Tree,
@@ -274,9 +265,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
             repository_url,
             all_file_indices.len()
         );
-        // The deferred manifest part rows are remote metadata, not hash state;
-        // skipping the hash pass must not leave them in memory only, or a
-        // restart before the first download sees files with no parts.
+        // Deferred manifest parts are remote metadata; persist them even when the hash pass is skipped.
         if !flush_deferred_parts_without_hash_pass(&context, &data_tree, repository_url).await {
             return HashCalculationResult::Failed;
         }
@@ -324,7 +313,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         single_part_files, heavy_files, avg_parts
     );
 
-    // --- Phase 1: Hash file parts ---
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::RecheckHashProgress {
             checked_files: 0,
@@ -441,7 +429,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
     }
     log_addon_hash_metrics("full_hash", &data_tree, &hash_results);
 
-    // Log slowest files and distribution (ISSUE_07)
     {
         use std::time::Duration;
         let mut file_timings: Vec<(&str, Duration, usize)> = hash_results
@@ -486,7 +473,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         );
     }
 
-    // --- Apply hash results to data_tree ---
     let apply_parts_started = Instant::now();
     let mut updated_part_indices: HashSet<usize> = HashSet::new();
     let mut whole_file_checksums_by_file_idx: HashMap<usize, String> = HashMap::new();
@@ -514,7 +500,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         updated_part_indices.len()
     );
 
-    // --- Phase 2: Persist part hashes (batched transactions) ---
     let derived_clean_indices = if deferred_part_metadata_insert_handle.is_some() {
         derived_clean_part_indices(&data_tree, &all_file_indices)
     } else {
@@ -528,8 +513,7 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         .iter()
         .filter_map(|&idx| data_tree.parts.get(idx).cloned())
         .collect();
-    // Sort by PK so the UPDATE walks the subfiles B-tree sequentially,
-    // keeping pages in cache instead of thrashing on random access.
+
     part_updates.sort_by_key(|p| p.id);
     let derived_clean_part_count = derived_clean_indices.len();
     let part_count = derived_clean_part_count.saturating_add(part_updates.len());
@@ -704,7 +688,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         part_count
     );
 
-    // --- Phase 3: Update file hashes from parts (batched transactions) ---
     if let Some(tx) = progress_tx {
         let _ = tx.send(ProgressEvent::Stage {
             label: format!("Updating files 0/{}", data_tree.files.len()),
@@ -824,7 +807,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         return HashCalculationResult::Failed;
     }
 
-    // --- Phase 4: Update addon(mod) hashes from files (batched transactions) ---
     if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
         info!(
             "Hash calculation cancelled before addon hash rollup for repo {}",
@@ -895,7 +877,6 @@ pub(crate) async fn calculate_hashes_with_tree_and_profile_cancellable(
         mod_count
     );
 
-    // --- Phase 5: Update repository hashes based on addons(mods) (batched transactions) ---
     if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
         info!(
             "Hash calculation cancelled before repository hash rollup for repo {}",
@@ -955,8 +936,7 @@ mod tests {
     use crate::core::models::context::DeferredPartInsert;
     use crate::core::models::model_tree::{FileNode, Tree};
 
-    /// Fresh rows stay eligible for the background metadata insert after
-    /// `fresh_subfiles_load` is cleared: the buffer's own marker gates it.
+    /// The buffer marker preserves fresh-load eligibility after the window flag closes.
     #[tokio::test]
     async fn background_part_metadata_insert_selected_for_fresh_buffered_rows() {
         let handle = crate::core::tasks::db_turso::build_test_database().await;
@@ -977,9 +957,7 @@ mod tests {
         assert!(should_insert_part_metadata_in_background(&context));
     }
 
-    /// A skipped hash pass (every file absent on disk) must still land the
-    /// deferred manifest parts; a fresh install would otherwise restart with
-    /// file rows and an empty `subfiles`.
+    /// Persist deferred parts even when every file is absent, or a fresh install restarts without its manifest parts.
     #[tokio::test]
     async fn skipped_hash_pass_persists_deferred_manifest_parts() {
         use crate::core::db::{FoxyDb, params};

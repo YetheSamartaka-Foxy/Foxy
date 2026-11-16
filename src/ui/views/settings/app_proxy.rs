@@ -6,7 +6,6 @@ use eframe::egui::{self, RichText, TextEdit, Ui};
 
 use super::render_wrapped_info_row;
 
-/// What a proxy field did this frame.
 #[derive(Default)]
 struct FieldChange {
     edited: bool,
@@ -14,9 +13,7 @@ struct FieldChange {
 }
 
 impl Foxy {
-    /// Proxy mode and, for a manual proxy, its address, credentials, and
-    /// bypass list. Text fields apply when they lose focus, so a half-typed
-    /// address never reaches the clients.
+    /// Apply proxy fields on focus loss so partially typed settings never reach clients.
     pub(super) fn render_application_settings_proxy(
         &mut self,
         ui: &mut Ui,

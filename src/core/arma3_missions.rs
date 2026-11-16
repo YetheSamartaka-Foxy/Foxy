@@ -1,4 +1,4 @@
-﻿use log::{debug, info, warn};
+use log::{debug, info, warn};
 use std::collections::HashSet;
 use std::fs;
 use std::ops::Range;
@@ -7,40 +7,33 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
-/// A mission found on disk in a profile's missions/ or mpmissions/ directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditorMission {
-    /// Display name extracted from mission.sqm briefingName,
-    /// or fallback to folder name prefix.
     pub display_name: String,
-    /// World/terrain name (e.g., "Altis", "Tanoa", "Stratis").
+
     pub world_name: String,
-    /// The raw folder name (e.g., "my_mission.Altis").
+
     pub folder_name: String,
-    /// Name of the root mission directory ("missions" or "mpmissions").
+
     pub root_folder_name: String,
-    /// Relative parent path below the root mission directory.
+
     pub relative_parent: PathBuf,
-    /// Full path to the mission folder.
+
     pub path: PathBuf,
-    /// Full path to mission.sqm inside this folder.
+
     pub sqm_path: PathBuf,
-    /// Whether this is an MP mission (from mpmissions/) or SP (from missions/).
+
     pub is_multiplayer: bool,
-    /// Author from mission.sqm ScenarioData, if available.
+
     pub author: Option<String>,
-    /// Game type from ScenarioData (e.g., "Coop", "TvT").
+
     pub game_type: Option<String>,
-    /// Max players from ScenarioData.
+
     pub max_players: Option<u32>,
-    /// Last modification time of mission.sqm (used for sort order).
+
     pub last_modified: SystemTime,
 }
 
-/// Scan a profile directory for all editor missions.
-///
-/// Looks in both `<profile_path>/missions/` and `<profile_path>/mpmissions/`.
-/// Returns missions sorted by last_modified descending (newest first).
 pub fn scan_profile_missions(profile_path: &Path) -> Vec<EditorMission> {
     let mut missions = Vec::new();
 
@@ -56,9 +49,7 @@ pub fn scan_profile_missions(profile_path: &Path) -> Vec<EditorMission> {
 
     missions.sort_by_key(|mission| std::cmp::Reverse(mission.last_modified));
 
-    // Avoid log spam: only emit the scan summary the first time we see a given
-    // (profile, count) result. Repeated scans with an unchanged count stay quiet,
-    // while a changed mission count still produces a fresh log line.
+    // Cache the last (profile, count) summary to suppress repeated scan logs without hiding count changes.
     static LOGGED_SCANS: OnceLock<Mutex<HashSet<(PathBuf, usize)>>> = OnceLock::new();
     let key = (profile_path.to_path_buf(), missions.len());
     let should_log = LOGGED_SCANS
@@ -83,7 +74,6 @@ pub fn scan_profile_missions(profile_path: &Path) -> Vec<EditorMission> {
     missions
 }
 
-/// Remove editor addon dependencies from a mission.sqm `addons[]` array.
 pub fn remove_mission_addon_dependencies(sqm_path: &Path) -> Result<bool, String> {
     let content =
         fs::read_to_string(sqm_path).map_err(|err| format!("Failed to read mission.sqm: {err}"))?;
@@ -320,7 +310,6 @@ fn preferred_line_ending(content: &str) -> &'static str {
     }
 }
 
-/// Recursively scan a directory below missions/ or mpmissions/ for mission folders.
 fn scan_mission_directory(
     dir: &Path,
     root_dir: &Path,
@@ -399,7 +388,6 @@ fn scan_mission_directory(
     }
 }
 
-/// Lightweight metadata extracted from mission.sqm.
 #[derive(Debug, Default)]
 struct MissionSqmMetadata {
     briefing_name: Option<String>,
@@ -408,11 +396,6 @@ struct MissionSqmMetadata {
     max_players: Option<u32>,
 }
 
-/// Parse mission.sqm for key metadata fields.
-///
-/// This is a lightweight parser that reads the file as text and uses
-/// simple line-by-line pattern matching to extract the fields we need.
-/// Only reads the first ~8KB to keep it fast for large mission files.
 fn parse_mission_sqm_metadata(sqm_path: &Path) -> MissionSqmMetadata {
     let mut meta = MissionSqmMetadata::default();
 
@@ -454,7 +437,6 @@ fn parse_mission_sqm_metadata(sqm_path: &Path) -> MissionSqmMetadata {
     meta
 }
 
-/// Extract a quoted string value from a line like `key="value";`
 fn extract_quoted_value(line: &str, key: &str) -> Option<String> {
     let pattern = format!("{}=\"", key);
     if let Some(start) = line.find(&pattern) {
@@ -469,7 +451,6 @@ fn extract_quoted_value(line: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Extract a numeric value from a line like `key=42;`
 fn extract_numeric_value(line: &str, key: &str) -> Option<u32> {
     let pattern = format!("{}=", key);
     if let Some(start) = line.find(&pattern) {
@@ -480,7 +461,6 @@ fn extract_numeric_value(line: &str, key: &str) -> Option<u32> {
     None
 }
 
-/// Parse description.ext for mission name overrides.
 fn parse_description_ext_name(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
 
@@ -493,8 +473,6 @@ fn parse_description_ext_name(path: &Path) -> Option<String> {
     None
 }
 
-/// Extract a value from description.ext.
-/// Format: `key = "value";` (spaces around = are common here)
 fn extract_quoted_value_ext(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
@@ -516,7 +494,6 @@ fn extract_quoted_value_ext(content: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Format a SystemTime as a human-readable relative date string.
 pub fn format_mission_date(time: SystemTime) -> String {
     let now = SystemTime::now();
     let duration = match now.duration_since(time) {

@@ -1,6 +1,3 @@
-//! Package one benchmark for sharing: the record, its log slice, a flat
-//! metrics text and any chart images the UI rendered.
-
 use std::io::Write;
 use std::path::Path;
 
@@ -78,9 +75,6 @@ pub fn export_file_name(record: &BenchmarkRecord) -> String {
     format!("foxy-bm-{version}-{started}-{}.zip", record.kind.slug())
 }
 
-/// Human-readable digest of the record for people who do not open the JSON.
-/// Operation and ratio come first, then the best-measured comparison, then
-/// the run metadata and counters.
 pub fn summary_text(record: &BenchmarkRecord, best: Option<&BestComparison>) -> String {
     let mut out = String::new();
     let mut line = |key: &str, value: String| {

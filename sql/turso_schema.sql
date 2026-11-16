@@ -1,36 +1,4 @@
--- Foxy authoritative bootstrap schema for the Turso data layer (plan.md §6).
---
--- This folds migrations/01..21 into a single final-state schema. Because the
--- auto-DB-wipe gate (db_schema_version.rs) lets the Turso upgrade require a
--- clean rebuild, there is no need to replay 21 incremental migrations: a fresh
--- database is created directly in its final shape.
---
--- Folding notes (what each historical migration contributes):
---   01 repositories + pending_updates   12 repositories.foxy_mode (inlined)
---   21 repositories (remote_url, local_path) composite identity (inlined as the
---      table UNIQUE, replacing the old remote_url-only UNIQUE - no v21 rename)
---   pending_updates (repository_url, local_path) composite PK (inlined; replaces
---      the runtime migrate_pending_updates_local_path fix-up)
---   02 addons   18 addons.display_name   19 addons.client_side (inlined)
---   03 files    04 subfiles
---   05 repository_addons   06 addon_files
---   07 file_subfiles is intentionally ABSENT - dropped by migration 20.
---   08 download_target_file   09 download_target_file_part
---   10 download_patch_file    11 download_patch_op
---   13-17 covering/propagation indexes are pre-created below.
---
--- Invariants preserved (plan.md §6, AGENTS.md, BACKEND_CONVENTIONS.md):
---   * (remote_url, local_path) repository identity.
---   * ON DELETE CASCADE chains from migrations 05-07/10/11.
---   * strftime('%s','now') / CURRENT_TIMESTAMP defaults.
---   * All UNIQUE constraints that back ON CONFLICT upserts.
---
--- The `turso` crate exposes `Connection::execute_batch` (0.7.2), so this whole
--- file can be applied in one call; the runner also tolerates statement-by-
--- statement application by splitting on `;` for portability.
-
--- ── Parent tables ──────────────────────────────────────────────────────────
-
+-- Schema-version gates rebuild from this bootstrap; historical migrations are not replayed.
 CREATE TABLE IF NOT EXISTS repositories (
     id                 INTEGER PRIMARY KEY,
     name               TEXT NOT NULL,
@@ -61,8 +29,7 @@ CREATE TABLE IF NOT EXISTS storage_read_measurements (
     measured_at_utc TEXT NOT NULL
 );
 
--- Index of the benchmark folders under games/<space>/benchmarks. The folders
--- are authoritative; rows are rebuilt from them after a wipe.
+-- Benchmark folders are authoritative; rebuild this index from them after a wipe.
 CREATE TABLE IF NOT EXISTS benchmarks (
     id             TEXT PRIMARY KEY,
     created_at     INTEGER NOT NULL,
@@ -105,15 +72,7 @@ CREATE TABLE IF NOT EXISTS files (
     CONSTRAINT files_unique_name_remote_local UNIQUE (name, remote_path, local_path)
 );
 
--- ── Child tables (FK parents above must exist first) ────────────────────────
 
--- subfiles uniqueness (file_id, path) is a STANDALONE unique index
--- (idx_subfiles_file_id_path below), NOT an inline `CONSTRAINT … UNIQUE`. A
--- named index is a first-class object the bulk-load path can DROP before a
--- whole-wipe force-redownload load and CREATE once afterward, so the INSERT
--- maintains only the rowid PK instead of the unique (file_id, path) tree
--- (after_turso_regression_analysis5.md P0-d). `ON CONFLICT (file_id, path)`
--- resolves against this index identically to the old inline constraint.
 CREATE TABLE IF NOT EXISTS subfiles (
     id              INTEGER PRIMARY KEY,
     file_id         INTEGER NOT NULL,
@@ -176,12 +135,8 @@ CREATE TABLE IF NOT EXISTS download_patch_file (
     FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 
+-- Patch rows use (file_id, data_order) identity, so rowid reuse is safe without sequences.
 CREATE TABLE IF NOT EXISTS download_patch_op (
-    -- Plain INTEGER PRIMARY KEY (rowid alias) rather than AUTOINCREMENT: `id`
-    -- is not semantically consumed - rows are keyed by the (file_id, data_order)
-    -- UNIQUE constraint, so rowid reuse after deletes is harmless. Turso 0.7
-    -- MVCC can parse AUTOINCREMENT via sequences, but Foxy still should not
-    -- use it (WAL is the default; sequence `changes()` had leaks through 0.7.2).
     id               INTEGER PRIMARY KEY,
     file_id          INTEGER NOT NULL,
     data_order       INTEGER NOT NULL,
@@ -198,7 +153,6 @@ CREATE TABLE IF NOT EXISTS download_patch_op (
     CONSTRAINT download_patch_op_unique_file_order UNIQUE (file_id, data_order)
 );
 
--- ── Indexes (migrations 02-19, all covering/propagation indexes pre-created) ─
 
 CREATE INDEX IF NOT EXISTS idx_addons_remote_local
     ON addons(remote_path, local_path);
@@ -216,18 +170,9 @@ CREATE INDEX IF NOT EXISTS idx_files_remote_local
 CREATE INDEX IF NOT EXISTS idx_files_local_path_remote_checksum
     ON files(local_path, remote_checksum);
 
--- Backs the (file_id, path) uniqueness + the ON CONFLICT upsert target
--- (replaces the former inline `CONSTRAINT subfiles_unique_file_id_path`).
+-- A standalone unique index lets bulk loading defer maintenance without changing ON CONFLICT targets.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subfiles_file_id_path
     ON subfiles(file_id, path);
--- (schema v25) idx_subfiles_file_id_data_order (file_id, data_order, id) removed:
--- Tree::load and patch-plan part reloads sort in process, so the ordered
--- covering index charged ~1.4 s per 433k-row insert without serving those
--- reads. The unique (file_id, path) index stays for ON CONFLICT.
--- (schema v24) idx_subfiles_path_remote_checksum (path, remote_checksum) removed:
--- every subfiles query filters by file_id (covered above), so it had no primary
--- user; dropping it cuts each part write from 4 -> 3 B-trees. See
--- after_turso_regression_analysis6.md.
 
 CREATE INDEX IF NOT EXISTS idx_repository_addons_addon_id
     ON repository_addons(addon_id);

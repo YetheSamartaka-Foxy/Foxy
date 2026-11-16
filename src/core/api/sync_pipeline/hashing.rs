@@ -118,9 +118,7 @@ pub(super) async fn run_incremental_hash_batch(
         *hash_context = Some(loaded);
     }
 
-    // Delta-patched files carry their part checksums out of the apply; record
-    // those instead of re-reading the bytes that were just written. A file
-    // whose segments do not match the remote layout stays in the re-read set.
+    // Reuse apply-time checksums when segments match remote layout; reread rejected files.
     let mut segment_verified_file_ids: HashSet<u64> = HashSet::new();
     let pending_segments: Vec<PatchedFileSegments> = patched_segments
         .iter()
@@ -466,10 +464,7 @@ impl SqlitePerfRunGuard {
         self.log_sol("completed");
     }
 
-    /// The `SOL op=db_persist` action record (conventions/SPEED_OF_LIGHT.md,
-    /// O7): the gated write windows this action opened, summed over every
-    /// category, against the action wall time. Window sums are not wall time
-    /// and are only comparable at the printed `write_gate`.
+    /// Compare gated write windows with action wall time at the reported write-gate size.
     fn log_sol(&self, outcome: &str) {
         let delta = sqlite_perf_snapshot().delta_since(self.baseline);
         let categories = sqlite_write_metrics_snapshot()
@@ -567,9 +562,7 @@ impl SqlitePerfRunGuard {
             conn_reused,
             self.started_at.elapsed().as_millis()
         ));
-        // `txn_ms` below is the gated transaction window, which grows with the
-        // gate size because Turso's waiters block inside `conn.execute`; the gate
-        // is printed so the numbers are never read without it.
+        // Transaction-window time includes Turso's in-engine wait, so interpret it with the write-gate size.
         lines.push(format!(
             "write_categories={} write_gate={}",
             categories.len(),

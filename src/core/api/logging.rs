@@ -28,9 +28,6 @@ impl LogWriter for UiLogWriter {
         });
         ACTIVITY_LOG_GENERATION.fetch_add(1, Ordering::Relaxed);
 
-        // Debug print to verify UI logger is working
-        // eprintln!("UI LOG: {} - Buffer Size: {}", record.args(), log_buffer.len());
-
         Ok(())
     }
 
@@ -39,13 +36,11 @@ impl LogWriter for UiLogWriter {
     }
 }
 
-/// Process-level start time, initialized on first access (typically during logger init).
-/// Used to measure elapsed wall-clock time from app start in diagnostic log messages.
 pub(crate) static PROCESS_START: std::sync::LazyLock<Instant> =
     std::sync::LazyLock::new(Instant::now);
 
 const BASE_LOG_SPEC: &str = "warn, Foxy=info, foxy=info";
-/// Crate module prefixes whose level the extended diagnostics switch raises.
+
 const DIAGNOSTIC_MODULES: [&str; 2] = ["Foxy", "foxy"];
 const LOG_ROTATION_SIZE_BYTES: u64 = 40 * 1024 * 1024;
 const HISTORICAL_LOG_FILE_LIMIT: usize = 15;
@@ -85,7 +80,6 @@ pub(crate) fn ensure_logger_with_terminal() {
 fn ensure_logger_inner(duplicate_to_terminal: bool) {
     static INIT: OnceCell<()> = OnceCell::new();
     let _ = INIT.get_or_init(|| {
-        // Force-initialize PROCESS_START at logger startup so it captures app start time.
         let _ = &*PROCESS_START;
         let config_dir = app_paths::foxy_logs_dir();
         let cleanup_result = prune_old_historical_logs(&config_dir, std::time::SystemTime::now());
@@ -97,7 +91,6 @@ fn ensure_logger_inner(duplicate_to_terminal: bool) {
         match Logger::try_with_env_or_str(BASE_LOG_SPEC) {
             Ok(logger) => {
                 let mut logger = logger
-                    // Route all standard log records into the in-app activity buffer too.
                     .log_to_file_and_writer(file_spec, Box::new(UiLogWriter))
                     .rotate(
                         Criterion::Size(LOG_ROTATION_SIZE_BYTES),
@@ -157,8 +150,6 @@ fn base_log_spec() -> LogSpecification {
     })
 }
 
-/// The base specification with the Foxy modules raised to at least `Debug`.
-/// A stricter `RUST_LOG` (for example `trace`) is left alone.
 fn extended_diagnostics_spec(base: LogSpecification) -> LogSpecification {
     let mut builder = LogSpecBuilder::from_module_filters(base.module_filters());
     for module in DIAGNOSTIC_MODULES {
@@ -173,9 +164,6 @@ fn extended_diagnostics_spec(base: LogSpecification) -> LogSpecification {
     builder.finalize()
 }
 
-/// Switch the extra tracing on or off: debug-level records from this crate,
-/// per-operation `PROFILE` reports and periodic `RESOURCES` samples. Safe to
-/// call before the logger starts; the level is applied when it does.
 pub fn set_extended_diagnostics(enabled: bool) {
     if EXTENDED_DIAGNOSTICS.swap(enabled, Ordering::Relaxed) == enabled {
         return;
@@ -227,7 +215,6 @@ fn set_logger_health(file_logging_active: bool, detail: impl Into<String>) {
     health.detail = detail.into();
 }
 
-/// Wall-clock elapsed since process start, the origin of the O8 startup timeline.
 pub fn process_start_elapsed() -> Duration {
     PROCESS_START.elapsed()
 }
@@ -239,8 +226,6 @@ pub fn logger_health() -> LoggerHealth {
     }
 }
 
-/// The one action id the O8 startup timeline and its remote probe share, so
-/// `SOL op=startup` and `SOL op=startup_probe` correlate by `op_id`.
 pub fn startup_operation_id() -> &'static str {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ID.get_or_init(|| next_operation_id("startup"))

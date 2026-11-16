@@ -1,6 +1,3 @@
-//! ZIP export of a benchmark, with the charts captured as PNG through
-//! viewport screenshots of a chart window, one chart per pass.
-
 use std::io::Cursor;
 
 use eframe::egui;
@@ -12,11 +9,9 @@ use crate::ui::app::benchmarks::BenchmarkExportJob;
 
 const EXPORT_WINDOW_WIDTH: f32 = 900.0;
 const EXPORT_CHART_HEIGHT: f32 = 260.0;
-/// Frames the window gets to settle before each capture (no fade-in, but the
-/// first frame only measures the content).
+
 const SETTLE_FRAMES: u32 = 3;
-/// Frames to wait for a screenshot before giving up on that chart, so a
-/// backend that never answers cannot leave the export hanging.
+
 const SCREENSHOT_TIMEOUT_FRAMES: u32 = 180;
 
 fn encode_png(image: &egui::ColorImage) -> Result<Vec<u8>, String> {
@@ -72,9 +67,6 @@ impl Foxy {
         }
     }
 
-    /// Drives a running export: renders the current chart, requests the
-    /// screenshot once the window has settled, crops the chart when it
-    /// arrives, then moves to the next chart.
     pub(crate) fn poll_benchmark_export_screenshot(&mut self, ctx: &egui::Context) {
         let Some(job) = self.benchmarks_view.export.as_ref() else {
             return;

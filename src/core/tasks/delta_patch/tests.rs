@@ -252,7 +252,7 @@ fn copy_run_hashes_every_part_boundary_inside_the_stream() {
 #[test]
 fn copy_run_pauses_between_chunks_and_resumes_the_partial_part() {
     let dir = tempfile::tempdir().unwrap();
-    // Two chunks of the stream buffer, so the pause check runs mid-run.
+
     let total = super::types::RUN_COPY_BUFFER_SIZE as u64 + 4096;
     let source_bytes: Vec<u8> = (0..total).map(|i| (i % 253) as u8).collect();
     let source_path = dir.path().join("source.bin");
@@ -336,10 +336,6 @@ fn patch_op(
     }
 }
 
-/// End to end: parts reordered so the plan holds two coalescable runs, one
-/// out-of-order copy and one insert from the blob. The output must equal the
-/// planned bytes and the per-part checksums must be the ops' targets, with no
-/// network fallback involved.
 #[tokio::test]
 async fn coalesced_apply_produces_planned_bytes_and_segment_checksums() {
     let dir = tempfile::tempdir().unwrap();
@@ -350,8 +346,6 @@ async fn coalesced_apply_produces_planned_bytes_and_segment_checksums() {
     let blob_path = dir.path().join("file.blob");
     std::fs::write(&blob_path, &blob_bytes).unwrap();
 
-    // New layout: old[0..1000] + old[1000..2500] (run of two), blob[0..500],
-    // old[4000..6000] (out of order, own run), old[2500..4000] (own run).
     type PlannedSegment<'a> = (PatchOpType, &'a [u8], Option<u64>, Option<u64>);
     let segments: Vec<PlannedSegment<'_>> = vec![
         (PatchOpType::CopyLocal, &old[0..1000], Some(0), None),
@@ -422,9 +416,6 @@ async fn coalesced_apply_produces_planned_bytes_and_segment_checksums() {
     ));
 }
 
-/// One batch: a run whose last op runs past the end of the source, then an
-/// insert. The readable prefix is hashed from the buffer, the truncated op is
-/// reported unread, and the batch lands in the output with one write.
 #[test]
 fn apply_batch_hashes_readable_prefix_and_reports_truncated_ops() {
     let dir = tempfile::tempdir().unwrap();
@@ -442,8 +433,6 @@ fn apply_batch_hashes_readable_prefix_and_reports_truncated_ops() {
         .open(dir.path().join("out"))
         .unwrap();
 
-    // Copy run 200..350 of a 300-byte source: ops of 100, 50 (readable) and
-    // 50 (past the end); then a 50-byte insert.
     let ops = vec![
         patch_op(
             0,
@@ -510,9 +499,6 @@ fn apply_batch_hashes_readable_prefix_and_reports_truncated_ops() {
     assert_eq!(&written[200..250], &blob[..]);
 }
 
-/// Thousands of small alternating ops spanning several batches, with one run
-/// above the batch budget in the middle so the streamed path is exercised
-/// too. Output bytes and per-op checksums must be exactly the plan's.
 #[tokio::test]
 async fn batched_apply_matches_plan_across_batch_boundaries() {
     let dir = tempfile::tempdir().unwrap();
@@ -616,9 +602,6 @@ async fn batched_apply_matches_plan_across_batch_boundaries() {
     assert_eq!(segment_checksums, expected_checksums);
 }
 
-/// Minimal HTTP/1.1 range server over a fixed byte buffer, enough for the
-/// delta transfer's `Range`/`Content-Range` contract. Counts requests so a
-/// test can assert how many round trips a plan cost.
 fn spawn_range_server(bytes: Arc<Vec<u8>>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -688,10 +671,6 @@ Content-Length: {}
     (url, requests)
 }
 
-/// Insert ops adjacent in the output, one small copy gap and one large gap.
-/// Nothing has measured the link yet, so the floor budget applies: the small
-/// gap is bridged, the large one is not, the blob must hold exactly the
-/// planned insert bytes and the server must see two requests, not four.
 #[tokio::test]
 async fn blob_download_coalesces_adjacent_inserts_into_few_requests() {
     let remote: Vec<u8> = (0..450_000u32).map(|i| (i * 7 % 251) as u8).collect();
@@ -700,8 +679,6 @@ async fn blob_download_coalesces_adjacent_inserts_into_few_requests() {
     let dir = tempfile::tempdir().unwrap();
     let blob_path = dir.path().join("file.blob");
 
-    // Layout: insert 0..10k, insert 10k..30k, copy 30k..31k (bridged gap),
-    // insert 31k..50k, copy 50k..400k (too large to bridge), insert 400k..450k.
     let layout: Vec<(PatchOpType, u64, u64)> = vec![
         (PatchOpType::InsertRemote, 0, 10_000),
         (PatchOpType::InsertRemote, 10_000, 20_000),
@@ -871,9 +848,6 @@ async fn download_blob_with_budget(
     .await
 }
 
-/// A 300 KB insert op under a 64 KB request cap travels as five chunks on
-/// their own connections, is verified from the blob afterwards, and the two
-/// small ops still coalesce into one run: seven requests, exact blob bytes.
 #[tokio::test]
 async fn blob_download_chunks_large_ops_and_verifies_them_from_the_blob() {
     let remote: Vec<u8> = (0..400_000u32).map(|i| (i * 11 % 241) as u8).collect();
@@ -897,7 +871,7 @@ async fn blob_download_chunks_large_ops_and_verifies_them_from_the_blob() {
         .expect("chunked blob download");
 
     assert_eq!(std::fs::read(&blob_path).unwrap(), expected_blob);
-    // 300_000 / 65_536 -> 5 chunks, plus one coalesced run for the two tail ops.
+
     assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 6);
     for op in ops
         .iter()
@@ -907,9 +881,6 @@ async fn blob_download_chunks_large_ops_and_verifies_them_from_the_blob() {
     }
 }
 
-/// A chunked op whose bytes do not hash to the plan's checksum is refused
-/// (the caller then falls back to a full download); nothing is marked
-/// downloaded.
 #[tokio::test]
 async fn blob_download_rejects_a_chunked_op_with_a_wrong_checksum() {
     let remote: Vec<u8> = (0..200_000u32).map(|i| (i * 13 % 239) as u8).collect();
@@ -972,8 +943,6 @@ fn runtime_ops_accept_an_empty_entry_but_not_a_zero_length_op_with_content() {
     assert!(validate_runtime_ops(&ops, 10).is_err());
 }
 
-/// The apply only sees ops that carry bytes; the file rollup must still match
-/// the plan's, which counts every empty entry in its place.
 #[test]
 fn applied_checksums_roll_up_with_empty_entries_in_plan_order() {
     let insert = |order, dest_start, length, checksum: &str| {

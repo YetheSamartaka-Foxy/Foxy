@@ -89,9 +89,7 @@ fn unix_timestamp_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// The game space this process is running against. `ensure_game_spaces_layout()`
-/// seeds this from `games.json` at startup; `activate_game_space()` retargets
-/// it at runtime when the user switches spaces in the UI.
+/// Runtime switching retargets this process; persisted selection alone does not change its current game space.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveGameSpace {
     pub space_id: String,
@@ -142,9 +140,7 @@ fn set_process_active_game_space(active: ActiveGameSpace) {
 const MAX_GAME_SPACE_ID_LEN: usize = 64;
 const MAX_GAME_SPACE_ID_BASE_LEN: usize = 48;
 
-/// Game-space ids become a single path component under `games/`, so only a
-/// narrow ASCII slug is accepted; anything else in a hand-edited or corrupt
-/// `games.json` must never reach a filesystem operation.
+/// Space IDs become path components; reject unsafe slugs before any filesystem operation.
 pub fn is_valid_game_space_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_GAME_SPACE_ID_LEN
@@ -179,9 +175,7 @@ pub fn game_space_dir_for(space_id: &str) -> PathBuf {
     game_space_dir_at(&app_paths::foxy_data_dir(), space_id)
 }
 
-/// Directory of the active game space, created on demand. All per-game data
-/// (repositories, spaces, visual folders, game settings, database) lives here;
-/// app-global files stay in `foxy_data_dir()`.
+/// All space data resolves here; only app-global files belong in foxy_data_dir().
 pub fn active_game_space_dir() -> PathBuf {
     let active = active_game_space();
     let dir = game_space_dir_at(&app_paths::foxy_data_dir(), &active.space_id);
@@ -217,17 +211,12 @@ pub fn load_registry() -> Result<GamesRegistryFile, String> {
     load_games_registry(&games_registry_path(&app_paths::foxy_data_dir()))
 }
 
-/// Mark a game space as the active one in `games.json` and remember the
-/// previously active one as last-opened. Does not affect the running process;
-/// the UI uses [`activate_game_space`] for runtime switching.
+/// Persisted selection does not retarget this process; runtime switching must use activate_game_space.
 pub fn set_active_game_space(space_id: &str) -> Result<GameSpaceEntry, String> {
     set_active_game_space_at(&app_paths::foxy_data_dir(), space_id)
 }
 
-/// Runtime switch: persist the active space to `games.json`, retarget this
-/// process to it, and make sure its directory exists. After this returns,
-/// every `active_game_space_dir()` consumer (settings, repositories, the
-/// database handle slot) resolves to the new space.
+/// After runtime activation, every space-derived consumer must resolve through the new active directory.
 pub fn activate_game_space(space_id: &str) -> Result<GameSpaceEntry, String> {
     let entry = set_active_game_space(space_id)?;
     let dir = game_space_dir_for(&entry.id);
@@ -303,9 +292,7 @@ fn create_game_space_at(
     Ok(entry)
 }
 
-/// Rename a game space. Only the display name changes; the space id and its
-/// `games/<id>/` directory stay as they are so nothing that keys on the id
-/// (settings, database, caches) has to move.
+/// Rename only the display label; stable IDs and directories keep settings, database and cache identities intact.
 pub fn rename_game_space(space_id: &str, display_name: &str) -> Result<GameSpaceEntry, String> {
     let entry = rename_game_space_at(&app_paths::foxy_data_dir(), space_id, display_name)?;
     if active_game_space().space_id == entry.id {
@@ -467,15 +454,10 @@ fn unique_space_id(root: &Path, registry: &GamesRegistryFile, display_name: &str
     candidate
 }
 
-/// Prepare the game-spaces on-disk layout for the current data root and pin
-/// the active game space for this process. Runs the one-shot legacy migration
-/// when `games.json` is absent. Call before any settings, repository, or
-/// database file is read.
+/// Pin the active space and finish legacy migration before reading settings, repositories or the database.
 pub fn ensure_game_spaces_layout() -> Result<(), String> {
-    match ensure_layout_at(&app_paths::foxy_data_dir()) {
+    match prepare_game_spaces_layout() {
         Ok(active) => {
-            set_process_active_game_space(active);
-            let active = active_game_space();
             log::info!(
                 "Active game space: {} (game {})",
                 active.space_id,
@@ -510,6 +492,12 @@ pub(crate) fn replace_unreadable_registry(backup: &Path) -> Result<(), String> {
         return Err("The game-space registry changed. Review it again before replacing it.".into());
     }
     save_games_registry(&path, &GamesRegistryFile::single_space_default())
+}
+
+pub fn prepare_game_spaces_layout() -> Result<ActiveGameSpace, String> {
+    let active = ensure_layout_at(&app_paths::foxy_data_dir())?;
+    set_process_active_game_space(active.clone());
+    Ok(active)
 }
 
 fn ensure_layout_at(root: &Path) -> Result<ActiveGameSpace, String> {
@@ -573,9 +561,7 @@ fn ensure_layout_at(root: &Path) -> Result<ActiveGameSpace, String> {
     Ok(active)
 }
 
-/// Directories under `games/` that no registry entry claims. They cannot be
-/// adopted automatically because the owning game id is not recoverable from
-/// the directory alone.
+/// Unclaimed directories lack trustworthy game IDs and cannot be adopted automatically.
 fn orphan_space_dir_names(root: &Path, registry: &GamesRegistryFile) -> Vec<String> {
     let Ok(entries) = fs::read_dir(root.join(GAMES_DIR_NAME)) else {
         return Vec::new();
@@ -594,10 +580,7 @@ fn orphan_space_dir_names(root: &Path, registry: &GamesRegistryFile) -> Vec<Stri
     orphans
 }
 
-/// Repair a parsed registry so an active entry always resolves: entries whose
-/// id is not a safe path slug are dropped before any filesystem use, an empty
-/// space list gets the default space, and an active id that names no entry is
-/// re-pointed at the resolvable one. Repairs are persisted.
+/// Repair registry references only after filtering unsafe path slugs, ensuring an active ID always resolves.
 fn sanitize_loaded_registry(
     registry_path: &Path,
     mut registry: GamesRegistryFile,
@@ -780,7 +763,7 @@ mod tests {
         let registry =
             load_games_registry(&dir.path().join(GAMES_REGISTRY_FILE)).expect("registry");
         assert_eq!(registry.game_spaces.len(), 3);
-        // Creating never changes what loads next launch.
+
         assert_eq!(registry.active_game_space_id, DEFAULT_GAME_SPACE_ID);
     }
 
@@ -988,7 +971,7 @@ mod tests {
     fn remove_and_set_active_reject_unsafe_ids_before_any_filesystem_use() {
         let dir = tempfile::tempdir().expect("temp dir");
         ensure_layout_at(dir.path()).expect("layout");
-        // Simulate a hand-edited registry that sneaks in a traversal id.
+
         let registry_path = dir.path().join(GAMES_REGISTRY_FILE);
         let mut registry = load_games_registry(&registry_path).expect("load");
         registry.game_spaces.push(GameSpaceEntry {

@@ -1,7 +1,4 @@
-//! Benchmarks live as one folder per record under the active game space:
-//! `benchmarks/<id>/benchmark.json` plus the log slice. The files are the
-//! source of truth; the database only indexes them, so a database wipe never
-//! loses a benchmark unless the user asks for that explicitly.
+//! Record folders are authoritative and survive database wipes unless explicitly selected for deletion.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,7 +37,6 @@ pub fn save_record(record: &BenchmarkRecord, log_text: Option<&str>) -> Result<P
     Ok(dir)
 }
 
-/// Rewrite only the record file (flags, name, notes); the log is untouched.
 pub fn write_record(record: &BenchmarkRecord) -> Result<()> {
     let dir = benchmark_dir(&record.id);
     let json = serde_json::to_vec_pretty(record).context("serialize benchmark")?;
@@ -91,7 +87,6 @@ pub fn delete_record(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Remove every benchmark of the active space (the database wipe opt-in).
 pub fn delete_all() -> Result<usize> {
     let root = benchmarks_dir();
     if !root.exists() {

@@ -1,7 +1,5 @@
-//! Scheduling priority of the threads that hash, scan, check, and download.
-//! Only those threads are lowered: the process priority class stays normal, so
-//! the interface and every program Foxy launches (the game, Steam, TeamSpeak,
-//! a browser) keep normal priority instead of inheriting a lowered class.
+//! Scheduling priority for Foxy's hashing, scanning, checking, and download threads.
+//! The process priority remains normal, including for the UI and launched programs.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -13,13 +11,11 @@ use crate::ui::types::WorkPriorityPreference;
 const LOW_DISK_PRIORITY: u8 = 0x80;
 const LEVEL_MASK: u8 = 0x7f;
 
-/// Requested level and disk mode, packed; threads compare it with what they
-/// last applied.
 static REQUESTED: AtomicU8 = AtomicU8::new(0);
 
 thread_local! {
-    /// New threads start at normal priority outside background mode, which is
-    /// what the packed value 0 means.
+
+
     static APPLIED: Cell<u8> = const { Cell::new(0) };
 }
 
@@ -32,7 +28,6 @@ enum PriorityLevel {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ThreadChange {
-    /// `Some(true)` enters background mode, `Some(false)` leaves it.
     background_mode: Option<bool>,
     level: Option<PriorityLevel>,
 }
@@ -59,9 +54,7 @@ fn decode_level(packed: u8) -> PriorityLevel {
     }
 }
 
-/// What a thread at `previous` must change to reach `requested`. Background
-/// mode is switched first and the level is set after it, so the CPU level the
-/// user picked wins over whatever background mode does to it.
+/// Set background mode before CPU priority so background-mode side effects cannot override the requested level.
 fn thread_change(previous: u8, requested: u8) -> ThreadChange {
     if previous == requested {
         return ThreadChange::default();
@@ -74,8 +67,6 @@ fn thread_change(previous: u8, requested: u8) -> ThreadChange {
     }
 }
 
-/// Apply the user's settings to work threads. Running threads pick the change
-/// up the next time they wake; new threads start with it.
 pub fn set_work_priority(priority: WorkPriorityPreference, low_disk_priority: bool) {
     let requested = encode(priority, low_disk_priority);
     if REQUESTED.swap(requested, Ordering::Relaxed) != requested {
@@ -86,8 +77,6 @@ pub fn set_work_priority(priority: WorkPriorityPreference, low_disk_priority: bo
     }
 }
 
-/// Bring the calling thread to the requested priority. One atomic load when
-/// nothing changed, so runtimes call it every time a worker wakes.
 pub fn apply_to_current_thread() {
     let requested = REQUESTED.load(Ordering::Relaxed);
     APPLIED.with(|applied| {
@@ -99,9 +88,6 @@ pub fn apply_to_current_thread() {
     });
 }
 
-/// Multi-thread runtime whose threads follow the work priority settings and
-/// whose worker count follows the CPU Threads setting (Auto keeps tokio's own
-/// default, one per detected processor).
 pub fn work_runtime_builder() -> tokio::runtime::Builder {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
@@ -117,8 +103,6 @@ pub fn work_runtime_builder() -> tokio::runtime::Builder {
     builder
 }
 
-/// Async workers never gain from more threads than processors, so a CPU
-/// Threads value above the detected count (safe limits off) is capped there.
 fn runtime_worker_threads(planned: Option<usize>, detected: Option<usize>) -> Option<usize> {
     let planned = planned?;
     Some(

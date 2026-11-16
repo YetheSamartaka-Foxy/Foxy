@@ -5,15 +5,10 @@ use egui::{Color32, Galley, Painter, Pos2, Rect, Vec2, vec2};
 use super::fade;
 use crate::ui::palette::{BAR_LABEL_SHADE, ON_STRONG_FILL};
 
-/// Layers of the soft backing under a label, widest first: each dims the
-/// triangles a little more toward the text.
 const BACKING_LAYERS: [(f32, f32); 3] = [(10.0, 3.0), (6.0, 2.0), (3.0, 1.0)];
 const BACKING_OPACITY: f32 = 0.18;
 const OUTLINE_OPACITY: f32 = 0.85;
 
-/// Text over a progress bar, readable over lit triangles: a feathered backing
-/// dims the triangles right under the text, and an outline rings each glyph, both
-/// in the shade that contrasts with the text.
 pub(crate) fn paint_bar_label(painter: &Painter, galley: Arc<Galley>, pos: Pos2, color: Color32) {
     let shade = contrast_shade(color);
     let text = Rect::from_min_size(pos, galley.size());
@@ -31,7 +26,6 @@ pub(crate) fn paint_bar_label(painter: &Painter, galley: Arc<Galley>, pos: Pos2,
     painter.galley(pos, galley, color);
 }
 
-/// Dark behind light text, light behind dark text.
 fn contrast_shade(text: Color32) -> Color32 {
     let luma =
         0.299 * f32::from(text.r()) + 0.587 * f32::from(text.g()) + 0.114 * f32::from(text.b());
@@ -42,7 +36,6 @@ fn contrast_shade(text: Color32) -> Color32 {
     }
 }
 
-/// One point out in each of the eight directions.
 fn outline_offsets() -> impl Iterator<Item = Vec2> {
     (0..8).map(|step| {
         let angle = step as f32 * std::f32::consts::FRAC_PI_4;

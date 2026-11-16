@@ -4,16 +4,12 @@ use crate::core::db::params;
 use crate::core::db::{DbValue, FoxyDb};
 use crate::core::models::modification_file::FILE_COLUMNS;
 
-/// Check if all mods, files, and parts under a repository have non-empty `remote_checksum`
-/// using JOIN queries instead of sequential chunked count queries.
-/// Returns `Some(true)` if all are ready, `Some(false)` if any are missing, `None` on DB error.
 #[cfg(test)]
 pub(crate) async fn remote_checksum_state_ready_joined(
     db: &FoxyDb,
     repository_id: i64,
     purpose: &str,
 ) -> Option<bool> {
-    // Query 1: check mods and files for missing remote_checksum in a single JOIN
     let row = match db
         .query_one(
             r#"SELECT
@@ -53,7 +49,6 @@ pub(crate) async fn remote_checksum_state_ready_joined(
         return Some(false);
     }
 
-    // Query 2: check parts (optional - if none exist, that's fine)
     let part_row = match db
         .query_one(
             r#"SELECT
@@ -88,9 +83,6 @@ pub(crate) async fn remote_checksum_state_ready_joined(
     Some(missing_part == 0)
 }
 
-/// Check if all mods and files under a repository have non-empty `local_content_hash`
-/// using a single JOIN query instead of sequential chunked count queries.
-/// Returns `Some(true)` if baseline is ready, `Some(false)` if any are missing, `None` on DB error.
 #[cfg(test)]
 pub(crate) async fn content_hash_baseline_ready_joined(
     db: &FoxyDb,
@@ -243,9 +235,6 @@ pub(super) async fn load_changed_part_stats_by_file_ids(
         return HashMap::new();
     }
 
-    // Use a single SQL GROUP BY query directly on subfiles instead of the previous
-    // two-step application-side join through the file_subfiles junction table.
-    // GROUP BY file_id uses idx_subfiles_file_id_path (leads with file_id).
     let mut result: HashMap<i64, PartChangeStats> = HashMap::new();
     for chunk in file_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; chunk.len()].join(",");
@@ -336,8 +325,6 @@ pub(super) async fn load_changed_part_stats_by_file_ids(
     result
 }
 
-/// Lowest end offset among each file's parts that carry no local state, for
-/// the few files whose part state is being considered for recovery.
 pub(super) async fn load_first_unhashed_part_end_by_file_ids(
     db: &FoxyDb,
     file_ids: &[i64],

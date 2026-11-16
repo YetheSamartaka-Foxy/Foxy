@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(ops, ["quick-check", "quick-check-stale"]);
         let stale = &report["comparisons"].as_array().unwrap()[1];
         assert_eq!(stale["verdict"], "candidate-worse");
-        // Mixed lanes under "all" are flagged as not comparable.
+
         let mixed = vec![
             row("wal", None, "evicted", 1.0),
             row("mvcc", None, "warm", 1.0),

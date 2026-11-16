@@ -89,8 +89,7 @@ impl RepositorySpaceBulkProgress {
         }
     }
 
-    /// Count one member's outcome. Returns false when the URL is not a pending
-    /// target of this run, so a repeated or foreign completion changes nothing.
+    /// Count only pending targets; repeated or foreign completions do not alter the run.
     pub fn record(&mut self, repo_url: &str, succeeded: bool, had_updates: bool) -> bool {
         if !self.target_repo_urls.contains(repo_url) || self.completed_repo_urls.contains(repo_url)
         {
@@ -117,8 +116,7 @@ impl RepositorySpaceBulkProgress {
         }
     }
 
-    /// Remove a pending member from this run and count it as a failed skip.
-    /// Completed outcomes stay in the run summary if their row is later removed.
+    /// A skipped pending member counts as failed; completed outcomes remain in the summary after removal.
     pub fn remove_target(&mut self, repo_url: &str) {
         if !self.target_repo_urls.remove(repo_url) {
             return;
@@ -260,8 +258,7 @@ pub struct RepositorySpace {
     pub repo_image_checksum: String,
     #[serde(default)]
     pub app_update_url: String,
-    /// Checksum of the manifest these fields were last taken from; a refresh
-    /// that fetches the same checksum leaves the space untouched.
+    /// Keep a space unchanged when its fetched manifest checksum matches the stored one.
     #[serde(default)]
     pub manifest_checksum: String,
     #[serde(default)]

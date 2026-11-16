@@ -6,6 +6,7 @@
 
 - The categorized catalog in `skills/README.md` routes all specialized workflows. Use the narrow skill for diagnosis, sync/database integrity, performance attribution, desktop verification, or platform/release work; use the foundation skills below for shared mechanics. Do not load all skill bodies for one task.
 - Rust implementation and crate-aware validation: `skills/foxy-rust-change/SKILL.md`.
+- Multi-step outcome delivery: `skills/foxy-milestone-execution/SKILL.md`. Test expectation and evidence review: `skills/foxy-test-oracle-review/SKILL.md`. Real external-process/platform proof: `skills/foxy-native-acceptance/SKILL.md`.
 - Instructions, skills, discovery, roles, or checker maintenance: `skills/foxy-agent-maintenance/SKILL.md` and `conventions/AGENT_WORKFLOWS.md`.
 - Locale translation, fallback cleanup, placeholder audits, or i18n checking: `skills/foxy-locale-translator/SKILL.md` and `conventions/i18n_CONVENTIONS.md`.
 - Agentic GUI automation and desktop inspection: `skills/foxy-gui-driver/SKILL.md`.

@@ -1,0 +1,13 @@
+{
+  "game": "reforger",
+  "settings": {
+    "name": "MainServer",
+    "bind_address": "127.0.0.1",
+    "bind_port": 2001,
+    "a2s_port": 17777,
+    "max_players": 4,
+    "visible": false,
+    "scenario_id": "{2BBBE828037C6F4B}Missions/22_GM_Arland.conf",
+    "addons": []
+  }
+}

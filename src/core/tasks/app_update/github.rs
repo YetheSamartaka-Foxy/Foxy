@@ -9,12 +9,10 @@ struct InstallerChecksum {
     algorithm: String,
 }
 
-/// Strip a leading `v` or `V` prefix from a GitHub tag name.
 fn strip_version_prefix(tag: &str) -> &str {
     tag.trim_start_matches(['v', 'V'])
 }
 
-/// Iterate over non-draft, non-prerelease releases with valid semver tags.
 fn valid_releases(releases: &[GitHubRelease]) -> impl Iterator<Item = &GitHubRelease> {
     releases.iter().filter(|r| {
         !r.draft
@@ -23,7 +21,6 @@ fn valid_releases(releases: &[GitHubRelease]) -> impl Iterator<Item = &GitHubRel
     })
 }
 
-/// Fetch releases from the GitHub API (single request, up to 30 results).
 pub async fn fetch_github_releases(repo_slug: &str) -> Result<Vec<GitHubRelease>> {
     let url = format!("https://api.github.com/repos/{}/releases", repo_slug.trim());
     log::info!("Fetching GitHub releases from {}", sanitize_log_url(&url));
@@ -92,8 +89,6 @@ pub async fn fetch_github_releases(repo_slug: &str) -> Result<Vec<GitHubRelease>
         .context("Failed to parse GitHub releases JSON")
 }
 
-/// Convert GitHub releases into the existing `UpdateManifest` format so the
-/// rest of the update pipeline (UI, download, install) can be reused as-is.
 pub async fn github_releases_to_manifest(releases: &[GitHubRelease]) -> Result<UpdateManifest> {
     let mut versions = Vec::new();
     let client = super::super::create_web_client::create_web_client().await;
@@ -107,18 +102,16 @@ pub async fn github_releases_to_manifest(releases: &[GitHubRelease]) -> Result<U
         for asset in &release.assets {
             let name_lower = asset.name.to_lowercase();
 
-            // Skip CLI assets and checksum files
             if name_lower.contains("-cli") || checksum_asset_algorithm(&asset.name).is_some() {
                 continue;
             }
 
-            // Detect architecture from filename
             let asset_arch = if name_lower.contains("aarch64") || name_lower.contains("arm64") {
                 "aarch64"
             } else if name_lower.contains("x86_64") || name_lower.contains("amd64") {
                 "x86_64"
             } else {
-                "" // Assume compatible if no arch in name
+                ""
             };
 
             let platform_key = if name_lower.ends_with(".exe") {
@@ -144,7 +137,6 @@ pub async fn github_releases_to_manifest(releases: &[GitHubRelease]) -> Result<U
                     .map(|checksum| checksum.algorithm.clone())
                     .unwrap_or_else(default_installer_hash_algorithm);
 
-                // Prefer .sh (self-extracting installer) over other formats
                 let is_preferred = name_lower.ends_with(".sh") || name_lower.ends_with(".exe");
                 let should_insert = !platforms.contains_key(key) || is_preferred;
 
@@ -316,14 +308,12 @@ fn parse_checksum_text(text: &str) -> HashMap<String, String> {
     checksums
 }
 
-/// Extract changelogs from GitHub release bodies.
 pub fn github_releases_to_changelogs(releases: &[GitHubRelease]) -> Vec<ChangelogVersion> {
     valid_releases(releases)
         .map(github_body_to_changelog)
         .collect()
 }
 
-/// Parse a single GitHub release body into a `ChangelogVersion`.
 fn github_body_to_changelog(release: &GitHubRelease) -> ChangelogVersion {
     let version = strip_version_prefix(&release.tag_name).to_string();
     let date = release.published_at.clone().unwrap_or_default();
@@ -336,8 +326,6 @@ fn github_body_to_changelog(release: &GitHubRelease) -> ChangelogVersion {
     }
 }
 
-/// Attempt to parse markdown with `## Section` headings and `- item` bullets.
-/// Falls back to a single "Changes" section with the raw body lines.
 fn parse_markdown_changelog(body: &str) -> Vec<ChangelogSection> {
     let mut sections: Vec<ChangelogSection> = Vec::new();
     let mut current_title: Option<String> = None;
@@ -346,7 +334,6 @@ fn parse_markdown_changelog(body: &str) -> Vec<ChangelogSection> {
     for line in body.lines() {
         let trimmed = line.trim();
         if let Some(heading) = trimmed.strip_prefix("## ") {
-            // Flush previous section
             if let Some(title) = current_title.take()
                 && !current_items.is_empty()
             {
@@ -363,7 +350,6 @@ fn parse_markdown_changelog(body: &str) -> Vec<ChangelogSection> {
         }
     }
 
-    // Flush last section
     if let Some(title) = current_title {
         if !current_items.is_empty() {
             sections.push(ChangelogSection {
@@ -372,13 +358,11 @@ fn parse_markdown_changelog(body: &str) -> Vec<ChangelogSection> {
             });
         }
     } else if !current_items.is_empty() {
-        // No headings found - wrap everything in a single section
         sections.push(ChangelogSection {
             title: "Changes".to_string(),
             items: current_items,
         });
     } else if !body.trim().is_empty() {
-        // No bullet items at all - treat each non-empty line as an item
         let items: Vec<String> = body
             .lines()
             .map(|l| l.trim().to_string())

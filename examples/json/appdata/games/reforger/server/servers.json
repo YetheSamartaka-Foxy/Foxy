@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "game_space_id": "reforger",
+  "game_id": "reforger",
+  "revision": 1,
+  "instances": [
+    {
+      "schema_version": 2,
+      "id": "server_00000000000000000000000000000002",
+      "game_space_id": "reforger",
+      "revision": 1,
+      "display_name": "MainServer",
+      "installation_id": null,
+      "definition": {
+        "game": "reforger",
+        "settings": {
+          "name": "MainServer",
+          "bind_port": 2001,
+          "a2s_port": null,
+          "max_players": 64,
+          "visible": false,
+          "scenario_id": null,
+          "addons": []
+        }
+      }
+    }
+  ],
+  "installations": []
+}

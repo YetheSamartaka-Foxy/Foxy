@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "installation_key": "v1_0000000000000000_00000000000000000000000000000000",
+  "session": {
+    "owner_id": "owner_alpha",
+    "owner_generation": 1,
+    "game_space_id": "alpha",
+    "instance_id": "server_00000000000000000000000000000001",
+    "operation_id": "op_alpha",
+    "run_generation": 1
+  }
+}

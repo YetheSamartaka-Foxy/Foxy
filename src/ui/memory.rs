@@ -133,7 +133,6 @@ pub fn sample_process_memory() -> ProcessMemoryStats {
     stats
 }
 
-/// User and kernel CPU time this process has used so far, in that order.
 #[cfg(target_os = "windows")]
 pub fn process_cpu_times() -> Option<(std::time::Duration, std::time::Duration)> {
     use winapi::shared::minwindef::FILETIME;
@@ -154,12 +153,10 @@ pub fn process_cpu_times() -> Option<(std::time::Duration, std::time::Duration)>
     None
 }
 
-/// User plus kernel CPU time this process has used so far.
 pub fn process_cpu_time() -> Option<std::time::Duration> {
     process_cpu_times().map(|(user, kernel)| user + kernel)
 }
 
-/// CPU use between two [`process_cpu_time`] readings, in percent of one core.
 pub fn cpu_percent_between(
     cpu_before: std::time::Duration,
     cpu_after: std::time::Duration,
@@ -404,13 +401,10 @@ pub fn sample_process_memory() -> ProcessMemoryStats {
         }
     }
 
-    // Parse page faults from /proc/self/stat (field 10 = minor faults)
     if let Ok(stat) = fs::read_to_string("/proc/self/stat") {
-        // The comm field (field 2) may contain spaces and is enclosed in parens.
-        // Find the closing paren and parse fields after it.
         if let Some(close_paren) = stat.rfind(')') {
             let fields_after_comm: Vec<&str> = stat[close_paren + 1..].split_whitespace().collect();
-            // Field index 0 after ')' is state (field 3 in proc(5)), minor faults is field 10 = index 7
+
             if fields_after_comm.len() > 7 {
                 if let Ok(faults) = fields_after_comm[7].parse::<u64>() {
                     stats.page_fault_count = Some(faults);
@@ -477,7 +471,6 @@ pub fn sample_process_virtual_memory_map() -> Option<ProcessVirtualMemoryMap> {
         }
         total_bytes = total_bytes.saturating_add(size);
 
-        // Collect large private writable regions for the top-regions view
         if perms.contains('w') && size >= 1024 * 1024 {
             let usage = if mapping_name.is_empty() || mapping_name == "[heap]" {
                 "Heap / anonymous".to_string()

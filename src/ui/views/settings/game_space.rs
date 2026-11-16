@@ -569,8 +569,7 @@ impl Foxy {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
                 if auto_detect_button.clicked() {
-                    // Steam directory is app-global, so detection always reads
-                    // the live settings even when editing another space.
+                    // Steam is app-global; detect it from live settings even while editing another space.
                     let detected = detect_directory(
                         module,
                         setting.id,

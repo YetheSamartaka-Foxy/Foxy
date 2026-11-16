@@ -12,8 +12,8 @@ use crate::core::models::pending_update::{
 };
 use crate::core::models::repository::is_repository_foxy;
 use crate::ui::app::{
-    CachedUpdateLoadOutcome, CachedUpdateLoadResult, Foxy, StartupPendingUpdateRestoreRecord,
-    StartupPendingUpdateRestoreRequest,
+    CachedUpdateLoadOutcome, CachedUpdateLoadResult, Foxy, StartupPendingUpdateRestoreBatch,
+    StartupPendingUpdateRestoreRecord, StartupPendingUpdateRestoreRequest,
 };
 use crate::ui::types::{
     RepoState, Repository, RepositoryPresetCheckOutcome, normalize_loaded_repositories,
@@ -99,46 +99,45 @@ impl Foxy {
         self.mark_repositories_dirty();
     }
 
-    /// Clear persisted pending-update cache for a repository. The DB write
-    /// runs on a background thread to avoid blocking the UI draw loop with
-    /// runtime creation and synchronous I/O.
-    pub fn clear_cached_pending_update(&self, repo_index: usize) {
-        if let Some(repo) = self.repository_view_state.repositories.get(repo_index) {
-            let normalized_url = Self::normalize_repo_url(&repo.address);
-            let local_path = repo.path.clone();
-            let repo_name = repo.name.clone();
-            std::thread::spawn(move || {
-                let Some(rt) = crate::core::api::background_runtime() else {
-                    log::error!(
-                        "Shared background runtime unavailable for clearing pending updates"
-                    );
-                    return;
-                };
-                if let Err(err) = rt.block_on(clear_pending_update_payload_for_path(
-                    &normalized_url,
-                    &local_path,
-                )) {
-                    log::error!(
-                        "Failed to clear cached pending updates for {}: {}",
-                        repo_name,
-                        err
-                    );
-                }
-            });
+    pub fn clear_cached_pending_update(&mut self, repo_index: usize) {
+        let Some(repo) = self.repository_view_state.repositories.get(repo_index) else {
+            return;
+        };
+        if self.capture_worker_scope().is_none() {
+            return;
         }
+        let normalized_url = Self::normalize_repo_url(&repo.address);
+        let local_path = repo.path.clone();
+        let repo_name = repo.name.clone();
+        let admission = self.client_db_admission.clone();
+        let handle = std::thread::spawn(move || {
+            if !crate::ui::app::admit_database_section(&admission) {
+                return;
+            }
+            let Some(rt) = crate::core::api::background_runtime() else {
+                log::error!("Shared background runtime unavailable for clearing pending updates");
+                return;
+            };
+            if let Err(err) = rt.block_on(clear_pending_update_payload_for_path(
+                &normalized_url,
+                &local_path,
+            )) {
+                log::error!(
+                    "Failed to clear cached pending updates for {}: {}",
+                    repo_name,
+                    err
+                );
+            }
+        });
+        self.pending_update_clear_workers.push(handle);
     }
 
-    /// Canonicalize a download folder for instance-scoped status keys. Matches
-    /// the core (`content_hash::normalize_path`) so the UI agrees with the
-    /// `local_path` carried on quick-scan results and pending-update rows.
+    /// Normalize folder keys like core quick-scan and pending-update paths so both layers identify the same repository instance.
     pub(crate) fn repo_instance_path_key(local_path: &str) -> String {
         crate::core::utils::content_hash::normalize_path(local_path)
     }
 
-    /// Composite key for the per-instance status maps (`repo_states`,
-    /// `pending_update_cache`). The same remote URL installed in different
-    /// folders is tracked independently, so an empty new-folder install no
-    /// longer inherits a sibling's "complete" status.
+    /// Key per-instance status by URL and folder so a new install cannot inherit a sibling's completed state.
     pub(crate) fn repo_instance_key(repository_url: &str, local_path: &str) -> String {
         format!(
             "{}\u{1f}{}",
@@ -215,10 +214,6 @@ impl Foxy {
         }
     }
 
-    /// State-filter tag describing whether the repository instance has been
-    /// downloaded. A repository whose sync state is still
-    /// [`RepoState::Unknown`] (never checked/downloaded) counts as "not
-    /// installed"; any other state counts as "installed".
     pub fn repo_installed_state_tag(&self, repository_url: &str, local_path: &str) -> &'static str {
         if matches!(
             self.repo_state_for_address(repository_url, local_path),
@@ -536,6 +531,9 @@ impl Foxy {
             debug!("Startup pending-update restore worker is already running");
             return;
         }
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
 
         let requests: Vec<StartupPendingUpdateRestoreRequest> = self
             .repository_view_state
@@ -550,9 +548,12 @@ impl Foxy {
             })
             .collect();
 
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<StartupPendingUpdateRestoreRecord>>();
+        let (tx, rx) = std::sync::mpsc::channel::<StartupPendingUpdateRestoreBatch>();
         self.startup_pending_restore_rx = Some(rx);
         let repaint_ctx = self.repaint_ctx.clone();
+        let admission = self.client_db_admission.clone();
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
         info!(
             "Starting startup pending-update restore worker for {} repositories",
             requests.len()
@@ -565,6 +566,9 @@ impl Foxy {
 
             let mut restored = Vec::with_capacity(requests.len());
             for request in requests {
+                if !crate::ui::app::admit_database_section(&admission) {
+                    break;
+                }
                 let is_foxy =
                     runtime.block_on(is_repository_foxy(&request.repo_url, &request.repo_path));
                 match runtime.block_on(load_pending_update_payload_for_path(
@@ -669,13 +673,23 @@ impl Foxy {
                 }
             }
 
-            if tx.send(restored).is_ok() {
+            if tx
+                .send(StartupPendingUpdateRestoreBatch {
+                    space_id,
+                    generation,
+                    records: restored,
+                })
+                .is_ok()
+            {
                 Self::request_background_repaint(repaint_ctx.as_ref());
             }
         }));
     }
 
     pub(in crate::ui::app) fn poll_restore_pending_updates(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
         let mut restored = None;
         let mut disconnected = false;
         if let Some(rx) = self.startup_pending_restore_rx.as_ref() {
@@ -686,7 +700,17 @@ impl Foxy {
             }
         }
 
-        if let Some(records) = restored {
+        if let Some(batch) = restored {
+            let active_space = crate::core::game::spaces::active_game_space().space_id;
+            if !crate::ui::app::current_worker_result(
+                &self.server_query_generation,
+                &active_space,
+                &batch.space_id,
+                batch.generation,
+            ) {
+                self.startup_pending_restore_rx = None;
+                return;
+            }
             let saved_pending_instances: HashSet<_> = self
                 .repository_view_state
                 .repositories
@@ -702,7 +726,7 @@ impl Foxy {
                 .collect();
             let mut verify_urls = Vec::new();
             let mut first_pending: Option<(usize, Vec<ModDiffSummary>)> = None;
-            for record in records {
+            for record in batch.records {
                 let Some(repo_index) = self.repo_index_by_instance(
                     &record.repo_url,
                     &Self::repo_instance_path_key(&record.repo_path),
@@ -726,9 +750,7 @@ impl Foxy {
                 }
 
                 let path_key = Self::repo_instance_path_key(&repo_path);
-                // A saved update that startup will refresh must not also be
-                // quick-scanned. The scan's clean verdict would clear the
-                // pending row before the refresh re-applied its manifests.
+                // Do not quick-scan a saved update that startup will refresh; a clean scan could clear its pending row first.
                 let startup_refresh_queued =
                     self.startup_recheck_queue.iter().any(|(address, path, _)| {
                         Self::normalize_repo_url(address) == normalized_url
@@ -805,19 +827,12 @@ impl Foxy {
             self.startup_pending_restore_rx = None;
         }
 
-        let finished = self
-            .startup_pending_restore_worker
-            .as_ref()
-            .map(|worker| worker.is_finished())
-            .unwrap_or(false);
-        if finished {
-            self.startup_pending_restore_worker = None;
-        }
+        crate::ui::app::runtime::client_workers::reap_worker(
+            &mut self.startup_pending_restore_worker,
+            "Startup pending-update restore worker failed.",
+        );
     }
 
-    /// Find a repository's index by its normalized URL. Used to re-resolve a
-    /// repository after a background task completes, since the list may have
-    /// changed while the task was in flight.
     pub(crate) fn repo_index_by_normalized_url(&self, normalized_url: &str) -> Option<usize> {
         self.repository_view_state
             .repositories
@@ -825,9 +840,7 @@ impl Foxy {
             .position(|repo| Self::normalize_repo_url(&repo.address) == normalized_url)
     }
 
-    /// Resolve a repository instance by both its normalized URL and download
-    /// folder. `local_path_key` must already be normalized via
-    /// [`Self::repo_instance_path_key`].
+    /// Resolve by normalized URL and folder; the path key must already be canonical.
     pub(crate) fn repo_index_by_instance(
         &self,
         normalized_url: &str,
@@ -842,10 +855,6 @@ impl Foxy {
             })
     }
 
-    /// [`Self::repo_index_by_instance`], falling back to a URL-only match when
-    /// no instance shares the folder (e.g. a result that predates a folder
-    /// change) and exactly one instance has the URL, so a single-instance
-    /// repository keeps working without a result landing on another folder's copy.
     pub(crate) fn repo_index_by_url_and_path(
         &self,
         normalized_url: &str,
@@ -863,17 +872,10 @@ impl Foxy {
         self.dispatch_cached_update_load(repo_index, false);
     }
 
-    /// Like [`Self::load_cached_updates_for_repo`], but once a background load
-    /// finds pending updates it also opens the repository update modal. Used by
-    /// the pending-updates banner action so a slow database read never blocks.
     pub fn load_cached_updates_for_repo_and_open_modal(&mut self, repo_index: usize) {
         self.dispatch_cached_update_load(repo_index, true);
     }
 
-    /// Resolve a repository's pending-update state. In-memory fast paths run
-    /// synchronously; a database miss is loaded on a background thread (see
-    /// [`Self::poll_cached_update_load_results`]) so the SQLite read never
-    /// blocks the UI draw loop.
     fn dispatch_cached_update_load(&mut self, repo_index: usize, open_modal_when_pending: bool) {
         let repo = match self
             .repository_view_state
@@ -896,7 +898,6 @@ impl Foxy {
             return;
         }
 
-        // Fast path: the pending updates are already cached in memory.
         if self.apply_pending_update_cache_for_repo(repo_index) {
             self.set_repo_state_for_address(&repo.address, &repo_path, RepoState::PendingUpdate);
             if open_modal_when_pending {
@@ -905,7 +906,9 @@ impl Foxy {
             return;
         }
 
-        // A load for this repository is already in flight; avoid a duplicate read.
+        let Some(scope) = self.capture_worker_scope() else {
+            return;
+        };
         if !self
             .pending_cached_update_loads
             .insert(normalized_url.clone())
@@ -917,10 +920,19 @@ impl Foxy {
         let repaint_ctx = self.repaint_ctx.clone();
         let worker_url = normalized_url;
         let worker_path = repo_path;
-        std::thread::spawn(move || {
-            let outcome = load_cached_update_outcome(&worker_url, &worker_path);
+        let admission = self.client_db_admission.clone();
+        let space_id = scope.space_id().to_string();
+        let generation = scope.generation();
+        let handle = std::thread::spawn(move || {
+            let outcome = if crate::ui::app::admit_database_section(&admission) {
+                load_cached_update_outcome(&worker_url, &worker_path)
+            } else {
+                CachedUpdateLoadOutcome::Skipped
+            };
             if tx
                 .send(CachedUpdateLoadResult {
+                    space_id,
+                    generation,
                     repo_url: worker_url,
                     local_path: worker_path,
                     open_modal_when_pending,
@@ -931,12 +943,9 @@ impl Foxy {
                 Self::request_background_repaint(repaint_ctx.as_ref());
             }
         });
+        self.cached_update_load_workers.push(handle);
     }
 
-    /// Open the repository update modal for `repo_index` if it currently has
-    /// pending updates ready in `mod_diff_cache`. The download plan (queue +
-    /// exact estimate) is prepared up front by the remote recheck, so this
-    /// opens the modal directly instead of running a second redundant recheck.
     pub(crate) fn open_pending_update_modal_for_repo(&mut self, repo_index: usize) {
         let has_updates = self.update_ready_repo == Some(repo_index)
             && self.mod_diff_cache.iter().any(|m| m.needs_update);
@@ -958,18 +967,28 @@ impl Foxy {
         }
     }
 
-    /// Drain completed background cached pending-update loads and apply them on
-    /// the UI thread, preserving the original loader's state transitions.
     pub(in crate::ui::app) fn poll_cached_update_load_results(&mut self) {
+        if self.client_worker_handoff_active {
+            return;
+        }
+        let active_space = crate::core::game::spaces::active_game_space().space_id;
         while let Ok(result) = self.cached_update_load_result_rx.try_recv() {
+            if !crate::ui::app::current_worker_result(
+                &self.server_query_generation,
+                &active_space,
+                &result.space_id,
+                result.generation,
+            ) {
+                continue;
+            }
             let CachedUpdateLoadResult {
                 repo_url,
                 local_path,
                 open_modal_when_pending,
                 outcome,
+                ..
             } = result;
-            // A game-space switch clears the pending set; a load dispatched in
-            // the previous space must not open its diff in this one.
+            // Discard old-space loads after a game-space switch clears pending results.
             if !self.pending_cached_update_loads.remove(&repo_url) {
                 debug!(
                     "Discarding a cached update load dispatched before a game space switch: {}",
@@ -978,8 +997,7 @@ impl Foxy {
                 continue;
             }
 
-            // The list may have changed while the load was in flight; re-resolve
-            // by URL + folder and discard the result if the repository is gone.
+            // Re-resolve by URL and folder after loading; discard results if the instance disappeared.
             let local_path_key = Self::repo_instance_path_key(&local_path);
             let Some(repo_index) = self.repo_index_by_url_and_path(&repo_url, &local_path_key)
             else {
@@ -1049,6 +1067,7 @@ impl Foxy {
                         );
                     }
                 }
+                CachedUpdateLoadOutcome::Skipped => {}
             }
             self.needs_repaint = true;
         }
@@ -1066,13 +1085,19 @@ fn legacy_pending_requires_local_check(payload: &str, mods: &[ModDiffSummary]) -
         return false;
     };
     raw.iter().any(|addon| {
-        addon.get("needs_update").and_then(serde_json::Value::as_bool) == Some(true)
+        addon
+            .get("needs_update")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
             && addon.get("total_bytes").and_then(serde_json::Value::as_u64) == Some(0)
             && addon
                 .get("files")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(Vec::is_empty)
-            && addon.get("update_basis").and_then(serde_json::Value::as_str) != Some("managed_files")
+            && addon
+                .get("update_basis")
+                .and_then(serde_json::Value::as_str)
+                != Some("managed_files")
     })
 }
 
@@ -1103,7 +1128,6 @@ fn pending_for_selection(mods: &[ModDiffSummary], selected_addons: &[String]) ->
     })
 }
 
-/// Position of the only item matching `predicate`; `None` when none or several match.
 fn unique_position<T>(
     items: impl Iterator<Item = T>,
     mut predicate: impl FnMut(&T) -> bool,
@@ -1170,9 +1194,6 @@ pub(crate) fn merge_download_mod_diffs_preserving_finished(
     merged
 }
 
-/// Worker-thread body for [`Foxy::dispatch_cached_update_load`]: load a
-/// repository's cached pending-update payload from the database and classify
-/// the result. Runs off the UI thread.
 fn load_cached_update_outcome(normalized_url: &str, local_path: &str) -> CachedUpdateLoadOutcome {
     let Some(rt) = crate::core::api::background_runtime() else {
         return CachedUpdateLoadOutcome::ReadError(
@@ -1203,7 +1224,6 @@ fn load_cached_update_outcome(normalized_url: &str, local_path: &str) -> CachedU
     } else if mods.iter().any(|m| m.needs_update) {
         CachedUpdateLoadOutcome::Pending(mods)
     } else {
-        // Stale "no updates" payload: clear the row here so the UI thread never has to.
         let _ = rt.block_on(clear_pending_update_payload_for_path(
             normalized_url,
             local_path,

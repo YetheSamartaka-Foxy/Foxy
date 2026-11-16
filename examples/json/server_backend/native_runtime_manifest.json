@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "game_space_id": "arma3",
+  "instance_id": "server_00000000000000000000000000000001",
+  "preparation_id": "prepared_0000000000000000000000000000000000000000000000000000000000000000",
+  "installation": {
+    "id": "install_00000000000000000000000000000001",
+    "game": "arma3",
+    "platform": "windows_x64",
+    "directory": "R:/Mods/Server",
+    "executable": "arma3server_x64.exe",
+    "ownership": "adopted",
+    "build_evidence": "executable_fingerprint_only",
+    "evidence": {
+      "bytes": 128,
+      "blake3": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "payload": {
+    "platform": "windows_x64",
+    "entries": [],
+    "total_bytes": 0
+  },
+  "realized_entries": [],
+  "file_sources": {},
+  "mission_templates": [],
+  "server_mods": []
+}

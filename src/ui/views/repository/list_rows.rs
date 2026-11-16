@@ -345,8 +345,7 @@ impl Foxy {
         let is_selected =
             self.selected_repository_visual_folder_id.as_deref() == Some(folder_id.as_str());
         let folder_color = egui::Color32::from_rgb(color_rgb[0], color_rgb[1], color_rgb[2]);
-        // Fill the whole row with the folder's color; the selection is shown via
-        // a brighter, thicker accent border rather than by changing the fill.
+
         let fill = folder_color;
         let display_font_size = (self
             .settings_view_state
@@ -355,7 +354,7 @@ impl Foxy {
             .status_banner as f32
             - 6.0)
             .max(14.0);
-        // Choose black/white label text for readability over an arbitrary folder color.
+
         let luminance = 2126 * u32::from(color_rgb[0])
             + 7152 * u32::from(color_rgb[1])
             + 722 * u32::from(color_rgb[2]);
@@ -738,7 +737,6 @@ impl Foxy {
             })
             .inner;
 
-        // Drag-and-drop: the dragged row owns the source, while the hovered row owns the target.
         let drag_resp = resp.interact(Sense::drag());
         if drag_resp.drag_started() {
             self.drag_source_repo_index = Some(repo_index);
@@ -757,7 +755,7 @@ impl Foxy {
                 self.drag_drop_target_index = Some(repo_index + 1);
             }
         }
-        // Draw drop indicator line when another row is being dragged over this one
+
         if self.drag_source_repo_index.is_some()
             && let Some(pointer_pos) = ui.ctx().pointer_latest_pos()
             && resp.rect.contains(pointer_pos)
@@ -877,8 +875,6 @@ impl Foxy {
     }
 }
 
-/// Room for a list row's label inside a button `button_width` wide, so a long
-/// name is cut short instead of widening every row below it.
 fn row_label_width(ui: &Ui, button_width: f32, with_icon: bool) -> f32 {
     let spacing = ui.spacing();
     let icon = if with_icon {

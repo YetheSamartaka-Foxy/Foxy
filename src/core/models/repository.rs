@@ -5,14 +5,10 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Column list selected when materializing a [`FoxyRepository`] from a row.
 pub(crate) const REPOSITORY_COLUMNS: &str = "id, name, remote_url, local_path, image, local_checksum, remote_checksum, \
      local_content_hash, foxy_mode";
 
-/// Upsert keyed on the `(remote_url, local_path)` repository identity. Shared
-/// with the startup schema probe (`db_schema_check`), which prepares it against
-/// the live database: an older schema without the composite UNIQUE fails to
-/// parse the `ON CONFLICT` target, which is exactly what the probe must catch.
+/// The live schema probe prepares this exact composite-key upsert, exposing an older incompatible UNIQUE target.
 pub(crate) const REPOSITORY_UPSERT_SQL: &str = "INSERT INTO repositories \
      (name, remote_url, image, local_path, remote_checksum, local_checksum, local_content_hash, foxy_mode) \
      VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
@@ -20,7 +16,6 @@ pub(crate) const REPOSITORY_UPSERT_SQL: &str = "INSERT INTO repositories \
      name = excluded.name, image = excluded.image, \
      remote_checksum = excluded.remote_checksum, foxy_mode = excluded.foxy_mode";
 
-/// Build a [`FoxyRepository`] from a seam [`DbRow`].
 pub(crate) fn repository_from_row(row: &DbRow) -> Result<FoxyRepository, DbErr> {
     Ok(FoxyRepository {
         id: row.get_i64("id")? as u64,
@@ -35,7 +30,6 @@ pub(crate) fn repository_from_row(row: &DbRow) -> Result<FoxyRepository, DbErr> 
     })
 }
 
-/// Indicates the hashing protocol used by a remote repository.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum FoxyMode {
     /// Legacy Swifty-compatible: MD5 checksums, mod.srf manifests.
@@ -101,11 +95,8 @@ pub(crate) fn normalize_repository_local_path_identity(path: &str) -> String {
     crate::core::utils::content_hash::normalize_path(path)
 }
 
-/// Canonical remote-URL form: surrounding whitespace removed, separators
-/// forward-slashed, exactly one trailing slash. A repository instance is keyed
-/// by `(remote_url, local_path)`, so a stray trailing space in a configured
-/// address is enough to make every DB lookup miss its own row. An empty address
-/// stays empty rather than becoming a bare `/`.
+/// Trim whitespace, normalize separators, and keep exactly one trailing slash.
+/// Empty input stays empty; repository identity also includes `local_path`.
 pub(crate) fn normalize_repository_url(url: &str) -> String {
     let mut normalized = url.trim().replace('\\', "/");
     if !normalized.is_empty() && !normalized.ends_with('/') {
@@ -114,11 +105,8 @@ pub(crate) fn normalize_repository_url(url: &str) -> String {
     normalized
 }
 
-/// Key for deciding whether two addresses name the same repository, such as a
-/// repository space entry and an added repository: the canonical form,
-/// case-folded. Manifests are written by hand and hosts commonly serve paths
-/// case-insensitively, so a case difference must not split one repository in
-/// two. Requests and database keys keep the configured spelling.
+/// Case-folded canonical URL for matching repository addresses. Requests and
+/// database keys retain the configured spelling.
 pub(crate) fn repository_url_match_key(url: &str) -> String {
     normalize_repository_url(url).to_lowercase()
 }
@@ -219,7 +207,6 @@ pub async fn load_repository_by_remote_url(
     repository_from_row(&row)
 }
 
-/// Queries foxy_mode for a repository instance using the shared database.
 pub async fn is_repository_foxy(remote_url: &str, local_path: &str) -> Option<bool> {
     use crate::core::db::FoxyDb;
     use crate::core::tasks::init_database::init_database;

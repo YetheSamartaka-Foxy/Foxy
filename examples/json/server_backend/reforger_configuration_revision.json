@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "game_space_id": "reforger",
+  "instance": {
+    "schema_version": 2,
+    "id": "server_00000000000000000000000000000002",
+    "game_space_id": "reforger",
+    "revision": 1,
+    "display_name": "MainServer",
+    "installation_id": null,
+    "definition": {
+      "game": "reforger",
+      "settings": {
+        "name": "MainServer",
+        "bind_port": 2001,
+        "a2s_port": null,
+        "max_players": 64,
+        "visible": false,
+        "scenario_id": null,
+        "addons": []
+      }
+    }
+  },
+  "preview": {
+    "format_version": 1,
+    "instance_id": "server_00000000000000000000000000000002",
+    "instance_revision": 1,
+    "fingerprint": "21cb3df70db04ba3a1e9ad628e50e5ea4eaf37495f9d09fb91f9975eb7890e83",
+    "files": [
+      {
+        "relative_path": "server.json",
+        "contents": "{\n  \"bindPort\": 2001,\n  \"game\": {\n    \"name\": \"MainServer\",\n    \"maxPlayers\": 64,\n    \"visible\": false,\n    \"mods\": []\n  }\n}",
+        "blake3": "5d37969a23d63bb19575311a958aa7e569f5a635269bdcb3f6ce745dac447046"
+      }
+    ],
+    "warnings": [
+      "Configuration preview only. Engine compatibility, content, credentials and launch readiness remain unverified.",
+      "No Reforger scenario resource is configured."
+    ],
+    "launch_ready": false
+  }
+}

@@ -28,9 +28,7 @@ pub const REFORGER_FALLBACK_EXECUTABLE: &str = "ArmaReforger.exe";
 pub const REFORGER_INSTALL_DIR_SETTING_ID: &str = "reforger_directory";
 pub const REFORGER_ADDONS_FILE: &str = "reforger_addons.json";
 pub const REFORGER_SOURCE: &str = "reforger";
-/// Default `a2sPort` of a Reforger dedicated server. Unlike Arma 3 the query
-/// port is independent of the game port, so a server listing without its own
-/// query port can only be probed at the default.
+/// Reforger's query port is independent of its game port; absent metadata can only use the default A2S port.
 pub const REFORGER_DEFAULT_QUERY_PORT: u16 = 17777;
 
 const REFORGER_DIR: &str = "reforger";
@@ -59,9 +57,7 @@ impl GameModule for ReforgerModule {
 
     fn capabilities(&self) -> GameCapabilities {
         GameCapabilities {
-            // Reforger addons are plain file trees, so both a synced repository
-            // and the managed GUID store can feed the same launch shape:
-            // `-addons` mod ids plus `-addonsDir` roots.
+            // Synced folders and the GUID store share Reforger's addons IDs/addonsDir launch contract.
             repository_sync: true,
             repository_launch: true,
             steam_workshop: false,
@@ -69,8 +65,7 @@ impl GameModule for ReforgerModule {
             client_side_addons: false,
             direct_download: true,
             extra_files: true,
-            // Profiles are still a repository-launch concept
-            // (`RepositoryProfile`); there is no game-space profile store yet.
+
             profiles: false,
             foxy_config_export: true,
             teamspeak3_plugins: false,
@@ -82,6 +77,16 @@ impl GameModule for ReforgerModule {
 
     fn content_formats(&self) -> &'static [&'static str] {
         &[foxy_formats::PAC1_FORMAT_ID]
+    }
+
+    fn dedicated_server_support(&self) -> super::DedicatedServerSupport {
+        super::DedicatedServerSupport::WorkInProgress
+    }
+
+    fn server_capabilities(&self) -> crate::core::server::ServerCapabilities {
+        crate::core::server::ServerCapabilities::drafts(
+            crate::core::server::ServerDefinitionKind::Reforger,
+        )
     }
 
     fn detect_install_dir(&self, ctx: &GameDetectCtx) -> Option<PathBuf> {
@@ -341,14 +346,10 @@ pub struct ReforgerLaunchPlan {
     pub issues: Vec<ReforgerAddonIssue>,
 }
 
-/// Loose check used for settings validation: an install root or a bare addon
-/// root (only an `addons/` folder) are both acceptable for managing addons.
 pub fn is_valid_reforger_dir(path: &Path) -> bool {
     is_launchable_reforger_dir(path) || (path.is_dir() && path.join("addons").is_dir())
 }
 
-/// Strict check used for launching: the directory must contain a Reforger
-/// executable; a bare addon root cannot start the game.
 pub fn is_launchable_reforger_dir(path: &Path) -> bool {
     path.is_dir()
         && [REFORGER_EXECUTABLE, REFORGER_FALLBACK_EXECUTABLE]
@@ -376,9 +377,7 @@ pub fn frozen_addons_root(space_dir: &Path) -> PathBuf {
         .join(FROZEN_DIR)
 }
 
-/// Addon roots the game itself scans without `-addonsDir`. Reforger downloads
-/// Workshop addons into `<profile>/addons`; older installs kept them one level
-/// up, so both are probed and the first existing folder wins.
+/// Probe both current profile/addons and older parent-level addon layouts; use the first existing root.
 pub fn default_user_addons_dirs() -> Vec<PathBuf> {
     let home = if cfg!(target_os = "windows") {
         std::env::var_os("USERPROFILE")
@@ -746,14 +745,6 @@ pub fn build_workshop_launch_plan(
     })
 }
 
-/// Build a launch plan from a synced repository's enabled addon selection.
-///
-/// Reforger loads mods by the id in their `.gproj` and finds them through the
-/// roots passed with `-addonsDir`, so a repository folder is launchable as-is:
-/// every enabled subfolder contributes its mod id and its parent root. A
-/// selected server becomes `-client <address>:<port>`, the direct-connect
-/// parameter of the game executable; the game has no password parameter, so a
-/// listed password is left for the in-game prompt.
 pub fn build_repository_launch_plan(
     _settings: &SettingsViewState,
     repo: &Repository,
@@ -872,9 +863,7 @@ fn push_repository_mod(
     });
 }
 
-/// The value the game accepts in `-addons` for an addon folder. The wiki order
-/// is GUID, then project id, then the folder name as a fallback; `ServerData.json`
-/// fills in for Workshop copies that ship without a `.gproj`.
+/// Resolve Reforger IDs by gproj GUID, project ID, ServerData fallback, then folder name.
 pub fn resolve_addon_mod_id(dir: &Path) -> Option<String> {
     let gproj = read_gproj_ids(dir);
     if let Some(gproj) = &gproj
@@ -903,9 +892,6 @@ struct GprojIds {
     project_id: Option<String>,
 }
 
-/// Read `GUID`/`ID` out of the addon's `.gproj`. The file is an Enfusion config
-/// block, but both ids are single quoted values on their own line, so a line
-/// scan avoids pulling in a parser for two fields.
 fn read_gproj_ids(dir: &Path) -> Option<GprojIds> {
     let path = find_gproj_file(dir)?;
     let raw = fs::read_to_string(&path).ok()?;
@@ -1032,9 +1018,7 @@ fn candidate_guid_from_token(token: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Workshop URLs on reforger.armaplatform.com append a display-name slug to
-/// the GUID (`/workshop/<16-hex-GUID>-Name`); only the hex GUID half is the
-/// mod id the game accepts in `-addons`.
+/// Workshop URL slugs append a display name after the 16-hex GUID; only the GUID is a valid mod ID.
 fn strip_workshop_slug_suffix(candidate: &str) -> &str {
     match candidate.split_once('-') {
         Some((head, _)) if head.len() == 16 && head.chars().all(|ch| ch.is_ascii_hexdigit()) => {
@@ -1264,7 +1248,6 @@ mod tests {
 
     #[test]
     fn normalize_reforger_guid_strips_workshop_url_name_slugs() {
-        // Workshop pages use `<GUID>-<Name>` slugs; only the GUID may reach -addons.
         assert_eq!(
             normalize_reforger_guid(
                 "https://reforger.armaplatform.com/workshop/59651E5CD1F1BB0B-ACEChopping"
@@ -1276,7 +1259,7 @@ mod tests {
             normalize_reforger_guid("59651E5CD1F1BB0B-ACEChopping").as_deref(),
             Some("59651E5CD1F1BB0B")
         );
-        // A dash after a non-hex prefix is part of the id, not a slug.
+
         assert_eq!(
             normalize_reforger_guid("notahexstring123-x").as_deref(),
             Some("NOTAHEXSTRING123-X")

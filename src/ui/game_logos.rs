@@ -1,10 +1,4 @@
-//! Embedded game logos shown next to a game space.
-//!
-//! Arma 3 and Arma Reforger use the unmodified official black/white logo
-//! artwork from Bohemia Interactive's press kits, picked by surface darkness
-//! and never tinted, because the Arma 3 logo manual forbids other colors and
-//! any deformation. Every other game gets a neutral gamepad glyph tinted with
-//! the palette text color. See `src/ui/icons/games/README.md`.
+//! Use official Arma logos unmodified and untinted; other games use a palette-tinted generic glyph. See the logo artwork notice in `src/ui/icons/games/README.md`.
 
 use std::collections::HashMap;
 
@@ -13,21 +7,14 @@ use egui::{Color32, TextureHandle, Vec2};
 use crate::core::game::arma3::ARMA3_GAME_ID;
 use crate::core::game::reforger::REFORGER_GAME_ID;
 
-/// Minimum on-screen height in logical pixels. The Arma 3 logo manual sets 60 px
-/// as the minimum digital size; the same slot is used for every game so the
-/// header layout does not change when switching spaces.
+/// Reserve at least the Arma manual's 60 px digital minimum; use one slot height across spaces.
 pub const GAME_LOGO_HEIGHT: f32 = 60.0;
 
-/// Size of the game logo in the repository sidebar header, where it is a
-/// badge beside the space name rather than the row's main element. The height
-/// is below the 60 px minimum from the Arma 3 logo manual, which the game
-/// space picker rows keep; the width cap shrinks wide logos (Reforger) so the
-/// name column keeps its room in the 250 px sidebar.
+/// Keep sidebar badges below the Arma logo's 60 px minimum while preserving room for the space name.
 pub const GAME_LOGO_BADGE_HEIGHT: f32 = 28.0;
 pub const GAME_LOGO_BADGE_MAX_WIDTH: f32 = 72.0;
 
-/// Clear space around a trademark logo as a fraction of its height (Arma 3
-/// logo manual: one fifth of the logo height on every side).
+/// Reserve trademark clear space equal to one fifth of the Arma logo height on each side.
 const SAFE_ZONE_RATIO: f32 = 0.2;
 
 const ARMA3_BLACK: &[u8] = include_bytes!("icons/games/arma3_black.png");
@@ -54,8 +41,7 @@ impl GameLogo {
         }
     }
 
-    /// Third-party trademark artwork must be shown as shipped: no tint, and a
-    /// clear zone around it. The generic glyph is ours and follows the palette.
+    /// Show third-party logos untinted with clear space; tint only the generic glyph.
     pub fn is_trademark(self) -> bool {
         !matches!(self, Self::Generic)
     }
@@ -84,14 +70,11 @@ impl GameLogo {
     }
 }
 
-/// Total height of a logo slot drawn at `logo_height`, including the
-/// trademark clear zone every slot reserves.
+/// Logo slot height includes the reserved trademark clear zone.
 pub fn slot_height(logo_height: f32) -> f32 {
     logo_height * (1.0 + 2.0 * SAFE_ZONE_RATIO)
 }
 
-/// Lazily decoded logo textures, keyed by logo and surface variant. Logos are
-/// per game, not per space, so this cache is app-global.
 #[derive(Default)]
 pub struct GameLogoTextures {
     textures: HashMap<String, TextureHandle>,
@@ -129,10 +112,7 @@ impl GameLogoTextures {
         self.textures.get(&key)
     }
 
-    /// Draws the logo for `game_id` at `height`, centered in a slot of
-    /// `slot_width`, keeping its aspect ratio and shrinking it when the slot
-    /// cannot fit it. Trademark logos keep their clear zone inside the slot and
-    /// ignore `tint`.
+    /// Keep aspect ratio and fit the logo within its slot; trademark logos ignore tint and retain clear space.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -144,9 +124,7 @@ impl GameLogoTextures {
         self.paint(ui, game_id, height, slot_width, slot_width, tint)
     }
 
-    /// Like `show`, but the slot is only as wide as the logo needs, capped at
-    /// `max_width`, so a badge next to text does not reserve room for the
-    /// widest game logo.
+    /// Size the badge to its logo up to `max_width` so adjacent text keeps its space.
     pub fn show_badge(
         &mut self,
         ui: &mut egui::Ui,
@@ -192,8 +170,7 @@ impl GameLogoTextures {
             logo_height = logo_width / aspect;
         }
         let pad = logo_height * pad_ratio;
-        // Every slot reserves the trademark clear zone so rows and headers
-        // keep one height whichever logo they show.
+        // Reserve trademark clear space in every slot so headers and rows keep a consistent height.
         let slot_size = Vec2::new(min_width.max(logo_width + 2.0 * pad), slot_height(height));
         let (rect, response) = ui.allocate_exact_size(slot_size, egui::Sense::hover());
         if ui.is_rect_visible(rect) {

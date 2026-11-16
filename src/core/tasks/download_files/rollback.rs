@@ -46,9 +46,6 @@ struct RollbackEntry {
     restored: bool,
 }
 
-/// One appended line of the session journal. The manifest file is written
-/// once as the header; every later change is one line here, so a session of
-/// tens of thousands of files never rewrites its whole state per file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum JournalEvent {
@@ -62,11 +59,10 @@ pub(crate) struct UpdateRollbackSession {
     session_dir: PathBuf,
     manifest_path: PathBuf,
     manifest: RollbackManifest,
-    /// Position of each target path in `manifest.entries`.
+
     index: HashMap<PathBuf, usize>,
     journal: Option<fs::File>,
-    /// Exclusive lock held for the session's life, so a Foxy started for another
-    /// game space (sessions share the temp folder) leaves a live session alone.
+
     owner_lock: Option<std::fs::File>,
 }
 
@@ -77,7 +73,6 @@ fn apply_event(
 ) {
     match event {
         JournalEvent::Register { entry } => match index.get(&entry.target_path) {
-            // Re-registered after a restore: the new sidecar replaces the consumed one.
             Some(&position) => manifest.entries[position] = entry,
             None => {
                 index.insert(entry.target_path.clone(), manifest.entries.len());
@@ -122,8 +117,6 @@ fn session_overlaps_targets(manifest: &RollbackManifest, targets: &[PathBuf]) ->
     })
 }
 
-/// Read a session back: the manifest header, then every complete journal
-/// line (a torn last line from a crash is ignored).
 async fn load_session(session_dir: PathBuf) -> Option<UpdateRollbackSession> {
     let manifest_path = session_dir.join(MANIFEST_FILE_NAME);
     let manifest_bytes = fs::read(&manifest_path).await.ok()?;
@@ -516,7 +509,6 @@ impl UpdateRollbackSession {
     }
 
     pub(crate) async fn commit(&mut self) -> anyhow::Result<()> {
-        // Windows cannot remove the folder while the lock file is open.
         self.owner_lock = None;
         self.record(JournalEvent::Committed).await?;
         discard_sidecars(&self.manifest.entries).await?;
@@ -544,7 +536,6 @@ impl UpdateRollbackSession {
             .map(|&position| &self.manifest.entries[position])
     }
 
-    /// Apply one change to the in-memory state and append it to the journal.
     async fn record(&mut self, event: JournalEvent) -> anyhow::Result<()> {
         let mut line = serde_json::to_vec(&event).context("failed to serialize journal event")?;
         line.push(b'\n');
@@ -573,9 +564,7 @@ impl UpdateRollbackSession {
     }
 
     async fn prepare_replace(&mut self, file_id: u64, target_path: &Path) -> anyhow::Result<()> {
-        // A restored entry put the original back and consumed its sidecar (a
-        // patch that failed verification, a promote retried after a failure),
-        // so the next replace needs a fresh sidecar or a later revert loses the file.
+        // Restoring the original consumes its sidecar; create a new one before another replacement.
         if self
             .entry_for_target(target_path)
             .is_some_and(|entry| !entry.restored)
@@ -679,8 +668,6 @@ fn acquire_owner_lock(session_dir: &Path) -> Option<std::fs::File> {
     Some(lock)
 }
 
-/// A session folder whose owner lock another open handle still holds. Sessions
-/// from before the lock existed have no lock file and count as stale.
 fn session_owned_by_live_process(session_dir: &Path) -> bool {
     let Ok(lock) = std::fs::OpenOptions::new()
         .write(true)
@@ -947,7 +934,6 @@ mod tests {
             .unwrap();
         live.promote_file(7, &staged, &target).await.unwrap();
 
-        // Another game space's Foxy starting up runs the same cleanup.
         UpdateRollbackSession::cleanup_stale_sessions(&rollback_root, None)
             .await
             .unwrap();
@@ -978,8 +964,7 @@ mod tests {
         let mut session = UpdateRollbackSession::new(&rollback_root, "https://example.test/")
             .await
             .unwrap();
-        // A patch that fails verification is restored, then the full download
-        // of the same file replaces it again before the update is cancelled.
+
         session.promote_file(7, &patched, &target).await.unwrap();
         session.restore_entry(7, &target).await.unwrap();
         assert_eq!(fs::read(&target).await.unwrap(), b"original");

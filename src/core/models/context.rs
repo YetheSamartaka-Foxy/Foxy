@@ -12,9 +12,6 @@ pub(crate) struct StagedManifestResponse {
     pub(crate) timing: crate::core::utils::fetch_json::FetchJsonTiming,
 }
 
-/// A brand-new `subfiles` row staged for the deferred background insert on the
-/// force-redownload path (after_turso_regression_analysis7.md, "A++"). Mirrors the
-/// 6 bound columns of the part upsert; the local_* columns use inline defaults.
 #[derive(Clone)]
 pub(crate) struct DeferredPartInsert {
     pub(crate) file_id: i64,
@@ -31,9 +28,7 @@ pub(crate) struct FoxyContext {
     pub(crate) client: Client,
     pub(crate) recheck_level: RecheckLevel,
     pub(crate) forced_mod_refreshes: HashSet<String>,
-    /// Addons whose manifests a recheck applies again although the stored graph
-    /// matches the server. Unlike `forced_mod_refreshes` the cached manifest is
-    /// revalidated, not refetched, and unchanged files keep their part graph.
+    /// Revalidation keeps unchanged part graphs; forced refresh instead refetches the remote manifest.
     pub(crate) reapplied_mod_manifests: HashSet<String>,
     pub(crate) queue_download_targets: bool,
     pub(crate) patch_plan_metadata_refresh: bool,
@@ -41,43 +36,25 @@ pub(crate) struct FoxyContext {
     pub(crate) force_full_downloads: bool,
     pub(crate) target_local_path: Option<String>,
     pub(crate) repository_space_shared_path: Option<String>,
-    /// Opaque id of the user action this context serves (a sync pipeline, a
-    /// quick-scan sweep), stamped as `op_id` on every SOL line the action
-    /// emits so a saved benchmark can keep only the records it owns.
+    /// Carry the initiating action's op_id so saved benchmarks cannot claim another action's SOL records.
     pub(crate) operation_id: Option<Arc<str>>,
     transient_metadata_failure: Arc<AtomicBool>,
-    /// Set by the metadata rebuild when the `subfiles` table is globally empty at
-    /// rebuild start (the post-whole-wipe force-redownload / first-download case),
-    /// so the per-mod part insert can use a plain `INSERT` into an index-deferred
-    /// table instead of `INSERT … ON CONFLICT` (after_turso_regression_analysis5.md
-    /// P0-b). Shared (`Arc`) so the flag set before the parallel fan-out is visible
-    /// to every spawned mod task. Default `false` (safe `ON CONFLICT` path).
+    /// When the table starts empty, use plain inserts into its index-deferred state.
+    /// Shared across spawned mod tasks; defaults to the safe `ON CONFLICT` path.
     pub(crate) fresh_subfiles_load: Arc<AtomicBool>,
-    /// Set by the metadata rebuild when the repository instance links no file
-    /// yet, so no addon can hold a stale link. A repository can keep its links
-    /// after losing every part row, so `fresh_subfiles_load` alone does not say this.
+    /// Empty part rows do not prove addon links are fresh; retain a separate repository-link freshness flag.
     fresh_addon_file_links: Arc<AtomicBool>,
-    /// A++ (after_turso_regression_analysis7.md): when set (force-redownload), the
-    /// per-mod part insert buffers its brand-new rows into `deferred_part_inserts`
-    /// instead of writing them inline, so the ~22s 66k-row insert can run as one
-    /// background transaction overlapped with the download instead of blocking
-    /// `remote_repository`'s critical path. `Arc` so the flag set before the parallel
-    /// fan-out is visible to every spawned mod task and survives context clones.
+    /// When set, part rows are buffered for a background flush that can overlap
+    /// downloads. Shared across spawned tasks and context clones.
     pub(crate) defer_part_inserts: Arc<AtomicBool>,
     /// Buffer of part rows staged by the deferred-insert path; drained once by the
     /// background flush task (awaited before the incremental hasher loads its tree).
     pub(crate) deferred_part_inserts: Arc<Mutex<Vec<DeferredPartInsert>>>,
-    /// True when the staged deferred rows were collected while `fresh_subfiles_load`
-    /// was true. The metadata fan-out clears `fresh_subfiles_load` before the hash
-    /// bootstrap flushes local state, so the buffer needs its own durable marker.
+    /// Metadata fan-out clears fresh-load mode before deferred flushing, so buffered rows retain their own marker.
     pub(crate) deferred_part_inserts_fresh_load: Arc<AtomicBool>,
-    /// How many leading rows of `deferred_part_inserts` are already committed to
-    /// `subfiles`. The buffer keeps them for the in-memory tree; every flush
-    /// skips them.
+    /// Retain committed deferred rows for the in-memory tree; later flushes must skip that committed prefix.
     deferred_parts_persisted: Arc<AtomicUsize>,
-    /// Set by the metadata rebuild when it writes each group of fetched
-    /// manifests' part rows and addon links as the manifests arrive, instead of
-    /// leaving every part row to the flush after the fetch.
+
     stream_part_inserts: Arc<AtomicBool>,
     /// Held while one group is applied and written, so the rows it appends to
     /// the deferred buffer form one contiguous range.
@@ -87,15 +64,12 @@ pub(crate) struct FoxyContext {
     pending_patch_clear_ids: Arc<Mutex<Vec<i64>>>,
     remote_addon_empty_states: Arc<Mutex<HashMap<String, bool>>>,
     staged_manifest_responses: Arc<Mutex<HashMap<String, StagedManifestResponse>>>,
-    /// Content fingerprints the hash pass computed while each file was still
-    /// in the page cache, keyed by file id, for the content-hash refresh that
-    /// follows in the same operation to consume instead of re-sampling the
-    /// file from a cold disk.
+    /// Reuse same-pass fingerprints while their files are cached instead of paying cold-disk sampling seeks.
     fresh_file_content_hashes: Arc<Mutex<HashMap<u64, String>>>,
-    /// The verified-hash record this operation refreshes, and may restore from.
+
     pub(crate) verified_hash_record:
         Option<crate::core::tasks::calculate_hashes::VerifiedHashRecordUse>,
-    /// Where mod manifests are kept for revalidation, when this operation keeps them.
+
     pub(crate) manifest_cache: Option<Arc<crate::core::utils::manifest_cache::ManifestCache>>,
     pub(crate) hash_evidence: Arc<crate::core::tasks::calculate_hashes::HashEvidenceState>,
     hash_cancel_rx: Option<watch::Receiver<bool>>,
@@ -111,7 +85,6 @@ pub(crate) struct PendingDownloadTarget {
     pub(crate) size: i64,
 }
 
-/// Constructor
 impl FoxyContext {
     pub(crate) fn new(database: DbHandle, client: Client) -> Self {
         let hash_evidence =
@@ -176,8 +149,6 @@ impl FoxyContext {
         }
     }
 
-    /// Record fingerprints computed by a hash pass for the refresh that follows.
-    /// A later pass over the same file replaces the earlier value.
     pub(crate) fn record_fresh_file_content_hashes(
         &self,
         hashes: impl IntoIterator<Item = (u64, String)>,
@@ -196,19 +167,14 @@ impl FoxyContext {
             .and_then(|mut fresh| fresh.remove(&file_id))
     }
 
-    /// Enable/disable the deferred part-insert path for the current sync (set by the
-    /// pipeline before `remote_repository` on a force-redownload).
     pub(crate) fn set_defer_part_inserts(&self, value: bool) {
         self.defer_part_inserts.store(value, Ordering::Relaxed);
     }
 
-    /// Whether the per-mod part insert should buffer its rows for the background
-    /// flush instead of writing them inline. See [`FoxyContext::defer_part_inserts`].
     pub(crate) fn should_defer_part_inserts(&self) -> bool {
         self.defer_part_inserts.load(Ordering::Relaxed)
     }
 
-    /// Stage brand-new part rows for the background flush.
     pub(crate) fn buffer_deferred_parts(&self, rows: Vec<DeferredPartInsert>) {
         if rows.is_empty() {
             return;
@@ -221,8 +187,6 @@ impl FoxyContext {
         }
     }
 
-    /// Drain every staged part row (clears the buffer), including rows already
-    /// committed by the part stream.
     pub(crate) fn take_deferred_parts(&self) -> Vec<DeferredPartInsert> {
         let rows = self
             .deferred_part_inserts
@@ -233,8 +197,6 @@ impl FoxyContext {
         rows
     }
 
-    /// Drain the buffer and return only the rows no stream has committed yet,
-    /// with how many were already committed.
     pub(crate) fn take_unpersisted_deferred_parts(&self) -> (Vec<DeferredPartInsert>, usize) {
         let persisted = self.deferred_parts_persisted.load(Ordering::Relaxed);
         let mut rows = self.take_deferred_parts();
@@ -251,7 +213,6 @@ impl FoxyContext {
         self.deferred_parts_persisted.store(rows, Ordering::Relaxed);
     }
 
-    /// Copies of the staged rows from `start` on.
     pub(crate) fn deferred_parts_from(&self, start: usize) -> Vec<DeferredPartInsert> {
         self.deferred_part_inserts
             .lock()
@@ -285,20 +246,14 @@ impl FoxyContext {
             .unwrap_or_default()
     }
 
-    /// Whether the current metadata rebuild is loading into a globally-empty,
-    /// index-deferred `subfiles` table (set by the rebuild, read by the part
-    /// insert). See [`FoxyContext::fresh_subfiles_load`].
     pub(crate) fn is_fresh_subfiles_load(&self) -> bool {
         self.fresh_subfiles_load.load(Ordering::Relaxed)
     }
 
-    /// Mark (or clear) the index-deferred fresh-load mode for the current rebuild.
     pub(crate) fn set_fresh_subfiles_load(&self, value: bool) {
         self.fresh_subfiles_load.store(value, Ordering::Relaxed);
     }
 
-    /// Whether the current metadata rebuild started with no file linked to any
-    /// addon of the repository. See [`FoxyContext::fresh_addon_file_links`].
     pub(crate) fn has_fresh_addon_file_links(&self) -> bool {
         self.fresh_addon_file_links.load(Ordering::Relaxed)
     }
@@ -525,10 +480,6 @@ impl FoxyContext {
             .store(false, Ordering::Relaxed);
     }
 
-    /// Storage-neutral DB handle for the seam (plan.md §5.1). Converted call
-    /// sites use `context.db()` instead of `context.database.as_ref()`. The arm
-    /// returned follows the active storage feature: SeaORM by default, Turso
-    /// under `--features turso` (the Phase-2 cutover wiring).
     pub(crate) fn db(&self) -> FoxyDb {
         FoxyDb::from_handle(self.database.clone())
     }

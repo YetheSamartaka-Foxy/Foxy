@@ -3,7 +3,6 @@
 # This is a self-extracting installer. The tarball is appended after the __ARCHIVE__ marker.
 set -e
 
-# Defaults
 PREFIX="/opt/foxy"
 SILENT=0
 UNINSTALL=0
@@ -27,7 +26,6 @@ usage() {
     echo "  --help            Show this help"
 }
 
-# Parse arguments
 for arg in "$@"; do
     case "$arg" in
         --silent)
@@ -126,17 +124,14 @@ refresh_desktop_database() {
     fi
 }
 
-# Uninstall mode
 if [ "$UNINSTALL" -eq 1 ]; then
     echo "Uninstalling Foxy..."
 
-    # Kill running instance
     if kill_running_instances; then
         echo "Stopping running Foxy instance..."
         sleep 2
     fi
 
-    # Remove installation directory
     if [ -d "$PREFIX" ]; then
         if [ -w "$PREFIX" ] || [ "$(id -u)" -eq 0 ]; then
             rm -rf "$PREFIX"
@@ -146,7 +141,6 @@ if [ "$UNINSTALL" -eq 1 ]; then
         echo "Removed: $PREFIX"
     fi
 
-    # Remove symlink
     for link_dir in /usr/local/bin "$HOME/.local/bin"; do
         if [ -L "$link_dir/foxy" ]; then
             if [ -w "$link_dir" ] || [ "$(id -u)" -eq 0 ]; then
@@ -158,7 +152,6 @@ if [ "$UNINSTALL" -eq 1 ]; then
         fi
     done
 
-    # Remove desktop files
     for desktop_path in "$HOME/.local/share/applications/$DESKTOP_NAME" "/usr/share/applications/$DESKTOP_NAME"; do
         if [ -f "$desktop_path" ]; then
             if path_needs_sudo "$desktop_path"; then
@@ -186,18 +179,14 @@ if [ "$UNINSTALL" -eq 1 ]; then
     exit 0
 fi
 
-# --- Install mode ---
 
 echo "Foxy Installer"
 echo "Install directory: $PREFIX"
 echo ""
 
-# Stop running instance if present (check both Foxy and foxy process names)
 if kill_running_instances; then
     echo "Stopping running Foxy instance..."
-    # Wait up to 10 seconds for graceful exit
     if ! wait_for_exit 10; then
-        # Force kill if still running
         for pid in $(target_pids); do
             kill -9 "$pid" 2>/dev/null || true
         done
@@ -205,7 +194,6 @@ if kill_running_instances; then
     fi
 fi
 
-# Determine if we need sudo for the prefix and files that will be replaced.
 NEED_SUDO=0
 if path_needs_sudo "$PREFIX" || path_needs_sudo "$PREFIX/$BIN_NAME" || path_needs_sudo "$PREFIX/$PREFIX_MARKER"; then
     NEED_SUDO=1
@@ -226,10 +214,8 @@ run_cmd() {
     fi
 }
 
-# Create install directory
 run_cmd mkdir -p "$PREFIX"
 
-# Find the archive marker and extract
 ARCHIVE_LINE=$(awk '/^__ARCHIVE__$/{print NR + 1; exit 0;}' "$0")
 if [ -z "$ARCHIVE_LINE" ]; then
     echo "Error: Archive marker not found. The installer may be corrupted."
@@ -239,7 +225,6 @@ fi
 echo "Extracting files..."
 tail -n +"$ARCHIVE_LINE" "$0" | run_cmd tar xzf - -C "$PREFIX"
 
-# Set executable permission
 run_cmd chmod +x "$PREFIX/$BIN_NAME"
 run_cmd touch "$PREFIX/.installed_by_foxy_installer"
 printf '%s\n' "$PREFIX" > "/tmp/foxy_install_prefix.$$"
@@ -248,7 +233,6 @@ rm -f "/tmp/foxy_install_prefix.$$"
 
 echo "Installed $BIN_NAME to $PREFIX/"
 
-# Create symlink
 LINK_CREATED=0
 if [ -d "/usr/local/bin" ]; then
     if [ -w "/usr/local/bin" ] || [ "$NEED_SUDO" -eq 1 ] || [ "$(id -u)" -eq 0 ]; then
@@ -264,9 +248,7 @@ if [ "$LINK_CREATED" -eq 0 ]; then
     echo "Symlink created: $HOME/.local/bin/foxy"
 fi
 
-# Install .desktop file
 if [ "$DESKTOP_FILE" -eq 1 ] && [ -f "$PREFIX/$DESKTOP_NAME" ]; then
-    # Detect where an existing .desktop file is installed
     if [ -f "/usr/share/applications/$DESKTOP_NAME" ]; then
         desktop_dir="/usr/share/applications"
     elif [ -f "$HOME/.local/share/applications/$DESKTOP_NAME" ]; then
@@ -314,13 +296,11 @@ if [ "$DESKTOP_FILE" -eq 1 ] && [ -f "$PREFIX/$DESKTOP_NAME" ]; then
     echo "Desktop entry installed: $desktop_dir/$DESKTOP_NAME"
     fi
 
-    # Clean up duplicate entry if we updated the system-wide location
     if [ "$DESKTOP_FILE" -eq 1 ] && [ "$desktop_dir" = "/usr/share/applications" ] && [ -f "$HOME/.local/share/applications/$DESKTOP_NAME" ]; then
         rm -f "$HOME/.local/share/applications/$DESKTOP_NAME"
         echo "Removed stale per-user desktop entry."
     fi
 
-    # Update desktop database if available
     if [ "$DESKTOP_FILE" -eq 1 ]; then
         refresh_desktop_database "$desktop_dir" "$NEED_DESKTOP_SUDO"
     fi
@@ -332,7 +312,6 @@ echo "  Binary:  $PREFIX/$BIN_NAME"
 echo "  Command: foxy"
 echo ""
 
-# Relaunch if silent (auto-update mode)
 if [ "$SILENT" -eq 1 ]; then
     echo "Relaunching Foxy..."
     nohup "$PREFIX/$BIN_NAME" > /dev/null 2>&1 &

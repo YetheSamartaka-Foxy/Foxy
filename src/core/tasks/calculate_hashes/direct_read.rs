@@ -1,28 +1,21 @@
-//! Non-cached hash reads. The file is opened without the Windows cache
-//! manager and read in aligned blocks, `depth` of them in flight at once, so
-//! hashing one block overlaps reading the next and a pass over the payload
-//! neither copies it through the cache nor evicts the rest of the machine's
-//! cache. On rotational storage a [`DiskTurn`] lets one file stream at a time.
+//! Non-cached aligned reads avoid polluting the OS cache; rotational reads are serialized by `DiskTurn`.
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
 use std::sync::{Arc, Condvar, Mutex};
 
-/// Offsets and lengths of non-cached reads must be sector multiples; this
-/// covers every sector size in use and matches the allocation granularity of
-/// the buffers.
+/// Offsets and lengths must be sector-aligned to satisfy direct-I/O and buffer-allocation requirements.
 const ALIGN: u64 = 64 * 1024;
 
-/// How one run reads existing files without the cache.
 #[derive(Clone)]
 pub(super) struct DirectReadPlan {
     pub(super) block: usize,
     pub(super) depth: usize,
-    /// Files shorter than this keep the cached reader.
+
     pub(super) min_len: u64,
     pub(super) pool: Arc<SlotPool>,
     pub(super) turn: Option<Arc<DiskTurn>>,
-    /// Fails every read from this offset on, to exercise the callers' fallback.
+
     #[cfg(test)]
     pub(super) fail_at: Option<u64>,
 }
@@ -42,9 +35,6 @@ impl DirectReadPlan {
     }
 }
 
-/// Lets one reader at a time issue reads, from its first read until its last
-/// one is issued, so a rotational disk streams one file instead of
-/// alternating between two, and the next file starts as the current ends.
 #[derive(Default)]
 pub(super) struct DiskTurn {
     busy: Mutex<bool>,
@@ -75,8 +65,6 @@ impl DiskTurn {
     }
 }
 
-/// Read buffers shared by one run's readers, so a run allocates them once per
-/// concurrent read rather than once per file.
 #[derive(Default)]
 pub(super) struct SlotPool {
     free: Mutex<Vec<imp::Slot>>,
@@ -116,9 +104,6 @@ struct InFlight {
     offset: u64,
 }
 
-/// A non-cached, read-ahead reader over one file. `Read`, `BufRead` and
-/// `Seek` behave as on a `BufReader`, so the layout parser, the part loop and
-/// the fingerprint tap run on it unchanged.
 pub(super) struct DirectReader {
     file: imp::File,
     file_len: u64,
@@ -129,19 +114,17 @@ pub(super) struct DirectReader {
     holding_turn: bool,
     current: Option<Filled>,
     in_flight: VecDeque<InFlight>,
-    /// Logical read position.
+
     pos: u64,
-    /// Offset of the next read to issue; always aligned.
+
     next_issue: u64,
-    /// A read failed, so the caller should reread through the cache.
+
     failed: bool,
     #[cfg(test)]
     fail_at: Option<u64>,
 }
 
 impl DirectReader {
-    /// `None` when the file cannot be opened without the cache (network
-    /// shares, unusual file systems); the caller falls back to a cached read.
     pub(super) fn open(path: &str, file_len: u64, plan: &DirectReadPlan) -> Option<Self> {
         let file = imp::File::open(path).ok()?;
         Some(Self {
@@ -430,7 +413,6 @@ mod imp {
         }
     }
 
-    /// An aligned read buffer with its own OVERLAPPED and completion event.
     pub(super) struct Slot {
         buffer: *mut u8,
         len: usize,
@@ -627,8 +609,7 @@ mod tests {
         let mut b = reader(&second, second_bytes.len(), &plan);
         let mut out = vec![0u8; 10];
         a.read_exact(&mut out).unwrap();
-        // Both of the first file's reads are issued, so the second file may
-        // start while the first is still being consumed.
+
         let mut rest = Vec::new();
         b.read_to_end(&mut rest).unwrap();
         assert_eq!(rest, second_bytes);

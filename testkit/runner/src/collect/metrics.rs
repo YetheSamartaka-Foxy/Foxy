@@ -84,9 +84,7 @@ pub fn run_metrics(text: &str) -> Value {
     if let Some(c) = pattern.captures(text) {
         result["checkpoint_total_s"] = c[1].parse::<f64>().unwrap().into();
     }
-    // Bytes the operation actually read to hash, summed over every hash run,
-    // and the redundant-work counters the sync-path cases assert on. These
-    // are counts, so an operation that hashed nothing reports 0, not null.
+    // Hash counters sum every run; an operation that hashes nothing reports zero rather than null.
     let pattern =
         regex::Regex::new(r"SOL op=hash work_bytes=(\d+)|SOL op=hash [^\n]*? work_bytes=(\d+)")
             .unwrap();
@@ -96,9 +94,7 @@ pub fn run_metrics(text: &str) -> Value {
         .map(|m| m.as_str().parse::<u64>().unwrap_or(0))
         .sum();
     result["hash_work_bytes"] = hash_work_bytes.into();
-    // Wall time of every hash run in the operation, summed. The `hash` SOL
-    // record on a row is only the last run, which on a download is one
-    // arbitrary batch; verdicts gate on this total instead.
+    // Gate on total hash wall time; the last hash record may represent only one arbitrary download batch.
     let hash_secs = regex::Regex::new(r"SOL op=hash actual_s=([\d.]+)").unwrap();
     let hash_total_s: f64 = event_lines(text)
         .filter_map(|line| hash_secs.captures(line))
@@ -136,8 +132,7 @@ pub fn run_metrics(text: &str) -> Value {
     result["patch_fallbacks"] = count_lines(text, "Delta patch fallback for file_id=").into();
     result["patch_applies"] = count_lines(text, "Delta patch applied successfully:").into();
     result["patch_cancelled"] = count_lines(text, "Delta patch cancelled for file_id=").into();
-    // Locality of the patch fetch: range requests issued and the bytes
-    // over-fetched to coalesce them, plus the bytes copied from the source.
+
     for (key, pattern) in [
         (
             "patch_range_requests",
@@ -170,9 +165,7 @@ pub fn run_metrics(text: &str) -> Value {
     }
     result["prepared_queue_reuses"] =
         count_lines(text, "Reusing confirmation-prepared download queue").into();
-    // The sync pipeline's own verdict. A check that ends in `failed-*` still
-    // clears the busy reason and returns a summary, so without this a case
-    // could pass on a sync the user would have seen fail.
+    // Busy completion and a summary can accompany failed syncs; preserve the pipeline's terminal verdict.
     let pattern = regex::Regex::new(r"Pipeline summary: op=\S+ mode=\S+ outcome=(\S+)").unwrap();
     let outcomes: Vec<&str> = event_lines(text)
         .filter_map(|line| pattern.captures(line))
@@ -184,12 +177,7 @@ pub fn run_metrics(text: &str) -> Value {
         .filter(|o| o.starts_with("failed") || o.starts_with("cancelled"))
         .count() as u64)
         .into();
-    // Where the hash bytes came from and when they were paid. The refresh
-    // counters prove the content-hash pass reused the fingerprints the hash
-    // pass took while the file was in the page cache; the source counters
-    // prove patched files were recorded from their apply segments; the
-    // after-download counter proves hashing overlapped the transfer instead of
-    // running as a tail; the limits pin the profile the destination selected.
+
     let refresh = regex::Regex::new(
         r"Content-hash baseline refreshed: .*?files_hashed=(\d+)/\d+ files_reused_from_hash_pass=(\d+)",
     )
@@ -255,9 +243,7 @@ fn count_lines(text: &str, needle: &str) -> u64 {
         .count() as u64
 }
 
-/// Milliseconds from the first timestamped event of the slice to the first
-/// `Starting download for mod` line: the time an update spent preparing before
-/// the first byte moved. Null when the slice has no download start.
+/// Time from the slice's first event to its first download start, in milliseconds; null when download never starts.
 fn first_download_start_ms(text: &str) -> Option<u64> {
     let first = event_lines(text).find_map(line_timestamp)?;
     let start = event_lines(text)

@@ -59,9 +59,6 @@ impl Foxy {
         response
     }
 
-    /// Language selector, download speed limit, proxy, resource usage, checkboxes (auto-backup, auto-apply, auto-recheck,
-    /// auto-quick-scan), open config/logs buttons, reset, debug windows, close/hide-after-launch,
-    /// and wipe database (dev).
     pub(super) fn render_application_settings_general(
         &mut self,
         ui: &mut Ui,
@@ -81,13 +78,16 @@ impl Foxy {
         );
         ui.separator();
 
-        // Language selector
+        ui.indent("application_mode_setting", |ui| {
+            self.render_application_mode_setting(ui, changed);
+        });
+        ui.separator();
+
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             ui.label(tr("Language"));
             ui.add_space(horizontal_padding);
 
-            // (code, translation key, English name) tuples for the language selector.
             let languages: &[(&str, &str, &str)] = &[
                 ("system", "System", ""),
                 ("ar", "Arabic", "Arabic"),
@@ -203,7 +203,6 @@ impl Foxy {
         });
         ui.separator();
 
-        // Download speed limit
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             ui.label(tr("Download Speed Limit"));
@@ -250,7 +249,6 @@ impl Foxy {
         self.render_application_settings_resources(ui, horizontal_padding, changed);
         ui.separator();
 
-        // Hashing profile
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             ui.label(tr("Hashing profile"));
@@ -304,7 +302,6 @@ impl Foxy {
         });
         ui.separator();
 
-        // Renderer
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             ui.label(tr("Renderer"));
@@ -359,7 +356,6 @@ impl Foxy {
         });
         ui.separator();
 
-        // Repository and launch automation options
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let row_width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
@@ -430,7 +426,6 @@ impl Foxy {
         });
         ui.separator();
 
-        // Open config directory / Open log folder buttons
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let row_width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
@@ -477,7 +472,6 @@ impl Foxy {
         });
         ui.separator();
 
-        // Reset button
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let button_width = ui.available_width() - 2.0 * horizontal_padding;
@@ -496,7 +490,6 @@ impl Foxy {
         });
         ui.separator();
 
-        // Show debug windows, memory diagnostics, close after launch, hide to tray
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let row_width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
@@ -619,7 +612,6 @@ impl Foxy {
 
         ui.separator();
 
-        // Migrate from Swifty button
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let button_width = ui.available_width() - 2.0 * horizontal_padding;
@@ -639,13 +631,12 @@ impl Foxy {
         });
         ui.separator();
 
-        // Wipe Database button
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let button_width = ui.available_width() - 2.0 * horizontal_padding;
             let sync_active = self.repository_sync_active();
             let wipe_button = ui
-                .add_enabled_ui(!sync_active, |ui| {
+                .add_enabled_ui(!sync_active && self.client_db_admission.allows(), |ui| {
                     ui.add_sized(
                         Vec2::new(button_width, 30.0),
                         Button::new(RichText::new(tr("Wipe Database")).color(crate::ui::palette::ON_STRONG_FILL))

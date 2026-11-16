@@ -9,9 +9,7 @@ use crate::core::game::workshop::share::SharedItem;
 use crate::core::game::{spaces, workshop};
 use crate::ui::app::Foxy;
 
-/// Work the Workshop view hands to a background thread. Everything here either
-/// touches the network, spawns the Steam helper, or copies whole mod folders,
-/// so none of it may run on the frame loop.
+/// Network requests, Steam helper calls, and whole-folder copies run off the frame loop.
 #[derive(Clone, Debug)]
 pub enum WorkshopTask {
     Import {
@@ -317,8 +315,7 @@ fn summarize(headline: String, failures: &[String]) -> String {
 }
 
 impl Foxy {
-    /// The Steam helper timeout the Workshop view uses. Downloads run in a
-    /// subprocess, so a generous ceiling only matters when Steam stalls.
+    /// The timeout matters only when the Steam subprocess stalls.
     pub(crate) fn workshop_task_timeout_seconds(&self) -> u64 {
         600
     }

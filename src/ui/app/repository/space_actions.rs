@@ -295,8 +295,6 @@ impl Foxy {
         mode: RepositorySpaceBulkMode,
         selected_repo_indices: &[usize],
     ) -> usize {
-        // Processing starts the first repository and pops it from the queue, so
-        // the targets are read from the queue before it runs.
         let queued = self.enqueue_selected_repository_space_sync(
             space_id,
             Self::sync_mode_for_bulk_mode(mode),
@@ -459,7 +457,6 @@ impl Foxy {
             };
             let repo = &self.repository_view_state.repositories[repo_idx];
             if repo.repository_space_id.as_deref() != Some(space_id.as_str()) {
-                // Detached since it was queued: no longer part of the run.
                 if let Some(progress) = self
                     .repository_space_bulk_progress
                     .as_mut()
@@ -522,8 +519,7 @@ impl Foxy {
                 }
                 break;
             }
-            // Refused to start (unwritable folder, pending purge): count it, or
-            // the run never reaches its total and the space stays locked.
+            // Count rejected starts so an unwritable or purging target cannot leave the bulk run total incomplete.
             warn!(
                 "Queued repository-space sync for {} could not start; counting it as failed",
                 repo_name
@@ -558,7 +554,6 @@ impl Foxy {
         self.finish_repository_space_bulk_if_done();
     }
 
-    /// Clear a run whose remaining members were all taken out of it.
     fn finish_repository_space_bulk_if_done(&mut self) {
         if self
             .repository_space_bulk_progress
@@ -569,9 +564,7 @@ impl Foxy {
         }
     }
 
-    /// The user's Cancel stops the run the cancelled sync belongs to, not just
-    /// that one repository: the folder and space queues are dropped and an
-    /// active scheduled job ends without its post-action.
+    /// Cancel the owning folder/space queues and scheduled run, not only the active repository.
     pub(in crate::ui::app) fn drop_queued_repository_runs(&mut self) {
         let dropped_folder = self.repository_visual_folder_sync_queue.len();
         self.repository_visual_folder_sync_queue.clear();

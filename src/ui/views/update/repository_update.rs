@@ -209,14 +209,12 @@ impl Foxy {
                     {
                         ui.add_space(6.0);
                         self.render_disk_space_shortfall_warning(ui, &shortfall);
-                        // Re-probe while the modal is open so freeing space clears the notice.
+                        // Re-probe while the modal is open so freeing disk space clears the notice.
                         ui.ctx().request_repaint_after(Duration::from_secs(3));
                     }
                     ui.add_space(6.0);
 
-                    // Show the live download summary (planned/downloaded, hash,
-                    // and speed-history graph) while the transfer is running as
-                    // well, not only after it finishes.
+                    // Show live transfer totals, hash progress, and speed history while a download is running.
                     let summary_visible = (download_finished_for_selected || downloading)
                         && self.download_summary.is_some();
                     let available_height = ui.available_height();
@@ -260,8 +258,7 @@ impl Foxy {
                             + 6.0;
                         reserved_for_footer += summary_height;
                     }
-                    // Reserve space for the TS3 plugin update banner when it
-                    // will be visible below the summary.
+                    // Reserve space for the TS3 update banner when it will appear below the summary.
                     let ts3_banner_visible =
                         download_finished_for_selected && self.ts3_plugin_update_prompt.is_some();
                     if ts3_banner_visible {
@@ -272,8 +269,8 @@ impl Foxy {
                             .cloned()
                             .unwrap_or_else(|| egui::FontId::proportional(14.0));
                         let line_height = ui.fonts_mut(|fonts| fonts.row_height(&body_font));
-                        // Banner: inner_margin(8) top + line + inner_margin(8)
-                        // bottom + stroke(1) + item spacing
+
+
                         let banner_height = 8.0 + line_height + 8.0 + 1.0 + item_spacing;
                         reserved_for_footer += banner_height;
                     }
@@ -307,10 +304,10 @@ impl Foxy {
                                 addon_card_scale,
                             );
 
-                            // Lift the per-file galley cache into a local for the
-                            // loop: `m` borrows `self.mod_diff_cache` across the
-                            // nested card closures, so the cache cannot be reached
-                            // through `self` here. Restored after the loop.
+
+
+
+
                             let mut file_galleys =
                                 std::mem::take(&mut self.update_detail_file_galleys);
                             for (list_position, &mod_idx) in self.update_modal_sorted_mod_indices.iter().enumerate() {
@@ -334,7 +331,7 @@ impl Foxy {
                                         ui.set_width(card_width);
 
                                         ui.vertical(|ui| {
-                                                // Row: [name] ... [Diff (X files) button (right)]
+
                                                 let details_id =
                                                     Id::unique(("update-details-toggle", mod_idx, &m.name));
                                                 let diff_file_indices: Vec<usize> = m
@@ -399,7 +396,7 @@ impl Foxy {
                                                     }
                                                 });
 
-                                                // Diff panel (between name and progress bar)
+
                                                 let details_open: bool = ui.data(|d| {
                                                     d.get_temp(details_id).unwrap_or(false)
                                                 });
@@ -477,7 +474,7 @@ impl Foxy {
                                                         );
                                                 }
 
-                                                // Progress bar: status info or download progress
+
                                                 if download_finished_for_selected {
                                                     let finished_text = self.t_fmt(
                                                         "Updated ({size})",
@@ -635,7 +632,7 @@ impl Foxy {
                         ui.add_space(6.0);
                     }
 
-                // TS3 plugin update banner (shown after download completes)
+
                 if download_finished_for_selected {
                     self.render_ts3_plugin_update_banner(ui);
                 }
@@ -740,7 +737,7 @@ impl Foxy {
                 let pause_spacing = if can_toggle_pause { 8.0 } else { 0.0 };
                 let cancel_spacing = if can_cancel { 8.0 } else { 0.0 };
 
-                // Use explicit footer rects so the progress bar and trailing controls share one inset.
+
                 let footer_height = 48.0;
                 let footer_width = ui.available_width().max(0.0);
                 let (footer_rect, _) =
@@ -934,8 +931,6 @@ impl Foxy {
         }
     }
 
-    /// Framed warning above the addon list: the volume cannot take the update,
-    /// with the numbers the user needs to act on.
     fn render_disk_space_shortfall_warning(&self, ui: &mut Ui, shortfall: &DiskSpaceShortfall) {
         let title_size = self.settings_view_state.font_sizes.update_view.total_size as f32;
         let detail_size = (title_size - 2.0).max(13.0);
@@ -1065,7 +1060,6 @@ impl Foxy {
         });
     }
 
-    /// `live` marks each lane's newest sample while the transfer runs.
     fn render_download_summary_speed_graph(
         &self,
         ui: &mut Ui,
@@ -1462,7 +1456,6 @@ enum SummaryGraphValue {
     MemoryBytes,
 }
 
-/// Returns the point of the newest sample when it has a value to plot.
 fn draw_summary_lane(
     context: SummaryGraphLaneContext<'_>,
     style: SummaryGraphLaneStyle<'_>,
@@ -1570,8 +1563,7 @@ fn format_percent(value: f64) -> String {
     format!("{:.1}%", value.max(0.0))
 }
 
-/// Telemetry counts one fully busy processor thread as 100%; Task Manager
-/// shows the share of every thread, which is what the lane reports.
+/// Normalize CPU telemetry to Task Manager's whole-machine thread share.
 fn machine_cpu_percent(per_thread_percent: f64, threads: usize) -> f64 {
     per_thread_percent / threads.max(1) as f64
 }
@@ -1966,8 +1958,6 @@ mod tests {
         ));
     }
 
-    // ── update_view_inset_width: additional ────────────────────────────
-
     #[test]
     fn update_view_inset_width_zero_available() {
         assert_eq!(update_view_inset_width(0.0, 15.0), 0.0);
@@ -1975,11 +1965,8 @@ mod tests {
 
     #[test]
     fn update_view_inset_width_padding_exceeds_available() {
-        // When padding * 2 > available, should clamp to 0
         assert_eq!(update_view_inset_width(20.0, 15.0), 0.0);
     }
-
-    // ── update_view_inner_width: additional ────────────────────────────
 
     #[test]
     fn update_view_inner_width_zero_margin() {
@@ -1991,8 +1978,6 @@ mod tests {
         assert_eq!(update_view_inner_width(10.0, 20.0), 0.0);
     }
 
-    // ── update_view_downloader_bar_text_size: additional ───────────────
-
     #[test]
     fn update_view_downloader_bar_text_size_zero_measured_width() {
         let size = update_view_downloader_bar_text_size(16.0, 0.0, 300.0);
@@ -2002,16 +1987,14 @@ mod tests {
     #[test]
     fn update_view_downloader_bar_text_size_zero_available_width() {
         let size = update_view_downloader_bar_text_size(16.0, 200.0, 0.0);
-        assert_eq!(size, 8.0); // MIN_FONT_SIZE
+        assert_eq!(size, 8.0);
     }
 
     #[test]
     fn update_view_downloader_bar_text_size_max_below_min_uses_min() {
         let size = update_view_downloader_bar_text_size(5.0, 200.0, 300.0);
-        assert_eq!(size, 8.0); // MIN_FONT_SIZE
+        assert_eq!(size, 8.0);
     }
-
-    // ── update_view_inset_rect: additional ─────────────────────────────
 
     #[test]
     fn update_view_inset_rect_zero_padding() {
@@ -2024,7 +2007,7 @@ mod tests {
     fn update_view_inset_rect_large_padding_clamps() {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), Vec2::new(20.0, 50.0));
         let inset = update_view_inset_rect(rect, 100.0);
-        // Padding clamped to half of width
+
         assert!(inset.width() >= 0.0);
     }
 }

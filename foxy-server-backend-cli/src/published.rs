@@ -11,7 +11,6 @@ pub fn write_server_mod_line(output_dir: &Path, line: &str) -> Result<()> {
         .with_context(|| format!("Failed to write {}", path.display()))
 }
 
-/// Root-level `optionals` folders already published in `mod_dir`, without touching them.
 pub fn optionals_in(mod_dir: &Path) -> Result<Vec<PathBuf>> {
     let metadata = match std::fs::symlink_metadata(mod_dir) {
         Ok(metadata) => metadata,
@@ -49,7 +48,6 @@ pub fn optionals_in(mod_dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(found)
 }
 
-/// Every `optionals` folder `remove_published_optionals` would delete under `output_dir`.
 pub fn published_optionals(output_dir: &Path, mods: &[ResolvedMod]) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     for item in mods {

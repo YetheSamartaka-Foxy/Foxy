@@ -4,7 +4,6 @@ use crate::core::tasks::init_database::SQLITE_MAX_VARIABLES;
 use chrono::Utc;
 use std::sync::Arc;
 
-/// Column list for selecting a [`DownloadPatchFile`] via [`DownloadPatchFile::from_row`].
 const PATCH_FILE_COLUMNS: &str = "file_id, patch_json_path, patch_blob_path, planned_copy_bytes, planned_download_bytes, \
      status, last_error, created_at, updated_at";
 
@@ -18,13 +17,12 @@ pub(crate) struct DownloadPatchFile {
     pub(crate) status: String,
     pub(crate) last_error: Option<String>,
     pub(crate) created_at: String,
-    /// Materialized from the row for completeness; not currently consumed.
+
     #[allow(dead_code)]
     pub(crate) updated_at: String,
 }
 
 impl DownloadPatchFile {
-    /// Materialize from a seam [`DbRow`] selected with [`PATCH_FILE_COLUMNS`].
     fn from_row(row: &DbRow) -> Result<Self, DbErr> {
         Ok(DownloadPatchFile {
             file_id: row.get_i64("file_id")? as u64,
@@ -72,7 +70,7 @@ pub(crate) async fn save_download_patch_file(
     let planned_download_bytes = patch_file.planned_download_bytes as i64;
     let status = patch_file.status.clone();
     let last_error = patch_file.last_error.clone();
-    // Preserve created_at on conflict; only stamp it for new rows.
+
     let created_at = if patch_file.created_at.is_empty() {
         now_timestamp()
     } else {

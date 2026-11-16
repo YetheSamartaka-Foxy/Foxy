@@ -3,20 +3,16 @@ use crate::core::models::context::FoxyContext;
 use crate::core::tasks::init_database::SQLITE_MAX_VARIABLES;
 use std::sync::Arc;
 
-/// Column list for selecting a [`DownloadPatchOp`] via [`DownloadPatchOp::from_row`].
 const PATCH_OP_COLUMNS: &str = "id, file_id, data_order, op_type, dest_start, length, target_checksum, source_start, \
      source_checksum, blob_offset, downloaded_bytes, retry_count";
 
-/// Columns written per row on insert (everything except the autoincrement `id`).
 const PATCH_OP_INSERT_COLUMNS: &str = "file_id, data_order, op_type, dest_start, length, target_checksum, source_start, \
      source_checksum, blob_offset, downloaded_bytes, retry_count";
 
-/// Bound variables per inserted row (matches [`PATCH_OP_INSERT_COLUMNS`]).
 const PATCH_OP_INSERT_BINDS: usize = 11;
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct DownloadPatchOp {
-    /// Materialized from the row for completeness; not currently consumed.
     #[allow(dead_code)]
     pub(crate) id: u64,
     pub(crate) file_id: u64,
@@ -33,7 +29,6 @@ pub(crate) struct DownloadPatchOp {
 }
 
 impl DownloadPatchOp {
-    /// Materialize from a seam [`DbRow`] selected with [`PATCH_OP_COLUMNS`].
     fn from_row(row: &DbRow) -> Result<Self, DbErr> {
         Ok(DownloadPatchOp {
             id: row.get_i64("id")? as u64,
@@ -71,9 +66,7 @@ pub(crate) async fn delete_download_patch_ops_for_file(
         .await
 }
 
-/// Delete patch ops for many files in a single transaction, chunked to stay
-/// under the SQLite bound-variable limit. Replaces per-file delete round trips
-/// when a whole batch of files needs its stale patch plans cleared.
+/// Chunk deletes below SQLite's bind-variable limit.
 pub(crate) async fn delete_download_patch_ops_for_files(
     context: Arc<FoxyContext>,
     file_ids: &[i64],
@@ -217,8 +210,7 @@ mod tests {
 
     async fn in_memory_context() -> Arc<FoxyContext> {
         let db = crate::core::tasks::db_turso::build_test_database().await;
-        // download_patch_op.file_id has an FK to files(id); seed the parent rows
-        // the tests reference (1..=3) so ops insert under FK enforcement.
+
         crate::core::db::FoxyDb::from_turso(db.clone())
             .execute(
                 "INSERT INTO files (id) VALUES (1), (2), (3)",

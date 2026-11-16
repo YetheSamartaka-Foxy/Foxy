@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "game_space_id": "arma3",
+  "game_id": "arma3",
+  "revision": 1,
+  "instances": [
+    {
+      "schema_version": 2,
+      "id": "server_00000000000000000000000000000001",
+      "game_space_id": "arma3",
+      "revision": 1,
+      "display_name": "MainServer",
+      "installation_id": null,
+      "definition": {
+        "game": "arma3",
+        "settings": {
+          "hostname": "MainServer",
+          "game_port": 2302,
+          "max_players": 64,
+          "persistent": false,
+          "auto_init": false,
+          "battleye": true,
+          "verify_signatures": "v2",
+          "mission_cycle": []
+        }
+      }
+    }
+  ],
+  "installations": []
+}

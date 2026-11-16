@@ -11,7 +11,6 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Raw tables loaded inside the read transaction, before in-memory tree assembly.
 #[derive(Default)]
 struct RawTreeData {
     repositories: Vec<FoxyRepository>,
@@ -22,14 +21,8 @@ struct RawTreeData {
     addon_files: Vec<(i64, i64)>,
 }
 
-/// Run `SELECT … WHERE col IN (…)` over `ids` in bind-variable-safe chunks,
-/// applying `suffix` (e.g. an ORDER BY) to each chunk, and hand every row to
-/// `visit` as it arrives.
-///
-/// Streaming rather than returning rows is what keeps a large load from holding
-/// the raw rows and the structs built from them at the same time; the parts of
-/// a 141k-part repository are both representations of the same data, and only
-/// one of them is wanted.
+/// Query `ids` in bind-safe chunks and stream each row to `visit` to avoid
+/// holding raw rows alongside the mapped structs.
 async fn for_each_id_chunk<F>(
     tx: &DbTxn<'_>,
     prefix: &str,
@@ -54,7 +47,6 @@ where
     Ok(())
 }
 
-/// Collect `SELECT … WHERE col IN (…)` rows through a per-row mapper.
 async fn map_id_chunks<T, F>(
     tx: &DbTxn<'_>,
     prefix: &str,
@@ -79,13 +71,8 @@ fn sort_parts_for_tree_load(parts: &mut [FoxyModFilePart]) {
     parts.sort_unstable_by_key(|part| (part.file_id, part.data_order, part.id));
 }
 
-/// Bucket part indices under the file each part belongs to.
-///
-/// `parts` arrives grouped by file and ascending in `data_order` within a file
-/// (`sort_parts_for_tree_load`, plus deferred rows attached in the same order),
-/// which is the order a file's bucket needs, so this is a scan. The pair list,
-/// part-id map and global re-sort it replaces produced the same buckets and cost
-/// more than the part rows they indexed.
+/// Bucket part indices by file. Input is already grouped and ordered by
+/// `data_order`, so a single scan preserves each file's part order.
 fn assign_parts_to_files(
     parts: &[FoxyModFilePart],
     file_id_to_index: &HashMap<u64, usize>,
@@ -102,7 +89,6 @@ fn deferred_part_synthetic_id(attached: usize) -> u64 {
     u64::MAX - attached as u64
 }
 
-/// Runtime tree node types (link indices to children)
 #[derive(Debug, Clone)]
 pub struct RepositoryNode {
     pub repo_idx: usize,
@@ -121,7 +107,6 @@ pub struct FileNode {
     pub parts: Vec<usize>,
 }
 
-/// The complete in-memory model tree
 #[derive(Debug, Default)]
 pub struct Tree {
     pub repositories: Vec<FoxyRepository>,
@@ -137,12 +122,10 @@ pub struct Tree {
 }
 
 impl Tree {
-    /// Loads all tables in a single transaction and builds the ordered tree
     pub async fn load(context: Arc<FoxyContext>, remote_repository_url: &str) -> Result<Self> {
         Self::load_scoped(context, remote_repository_url, None, None, false).await
     }
 
-    /// Loads the repository tree while restricting file/part rows to the named addons.
     pub async fn load_for_mod_names(
         context: Arc<FoxyContext>,
         remote_repository_url: &str,
@@ -151,9 +134,7 @@ impl Tree {
         Self::load_scoped(context, remote_repository_url, Some(mod_names), None, false).await
     }
 
-    /// Loads all repository/addon rows but restricts file/part rows to addons
-    /// containing the requested files. This keeps repository rollups correct
-    /// without loading unrelated subfile rows.
+    /// Load all addon rollups but only requested file/part rows, preserving repository hashes without unrelated subfile I/O.
     pub async fn load_for_files(
         context: Arc<FoxyContext>,
         remote_repository_url: &str,
@@ -176,9 +157,7 @@ impl Tree {
         let remote_repository_url = remote_repository_url.to_string();
         let mod_name_filter = mod_name_filter.cloned();
         let file_id_filter = file_id_filter.cloned();
-        // Files with deferred rows take their parts from memory; the part
-        // stream may already have committed them, and reading them back costs
-        // more than attaching them.
+        // Deferred rows may already be persisted; attach the retained in-memory parts instead of rereading them.
         let deferred_parts = context.deferred_parts_snapshot();
         let deferred_file_ids: HashSet<i64> =
             deferred_parts.iter().map(|row| row.file_id).collect();
@@ -332,8 +311,8 @@ impl Tree {
                         .await?
                     };
 
-                    // Load parts directly by file_id. ORDER BY is applied in process:
-                    // the matching index does not pay for a ten-column ordered scan.
+
+
                     let mut parts: Vec<FoxyModFilePart> = Vec::new();
                     let mut ids: Vec<i64> = files
                         .iter()
@@ -385,8 +364,7 @@ impl Tree {
         if !deferred_parts.is_empty() {
             let file_ids: HashSet<i64> = files.iter().map(|file| file.id as i64).collect();
             let mut attached = 0usize;
-            // Attach in each file's part order: the persisted rows above are
-            // already sorted that way, and a file's parts are read positionally.
+
             let mut deferred: Vec<_> = deferred_parts
                 .into_iter()
                 .filter(|row| file_ids.contains(&row.file_id))
@@ -689,8 +667,6 @@ mod tests {
             .collect()
     }
 
-    /// The order a bucket ends up in is the order the old pair-list build
-    /// produced: each file's parts ascending in `data_order`.
     #[test]
     fn file_buckets_hold_each_file_s_parts_in_part_order() {
         let mut parts = vec![part(7, 2, 1), part(5, 1, 1), part(6, 2, 0), part(4, 1, 0)];
@@ -704,9 +680,7 @@ mod tests {
         assert_eq!(buckets(&parts, &[1]), vec![vec![1]]);
     }
 
-    /// Deferred manifest rows carry synthetic ids outside the rowid range, so
-    /// they cannot be keyed by id; they are placed by position, after the
-    /// persisted rows of the same file.
+    /// Deferred parts use synthetic IDs outside rowid identity; place them positionally after persisted parts of the file.
     #[test]
     fn deferred_rows_append_to_their_file_s_bucket() {
         let mut parts = vec![part(1, 1, 0), part(2, 1, 1)];

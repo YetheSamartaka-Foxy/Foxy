@@ -16,16 +16,14 @@ pub(crate) const USE_DECORATIONS: bool = false;
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [1024.0, 768.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [800.0, 600.0];
 const MAX_RESTORED_WINDOW_SIZE: [f32; 2] = [3840.0, 2160.0];
-/// Largest absolute window position (logical px) we will restore. Multi-monitor
-/// layouts can use negative coordinates, but anything beyond this is corrupt
-/// (e.g. geometry distorted by a tiny UI scale) and would place the window
-/// off-screen, so we ignore it and let the OS position the window.
+
 const MAX_RESTORED_WINDOW_POSITION: f32 = 32000.0;
 
 pub(crate) fn main(
     debug_mode: bool,
     agent_gui: AgentGuiLaunchConfig,
     debug_modals: Vec<DebugModal>,
+    mode_override: Option<crate::core::app_mode::AppMode>,
 ) {
     let icon = include_bytes!("icons/foxy_256.png");
     let image = match image::load_from_memory(icon) {
@@ -39,11 +37,7 @@ pub(crate) fn main(
     let (icon_width, icon_height) = image.dimensions();
     let viewport = build_root_viewport(image.into_raw(), icon_width, icon_height);
 
-    // Whether eframe got as far as constructing the app. A narrowed launch that
-    // fails does so while creating the instance, adapter or device - before this
-    // is set - so it is what separates "never started" from "ran and then
-    // returned an error", and it is why a retry can never open a second window
-    // over a session the user already used.
+    // The marker distinguishes failure before app construction from an app that ran and returned, preventing a retry from opening a second window.
     let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stage = launch_stage_after_previous_attempt();
     let run = |viewport: ViewportBuilder, pin_backend: bool| {
@@ -63,6 +57,7 @@ pub(crate) fn main(
                     debug_mode,
                     agent_gui.clone(),
                     debug_modals.clone(),
+                    mode_override,
                 )))
             }),
         );
@@ -72,11 +67,7 @@ pub(crate) fn main(
     let (result, pinned) = run(viewport.clone(), true);
     let result = match result {
         Err(err) if pinned && !started.load(std::sync::atomic::Ordering::SeqCst) => {
-            // The remembered backend no longer resolves to an adapter - a driver
-            // change, a swapped GPU, a remote session. Re-enumerating every
-            // backend is exactly what the record is a shortcut for, so drop it
-            // and take the slow path rather than failing a launch that would
-            // have worked.
+            // If a remembered backend no longer resolves, clear it and retry full enumeration rather than failing a launch that could succeed elsewhere.
             log::warn!(
                 "Failed to start Foxy UI on the remembered graphics backend ({}); retrying with every supported backend",
                 err
@@ -168,12 +159,7 @@ fn build_root_viewport(icon_rgba: Vec<u8>, icon_width: u32, icon_height: u32) ->
     viewport
 }
 
-/// Pick the fallback rung for this launch from the marker a previous launch
-/// left behind when it died before constructing the app.
-///
-/// A returned error is logged and exits normally, so the marker mostly records
-/// native crashes in the graphics stack that no panic hook ever sees. Reaching
-/// the app clears it, so a working machine never pays for this.
+/// A prior crash marker selects the fallback rung; constructing the app clears it, while native graphics crashes leave it for the next launch.
 fn launch_stage_after_previous_attempt() -> GraphicsLaunchStage {
     let previous = previous_launch_attempt();
     let stage = next_launch_stage(previous);
@@ -187,9 +173,7 @@ fn launch_stage_after_previous_attempt() -> GraphicsLaunchStage {
     stage
 }
 
-/// Build the eframe options, optionally narrowing wgpu to the backend a previous
-/// launch proved. Returns whether the narrowing was actually applied, which is
-/// what makes a failed launch retryable rather than fatal.
+/// Narrow wgpu to a previously successful backend when possible; return whether the restriction applied so failed launches can retry.
 fn build_native_options(
     viewport: ViewportBuilder,
     pin_backend: bool,
@@ -206,12 +190,7 @@ fn build_native_options(
     (options, pinned)
 }
 
-/// Ask wgpu's allocators to size for footprint rather than for throughput.
-///
-/// wgpu defaults to [`wgpu::MemoryHints::Performance`], which sizes its
-/// suballocation blocks for a renderer streaming large resources. Foxy uploads
-/// a font atlas and a handful of repository images, so those blocks are commit
-/// that never holds a Foxy texture.
+/// Foxy uses a small GPU footprint, so performance-sized wgpu suballocation blocks would reserve unused memory.
 fn configure_graphics_memory_hints(options: &mut NativeOptions) {
     use eframe::egui_wgpu::WgpuSetup;
     use eframe::wgpu;
@@ -339,8 +318,7 @@ fn consume_wgpu_crash_marker() -> bool {
 /// Switch the renderer setting to Glow and leave the notice the UI shows once.
 fn persist_glow_fallback() {
     switch_renderer_setting_to_glow();
-    // The remembered backend is the one that just crashed. Clear it so a later
-    // return to wgpu re-enumerates instead of pinning the failure.
+    // Clear the remembered backend after its crash so future WGPU launches enumerate available backends again.
     forget_graphics_backend();
 
     let notice_path = renderer_fallback_notice_path();
@@ -424,11 +402,7 @@ fn platform_backends() -> eframe::wgpu::Backends {
     Backends::VULKAN | Backends::GL
 }
 
-/// The single backend to try after a full enumeration killed the process.
-///
-/// Vulkan instance creation loads every installed ICD and implicit layer
-/// (overlays, capture tools, stale drivers), which is where such crashes
-/// almost always live. DX12 on Windows and GL on Linux touch none of that.
+/// After enumeration crashes, try one safer backend without loading every Vulkan ICD and implicit layer.
 #[cfg(target_os = "windows")]
 fn safe_backend() -> eframe::wgpu::Backends {
     eframe::wgpu::Backends::DX12
@@ -439,12 +413,7 @@ fn safe_backend() -> eframe::wgpu::Backends {
     eframe::wgpu::Backends::GL
 }
 
-/// Map a recorded backend name onto its single-backend bit.
-///
-/// The names are wgpu's own (`Backend::to_str`), which is also what
-/// `WGPU_BACKEND` accepts, so a record and an override are spelled the same way
-/// and an unrecognized name degrades to a full enumeration rather than to a
-/// wrong backend.
+/// Use wgpu backend names so persisted records and `WGPU_BACKEND` overrides agree; unknown names fall back to full enumeration.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn named_backend(name: &str) -> Option<eframe::wgpu::Backends> {
     eframe::wgpu::Backend::ALL
@@ -470,9 +439,7 @@ fn configure_native_graphics(
     }
 
     if stage == GraphicsLaunchStage::SafeBackend {
-        // The record names a backend that once worked, but the enumeration it
-        // shortcuts just killed the process; the safe backend is chosen
-        // outright and gets re-recorded if it reaches a window.
+        // If the remembered backend's enumeration crashes, use and record the safe backend when it reaches a window.
         forget_graphics_backend();
         create_new.instance_descriptor.backends = safe_backend();
         log::warn!(

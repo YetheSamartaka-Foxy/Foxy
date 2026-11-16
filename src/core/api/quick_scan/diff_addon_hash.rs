@@ -33,7 +33,7 @@ struct AddonHashWork {
     path_key: String,
     local_path: String,
     fingerprint: AddonRootFingerprint,
-    /// Content hash produced by the same walk that built `fingerprint`.
+
     content_hash: Option<String>,
 }
 
@@ -50,8 +50,7 @@ pub(super) struct AddonHashResult {
     pub addon_hash_calculated: usize,
     pub persistent_cache_entry_count: usize,
     pub enabled_addons: usize,
-    /// Directory entries enumerated and stat-ed by the fingerprint walks of
-    /// this scan (files plus directories), the work unit of O4.
+
     pub entries_walked: u64,
     pub phase1_addon_content_mismatch_count: usize,
     pub missing_addon_path_samples: Vec<String>,
@@ -297,8 +296,7 @@ pub(super) async fn resolve_addon_hashes(
             join_set.spawn(async move {
                 let _permit = sem.acquire_owned().await.ok();
                 let started = Instant::now();
-                // The fingerprint walk already produced this addon's content
-                // hash; only a folder that could not be walked needs a retry.
+
                 let state = match work.content_hash.clone() {
                     Some(content_hash) => AddonFolderState {
                         exists: true,
@@ -369,7 +367,6 @@ pub(super) async fn resolve_addon_hashes(
         }
     }
 
-    // Build per-mod state map from cache
     let mut addon_state_by_mod_id: HashMap<i64, AddonFolderState> = HashMap::new();
     for (mod_id, path_key) in &mod_path_key_by_id {
         let state = local_addon_state_cache
@@ -379,7 +376,6 @@ pub(super) async fn resolve_addon_hashes(
         addon_state_by_mod_id.insert(*mod_id, state);
     }
 
-    // Identify mods requiring deeper inspection
     let mut mods_with_tree_mismatch: HashSet<i64> = HashSet::new();
     let mut mods_with_missing_path: HashSet<i64> = HashSet::new();
     let mut deep_scan_mod_ids: HashSet<i64> = HashSet::new();

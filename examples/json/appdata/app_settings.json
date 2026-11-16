@@ -1,4 +1,5 @@
 {
+  "app_mode": "client",
   "debug_mode": false,
   "show_debug_windows": false,
   "show_activity_log": false,

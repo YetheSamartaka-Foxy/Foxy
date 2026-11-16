@@ -1,0 +1,44 @@
+{
+  "instance_id": "server_00000000000000000000000000000001",
+  "installation_id": "install_00000000000000000000000000000001",
+  "fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "owner_authenticated": true,
+  "inspection_complete": true,
+  "eligible_count": 1,
+  "pending_count": 1,
+  "completed_history": 0,
+  "entries": [
+    {
+      "consumer_fingerprint": "204b831e5516d544edfbe4fd608dcba87276573a1c8c88fde4a2a04d324cc93e",
+      "session": {
+        "owner_id": "owner_previous",
+        "owner_generation": 3,
+        "game_space_id": "alpha",
+        "instance_id": "server_00000000000000000000000000000001",
+        "operation_id": "op_previous",
+        "run_generation": 4
+      },
+      "registration_present": true,
+      "receipt_state": "verified_exited",
+      "eligible": true,
+      "reason": "verified old-owner cleanup receipt"
+    },
+    {
+      "consumer_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "session": {
+        "owner_id": "owner_legacy",
+        "owner_generation": 2,
+        "game_space_id": "alpha",
+        "instance_id": "server_00000000000000000000000000000001",
+        "operation_id": "op_legacy",
+        "run_generation": 2
+      },
+      "registration_present": true,
+      "receipt_state": "legacy_unverified",
+      "eligible": false,
+      "reason": "foreign or legacy group"
+    }
+  ],
+  "blockers": [],
+  "writes_performed": false
+}

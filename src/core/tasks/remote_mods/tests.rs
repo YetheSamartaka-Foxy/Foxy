@@ -3,8 +3,6 @@ use crate::core::models::repository::FoxyRepository;
 use serde_json::json;
 use std::collections::HashSet;
 
-// ── join_path ───────────────────────────────────────────────────────
-
 #[test]
 fn join_path_with_trailing_slash() {
     assert_eq!(
@@ -31,15 +29,11 @@ fn join_path_no_trailing_separator() {
     assert_eq!(join_path("C:\\mods", "@mod"), "C:\\mods/@mod");
 }
 
-// ── mod_task_limit ──────────────────────────────────────────────────
-
 #[test]
 fn mod_task_limit_within_bounds() {
     let limit = mod_task_limit();
     assert!(limit >= 4, "limit should be at least 4, got {}", limit);
 }
-
-// ── collect_desired_mod_pairs ───────────────────────────────────────
 
 fn make_parent(remote_url: &str, local_path: &str) -> FoxyRepository {
     FoxyRepository {

@@ -804,8 +804,6 @@ fn settings_restore_explicit_github_update_mode() {
     assert_eq!(settings.app_update_url, "https://updates.example.com/foxy/");
 }
 
-// ── split_additional_launch_params: additional ─────────────────────
-
 #[test]
 fn split_additional_launch_params_empty_string() {
     assert!(split_additional_launch_params("").is_empty());
@@ -829,8 +827,6 @@ fn split_additional_launch_params_multiple_spaces() {
     let args = split_additional_launch_params("-a    -b    -c");
     assert_eq!(args, vec!["-a", "-b", "-c"]);
 }
-
-// ── selected_creator_dlc_codes: additional ─────────────────────────
 
 #[test]
 fn selected_creator_dlc_codes_none_selected() {
@@ -860,8 +856,6 @@ fn selected_creator_dlc_codes_all_selected() {
     assert!(codes.contains(&"vn"));
     assert!(codes.contains(&"ws"));
 }
-
-// ── apply_repo_dlc_content_from_repo_json: additional ──────────────
 
 #[test]
 fn apply_repo_dlc_content_from_repo_json_non_object_non_array_is_noop() {
@@ -918,8 +912,6 @@ fn apply_repo_dlc_content_from_repo_json_empty_array_disables_all() {
     assert!(!repo.spe);
 }
 
-// ── sanitize_external_addons: additional ───────────────────────────
-
 #[test]
 fn sanitize_external_addons_empty_name_removed() {
     let mut addons = vec![("  ".to_string(), true, "C:\\Mods".to_string())];
@@ -933,8 +925,6 @@ fn sanitize_external_addons_empty_vec() {
     sanitize_external_addons(&mut addons);
     assert!(addons.is_empty());
 }
-
-// ── apply_repo_client_parameters: additional ───────────────────────
 
 #[test]
 fn apply_repo_client_parameters_all_known_flags() {
@@ -960,8 +950,6 @@ fn apply_repo_client_parameters_case_insensitive() {
     assert!(repo.skip_intro);
     assert!(repo.no_splash);
 }
-
-// ── repo_json_dlc_content_value ────────────────────────────────────
 
 #[test]
 fn repo_json_dlc_content_value_prefers_dlc_content() {

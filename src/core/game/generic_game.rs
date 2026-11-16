@@ -22,7 +22,6 @@ const DEFAULT_MANIFEST_NAME: &str = "foxy_mods.txt";
 
 pub struct GenericGameModule;
 
-/// The parts of a user-configured game that Foxy cannot know statically.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct GenericGameConfig {
     pub install_dir: String,
@@ -100,9 +99,14 @@ impl GameModule for GenericGameModule {
     }
 
     fn launch_write_targets(&self, plan: &LaunchPlan, ctx: &GameLaunchCtx) -> Vec<PathBuf> {
-        let Some(settings) = ctx.settings else { return Vec::new() };
+        let Some(settings) = ctx.settings else {
+            return Vec::new();
+        };
         build_generic_launch(plan, ctx, &config_from_settings(settings), false)
-            .ok().and_then(|built| built.manifest).map(|manifest| vec![manifest.path]).unwrap_or_default()
+            .ok()
+            .and_then(|built| built.manifest)
+            .map(|manifest| vec![manifest.path])
+            .unwrap_or_default()
     }
 
     fn settings_schema(&self) -> GameSettingsSchema {
@@ -174,9 +178,7 @@ impl GameModule for GenericGameModule {
     }
 }
 
-/// A repository whose `repo.json` names a game build starts the game from that
-/// downloaded folder; any other repository starts the configured install.
-/// Enabled addon folders are only offered to the launch template as `{mods}`.
+/// Repository gameBuild overrides the configured install; enabled addons are offered only through the mods placeholder.
 pub fn build_repository_launch_plan(repo: &Repository) -> LaunchPlan {
     let repo_path = Path::new(repo.path.trim());
     let game_build = repo.game_build.as_ref().map(|build| GameBuildTarget {
@@ -361,8 +363,6 @@ fn render_manifest(mods: &[ResolvedMod]) -> String {
         .join("\n")
 }
 
-/// Split a rendered argument template the way a shell would, so a player can
-/// quote a path that contains spaces.
 pub fn split_launch_args(rendered: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -408,9 +408,7 @@ pub struct GenericWorkshopLaunchPlan {
     pub issues: Vec<GenericWorkshopIssue>,
 }
 
-/// Resolve the enabled Workshop items of a user-configured game to the folders
-/// Foxy would hand the game. Unlike the Warhammer plan this keeps whole item
-/// directories, because a generic game has no known content layout.
+/// Generic games have no known content layout, so Workshop launches retain whole item directories.
 pub fn build_workshop_launch_plan(
     space_dir: &Path,
     app_id: u32,

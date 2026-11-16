@@ -1,7 +1,3 @@
-//! The proxy every Foxy HTTP client uses. System mode is reqwest's own default
-//! (the Windows proxy settings and the `HTTP_PROXY` / `HTTPS_PROXY` variables),
-//! so only None and Manual change how a client is built.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 
@@ -9,7 +5,6 @@ use log::{info, warn};
 
 use crate::ui::types::ProxyMode;
 
-/// Shown instead of a stored proxy password.
 pub const REDACTED_PASSWORD: &str = "<redacted>";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -22,7 +17,7 @@ pub struct ProxySettings {
 }
 
 static PROXY: RwLock<Option<ProxySettings>> = RwLock::new(None);
-/// Bumped on every proxy change so shared clients know to rebuild.
+
 static PROXY_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Apply the user's proxy to clients built from now on. Logs the mode only:
@@ -98,7 +93,6 @@ fn current_settings() -> ProxySettings {
         .unwrap_or_default()
 }
 
-/// Async client builder with the configured proxy applied.
 pub fn client_builder() -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder();
     match client_proxy(&current_settings()) {
@@ -108,7 +102,6 @@ pub fn client_builder() -> reqwest::ClientBuilder {
     }
 }
 
-/// Blocking client builder with the configured proxy applied.
 pub fn blocking_client_builder() -> reqwest::blocking::ClientBuilder {
     let builder = reqwest::blocking::Client::builder();
     match client_proxy(&current_settings()) {
@@ -118,25 +111,20 @@ pub fn blocking_client_builder() -> reqwest::blocking::ClientBuilder {
     }
 }
 
-/// Async client with the configured proxy and reqwest's defaults otherwise.
 pub fn client() -> reqwest::Client {
     client_builder().build().unwrap_or_default()
 }
 
-/// Blocking client with the configured proxy and reqwest's defaults otherwise.
 pub fn blocking_client() -> reqwest::blocking::Client {
     blocking_client_builder()
         .build()
         .unwrap_or_else(|_| reqwest::blocking::Client::new())
 }
 
-/// Why a manual proxy address cannot be used, as an `en.json` key, or `Ok`.
 pub fn validate_proxy_url(url: &str) -> Result<(), &'static str> {
     normalized_proxy_url(url).map(|_| ())
 }
 
-/// Replace a stored proxy password in serialized settings, for output that a
-/// user may paste into a bug report.
 pub fn redact_settings_value(value: &mut serde_json::Value) {
     if let Some(password) = value.get_mut("proxy_password")
         && password.as_str().is_some_and(|text| !text.is_empty())
@@ -183,7 +171,6 @@ const CREDENTIALS_IN_ADDRESS: &str =
     "Enter the proxy user name and password in their own fields, not in the address.";
 const INVALID_ADDRESS: &str = "This is not a valid proxy address.";
 
-/// The address with a scheme, `http://` when the user typed only `host:port`.
 fn normalized_proxy_url(raw: &str) -> Result<String, &'static str> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

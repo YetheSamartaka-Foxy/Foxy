@@ -243,13 +243,6 @@ impl Default for UpdateViewFonts {
 }
 
 impl UpdateViewFonts {
-    /// One-time migration of the update-view heading hierarchy.
-    ///
-    /// Earlier builds shipped a hierarchy where the section title (26) was
-    /// actually larger than the page title (24). For any field still left at
-    /// its old default - i.e. the user never customized it - adopt the new
-    /// default so the corrected hierarchy applies. Fields the user explicitly
-    /// changed to some other value are left untouched.
     pub fn migrate_heading_hierarchy(&mut self) {
         const OLD_PAGE_TITLE: u16 = 24;
         const OLD_SECTION_TITLE: u16 = 26;

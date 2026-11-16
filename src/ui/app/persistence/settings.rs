@@ -87,8 +87,7 @@ impl Foxy {
                 self.settings_view_state
                     .active_update_sessions
                     .retain(|session| !session.mods.is_empty());
-                // Discard stale notices that carry no meaningful update info
-                // (e.g. leftover from a no-op download after a DB wipe).
+                // Discard stale notices with no meaningful update, such as no-op downloads after a database wipe.
                 self.settings_view_state
                     .update_summary_notices
                     .retain(|notice| notice.summary.has_meaningful_content());
@@ -146,10 +145,7 @@ impl Foxy {
                 debug!("Steam directory is empty and auto-detection did not find an install");
             }
         }
-        // Detection only ever fills the active module's own install field, so a
-        // non-Arma space never gets its game path written into the Arma 3
-        // setting (or vice versa), and it never runs against the read-only
-        // fallback module of a space whose game is not registered.
+        // Write detected paths only to the active module's setting; never populate another game's field or the read-only fallback.
         let active_module = crate::core::game::registry().active_module();
         let is_ts3_space =
             active_module.is_some_and(|module| module.capabilities().teamspeak3_plugins);

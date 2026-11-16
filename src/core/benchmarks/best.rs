@@ -1,16 +1,7 @@
-//! "Versus best measured": the median of a frozen set of saved benchmarks
-//! that did the same useful work under the same conditions. This is
-//! an empirical reference (convention section 2.1), distinct from any
-//! modeled bound: a candidate can beat it, and a slow best proves nothing
-//! about physics.
-
 use std::collections::BTreeSet;
 
 use super::record::{BenchmarkCompatibility, BenchmarkOutcome, BenchmarkRecord};
 
-/// The conditions two records must share before their elapsed times can be
-/// compared: the same action on the same repository instance, on the same
-/// storage class and build kind, and the same amount of required work.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompatibilityKey {
     pub kind: &'static str,
@@ -18,7 +9,7 @@ pub struct CompatibilityKey {
     pub repository_local_path: String,
     pub storage_class: String,
     pub build_kind: String,
-    /// `(files, bytes)` for transfers, `(files, parts)` for checks.
+
     pub useful_work: (u64, u64),
     pub operation_label: String,
     pub initial_state: String,
@@ -33,8 +24,6 @@ pub struct CompatibilityKey {
 }
 
 impl CompatibilityKey {
-    /// `None` for a record that cannot serve as a reference: a failed or
-    /// cancelled run, or one whose useful work is unknown.
     pub fn of(record: &BenchmarkRecord) -> Option<Self> {
         if record.outcome != BenchmarkOutcome::Success {
             return None;
@@ -215,26 +204,22 @@ pub fn populate_compatibility(record: &mut BenchmarkRecord) {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BestComparison {
-    /// Id of the prior record nearest the frozen-set median.
     pub best_id: String,
-    /// Median elapsed time of the compatible frozen prior records.
+
     pub best_elapsed_s: f64,
-    /// Fastest compatible prior record, retained as secondary evidence.
+
     pub fastest_id: String,
     pub fastest_elapsed_s: f64,
     pub candidate_elapsed_s: f64,
-    /// Compatible frozen successful prior records; the candidate is excluded.
+
     pub samples: usize,
 }
 
 impl BestComparison {
-    /// `T_frozen_median / T_actual`; above one means the candidate improved
-    /// on the frozen reference set.
     pub fn ratio(&self) -> Option<f64> {
         (self.candidate_elapsed_s > 0.0).then(|| self.best_elapsed_s / self.candidate_elapsed_s)
     }
 
-    /// `T_actual - T_frozen_median` in seconds.
     pub fn gap_s(&self) -> f64 {
         self.candidate_elapsed_s - self.best_elapsed_s
     }
@@ -249,7 +234,6 @@ impl BestComparison {
         self.gap_s() <= 0.0
     }
 
-    /// No frozen prior record was compatible; there is nothing to compare.
     pub fn is_alone(&self) -> bool {
         self.samples == 0
     }

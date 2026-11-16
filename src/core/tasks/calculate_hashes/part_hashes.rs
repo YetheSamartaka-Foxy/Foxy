@@ -23,24 +23,21 @@ pub(super) struct PartHashMetrics {
     pub(super) layout_entry_payload_bytes: u64,
     pub(super) mapped_parts: usize,
     pub(super) fallback_parts: usize,
-    /// 1 when the file was read around the cache.
+
     pub(super) direct_files: usize,
-    /// 1 when a non-cached read failed and the file was read through the cache.
+
     pub(super) direct_fallback_files: usize,
 }
 
 pub(super) struct PartHashCalculation {
     pub(super) parts: Vec<FoxyModFilePart>,
     pub(super) metrics: PartHashMetrics,
-    /// Sampled fingerprint built from the bytes the hash pass read, re-reading
-    /// only samples the parts did not cover. `None` when the file could not be
-    /// read or the pass was cancelled before it finished.
+    /// Reuse bytes already read and sample only uncovered regions; None means unreadable or cancelled.
     pub(super) content_hash: Option<String>,
     pub(super) issue: Option<super::evidence::HashIssueKind>,
     pub(super) cancelled: bool,
 }
 
-/// Shared counters of one hash run, advanced by every file's hasher.
 #[derive(Clone)]
 pub(super) struct HashRunCounters {
     pub(super) files_done: Arc<AtomicUsize>,
@@ -96,8 +93,6 @@ impl PartHashProgress {
         }
     }
 
-    /// `bytes` is the estimated size of the parts, so a file of a few huge
-    /// parts still moves a byte-weighted bar between part intervals.
     pub(super) fn mark_parts_done(&self, count: usize, bytes: u64) {
         if count == 0 && bytes == 0 {
             return;
@@ -136,16 +131,15 @@ pub(super) const HASH_READER_CAPACITY: usize = 4 * 1024 * 1024;
 /// larger request pays for its seek with more data.
 pub(super) const ROTATIONAL_HASH_READER_CAPACITY: usize = 128 * 1024 * 1024;
 
-/// How one file's parts are located and read.
 #[derive(Clone)]
 pub(super) struct PartReadOptions<'a> {
     pub(super) span_source: PartSpanSource,
-    /// The active game's declared container formats.
+
     pub(super) game_formats: &'a [&'static str],
     pub(super) reader_capacity: usize,
-    /// Open with the sequential-scan hint, meant for rotational storage.
+
     pub(super) sequential_scan: bool,
-    /// Read around the cache instead, when the file is long enough.
+
     pub(super) direct: Option<&'a DirectReadPlan>,
 }
 
@@ -271,14 +265,11 @@ pub(super) async fn calculate_part_hashes(
         );
     }
 
-    // Attach original index to preserve order after offset-sorted processing
     let mut indexed_parts: Vec<(usize, FoxyModFilePart)> = parts.into_iter().enumerate().collect();
 
     let file_path_owned = file_path.to_string();
     let file_name = pbo_name.to_string();
 
-    // Acquire one semaphore permit for the entire file - sequential processing
-    // uses a single blocking thread instead of one per part.
     let semaphore_started = Instant::now();
     let Ok(_permit) = semaphore.acquire().await else {
         warn!("Hash semaphore closed, skipping file: {}", file_path);
@@ -297,9 +288,6 @@ pub(super) async fn calculate_part_hashes(
     };
     metrics.semaphore_wait_elapsed = semaphore_started.elapsed();
 
-    // Open the file once and hash all parts sequentially within a single
-    // spawn_blocking task.  This eliminates N redundant open/close syscalls
-    // (one per part) and lets the OS read-ahead prefetcher work efficiently.
     let blocking_progress = progress.clone();
     let read_heartbeat = Arc::new(AtomicU64::new(0));
     let blocking_heartbeat = read_heartbeat.clone();
@@ -341,8 +329,7 @@ pub(super) async fn calculate_part_hashes(
             ),
             None => vec![None; indexed_parts.len()],
         };
-        // A disk or filter that refuses non-cached reads must not turn into
-        // parts placed at remote offsets, so the layout is read again.
+        // If direct reads fail, reread the layout; remote offsets cannot describe local bytes.
         if let Some(format_id) = layout_format
             && reader.direct_failed()
             && let Ok(cached) = open_cached()
@@ -366,7 +353,7 @@ pub(super) async fn calculate_part_hashes(
                 &mut layout_metrics,
             );
         }
-        // Sort parts by effective start offset for sequential disk I/O.
+
         indexed_parts.sort_by_key(|(idx, part)| {
             span_overrides
                 .get(*idx)
@@ -379,13 +366,11 @@ pub(super) async fn calculate_part_hashes(
         } else {
             Some(0)
         };
-        // Timed per file rather than per part: a 562-entry PBO would otherwise
-        // charge the profiler more events than the hashing does work.
+
         let profiled = crate::core::utils::profiling::FsTimer::start();
 
         let mut fingerprint = crate::core::utils::content_hash::FingerprintTap::new(&file_metadata);
-        // Track consecutive read failures; after too many, skip remaining parts
-        // to avoid log spam and wasted I/O on corrupted/truncated files.
+
         const MAX_READ_FAILURES: usize = 3;
         let mut consecutive_read_failures: usize = 0;
         let total_part_count = indexed_parts.len();
@@ -394,8 +379,7 @@ pub(super) async fn calculate_part_hashes(
         let mut skipped = false;
 
         for (idx, part) in &mut indexed_parts {
-            // A multi-gigabyte PBO would otherwise keep the disk busy for
-            // its whole length after the user asked to stop.
+            // Check cancellation between reads so a large archive does not delay stopping.
             if cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
                 cancelled = true;
                 part.local_checksum = String::new();
@@ -406,7 +390,7 @@ pub(super) async fn calculate_part_hashes(
                 }
                 continue;
             }
-            // Bail early if the file is consistently unreadable
+
             if consecutive_read_failures >= MAX_READ_FAILURES {
                 part.local_checksum = String::new();
                 part.local_length = 0;
@@ -637,7 +621,6 @@ pub(super) async fn calculate_part_hashes(
         }
     };
     let blocking_elapsed = blocking_started.elapsed();
-    // _permit is dropped here, releasing the semaphore slot
 
     let (mut final_parts, content_hash, layout_metrics, unreadable, skipped, locally_cancelled) =
         match joined {
@@ -682,7 +665,6 @@ pub(super) async fn calculate_part_hashes(
         );
     }
 
-    // Restore original order
     final_parts.sort_by_key(|(idx, _)| *idx);
 
     debug!(
@@ -710,7 +692,6 @@ pub(super) async fn calculate_part_hashes(
     }
 }
 
-/// The reader one file's parts are hashed through.
 enum HashReader {
     Cached(std::io::BufReader<std::fs::File>),
     Direct(DirectReader),
@@ -728,7 +709,7 @@ impl HashReader {
         } else {
             std::fs::File::open(path)?
         };
-        // A small file never fills a large buffer, so it does not allocate one.
+
         let capacity = usize::try_from(file_len)
             .unwrap_or(usize::MAX)
             .clamp(8 * 1024, capacity.max(8 * 1024));
@@ -741,8 +722,6 @@ impl HashReader {
         matches!(self, Self::Direct(reader) if reader.failed())
     }
 
-    /// The sampled fingerprint read directly, for a file whose parts left a
-    /// sample unread. The direct reader would fetch a whole block per sample.
     fn sampled_fingerprint(&mut self, path: &str, metadata: &std::fs::Metadata) -> Option<String> {
         match self {
             Self::Cached(reader) => {
@@ -803,8 +782,6 @@ impl Seek for HashReader {
     }
 }
 
-/// Seeks to `span` and hashes its `len` bytes straight out of the reader's
-/// buffer, recording them in the fingerprint tap. Returns the part checksum.
 fn hash_span(
     reader: &mut HashReader,
     reader_pos: &mut Option<u64>,
@@ -855,7 +832,7 @@ fn hash_span(
 #[derive(Default)]
 struct LayoutMetrics {
     direct: bool,
-    /// A non-cached read failed and the file was read through the cache.
+
     direct_fallback: bool,
     attempted: bool,
     parse_elapsed: std::time::Duration,
@@ -866,9 +843,7 @@ struct LayoutMetrics {
     fallback_parts: usize,
 }
 
-/// Parses the archive layout through the hash reader, so the header read runs
-/// straight on into the payload instead of costing a second open and a second
-/// trip to the start of the file. `indexed_parts` must be in original order.
+/// Parse through the hash reader to avoid reopening the file; indexed parts must remain in original order.
 fn resolve_local_spans(
     format_id: &str,
     reader: &mut dyn foxy_formats::BufReadSeek,
@@ -954,8 +929,7 @@ mod tests {
                     name,
                     order as i64,
                 ),
-                // Remote offsets from another build of the archive; only the
-                // local layout can place these parts.
+                // Remote offsets cannot place parts in a locally changed archive.
                 remote_start: *start as u64 + 100,
                 remote_length: *len as u64,
                 remote_checksum: blake3::hash(&bytes[*start..*start + *len])
@@ -1018,7 +992,7 @@ mod tests {
         let bytes: Vec<u8> = (0..900_001usize).map(|i| (i * 7 + i / 13) as u8).collect();
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
-        // Out of order, one past the end, and a gap between 700_000 and 710_000.
+
         let spans = [
             (400_000usize, 300_000usize),
             (0, 131_072),
@@ -1198,8 +1172,6 @@ mod tests {
         assert_eq!(result.parts[1].local_length, 0);
     }
 
-    // ── PartHashProgress::mark_parts_done ───────────────────────────────
-
     fn progress_with_channel(
         total_parts: usize,
         total_files: usize,
@@ -1274,7 +1246,7 @@ mod tests {
         progress.mark_parts_done(300, 0);
         assert!(rx.try_recv().is_err());
         progress.mark_parts_done(300, 0);
-        // 600 crosses the 512 boundary.
+
         assert_eq!(recv_checked_parts(&mut rx), Some(600));
     }
 
@@ -1296,8 +1268,6 @@ mod tests {
             other => panic!("expected a progress event, got {other:?}"),
         }
     }
-
-    // ── calculate_part_hashes edge cases ────────────────────────────────
 
     #[tokio::test]
     async fn calculate_part_hashes_empty_parts_returns_empty() {

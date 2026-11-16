@@ -1,8 +1,3 @@
-//! Small immediate-mode charts for benchmark series: a time line chart with
-//! area fill and hover readout, and a horizontal bar chart for stage
-//! durations. Painted with the egui painter so the same code renders on
-//! screen and into the export screenshot.
-
 use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, TextStyle, Ui, Vec2,
     epaint::{Mesh, Vertex, WHITE_UV},
@@ -27,8 +22,6 @@ pub fn fmt_y(unit: YUnit, value: f64) -> String {
     }
 }
 
-/// A duration in the unit that keeps it readable: milliseconds under a
-/// second, seconds under a minute, else `m:ss`.
 pub fn fmt_duration(secs: f64) -> String {
     let secs = if secs.is_finite() { secs.max(0.0) } else { 0.0 };
     if secs < 0.0005 {
@@ -99,10 +92,9 @@ pub struct ChartSeries {
     pub label: String,
     pub color: Color32,
     pub style: SeriesStyle,
-    /// `[seconds, value]`, sorted by seconds.
+
     pub points: Vec<[f64; 2]>,
-    /// A running total rather than a rate: the mean is meaningless, only
-    /// the final value is reported.
+
     pub cumulative: bool,
 }
 
@@ -111,7 +103,6 @@ impl ChartSeries {
         self.points.iter().any(|point| point[1] > 0.0)
     }
 
-    /// Mean and maximum of the values, `None` for an empty series.
     pub fn stats(&self) -> Option<(f64, f64)> {
         if self.points.is_empty() {
             return None;
@@ -152,8 +143,6 @@ fn chart_fonts(ui: &Ui) -> (FontId, FontId) {
     (body, small)
 }
 
-/// A "nice" axis maximum a little above `max` so the top gridline has a
-/// round label.
 pub fn nice_axis_max(max: f64) -> f64 {
     if max <= 0.0 || !max.is_finite() {
         return 1.0;
@@ -174,8 +163,6 @@ pub fn nice_axis_max(max: f64) -> f64 {
     step * magnitude
 }
 
-/// `nice_axis_max` in the unit the axis labels use, so byte axes land on
-/// round binary multiples (5 GB rather than 4.66 GB).
 pub fn nice_axis_max_for(unit: YUnit, max: f64) -> f64 {
     match unit {
         YUnit::Bytes | YUnit::BytesPerSec if max >= 1024.0 => {
@@ -186,7 +173,6 @@ pub fn nice_axis_max_for(unit: YUnit, max: f64) -> f64 {
     }
 }
 
-/// Value of `series` at time `secs`, taken from the nearest sample.
 pub fn value_at(series: &ChartSeries, secs: f64) -> Option<f64> {
     if series.points.is_empty() {
         return None;
@@ -205,8 +191,6 @@ pub fn value_at(series: &ChartSeries, secs: f64) -> Option<f64> {
     Some(series.points[candidate][1])
 }
 
-/// Translucent band between the series line and the plot floor, built as a
-/// triangle strip so concave curves fill correctly.
 fn area_mesh(points: &[Pos2], floor: f32, color: Color32) -> Mesh {
     let mut mesh = Mesh::default();
     for point in points {
@@ -470,12 +454,10 @@ pub fn line_chart(
 #[derive(Clone, Debug)]
 pub struct BarRow {
     pub label: String,
-    /// One value per compared record, in legend order.
+
     pub values: Vec<f64>,
 }
 
-/// Share of `value` in the total of column `index` across `rows`, as a
-/// percentage; `None` when that column sums to zero.
 pub fn bar_share(rows: &[BarRow], index: usize, value: f64) -> Option<f64> {
     let total: f64 = rows
         .iter()

@@ -21,9 +21,7 @@ fn display(value: &Value) -> String {
         value.to_string()
     }
 }
-/// A numeric gate needs a finite number to judge. A missing, null, `na` or
-/// non-numeric value is a failure of its own rather than an implicit zero
-/// that would slip through a maximum or a zero minimum.
+/// Missing or non-finite metrics must fail numeric gates instead of becoming a passing zero.
 fn gated_number(actual: &Value) -> Result<f64, String> {
     match actual.as_f64() {
         Some(number) if number.is_finite() => Ok(number),
@@ -124,7 +122,7 @@ mod tests {
     #[test]
     fn missing_or_non_numeric_values_fail_numeric_gates() {
         let v = json!({"sol":"na","zero":0,"nan":null,"text":"x"});
-        // A maximum gate on a missing value used to pass as zero.
+
         assert_eq!(
             expectations(&v, &json!([{"path":"absent","max":10}])),
             ["absent expected a number, got missing"]
@@ -141,7 +139,7 @@ mod tests {
             expectations(&v, &json!([{"path":"nan","between":[0,1]}])).len(),
             1
         );
-        // An actual zero remains a valid number.
+
         assert!(
             expectations(
                 &v,
@@ -149,7 +147,7 @@ mod tests {
             )
             .is_empty()
         );
-        // `equals` on text needs no number.
+
         assert!(expectations(&v, &json!([{"path":"text","equals":"x"}])).is_empty());
         assert_eq!(thresholds(&v, &json!({"absent":{"max":1}})).len(), 1);
         assert_eq!(thresholds(&v, &json!({"sol":{"min":0.5}})).len(), 1);

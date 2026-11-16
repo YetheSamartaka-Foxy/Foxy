@@ -1,9 +1,4 @@
-//! Independent reference measurements (conventions/SPEED_OF_LIGHT.md, B1, B2,
-//! B4, B6): the origin's sustained body throughput and request latency, the
-//! repository volume's sequential read and write rates, and compute-only hash
-//! capacity. Each lane is an opaque, dated baseline the ledger rows cite by
-//! id, so a "calibrated estimate" ratio always names the measurement it was
-//! taken against.
+//! Calibration IDs pin independent machine/origin references so ratios remain reproducible.
 
 use crate::{fixture, guards};
 use anyhow::{Context, Result, ensure};
@@ -62,7 +57,6 @@ fn lane_id(lane: &str, measured_utc: &str, values: &Value) -> String {
     )
 }
 
-/// Median of a sample; `None` for an empty one.
 pub fn median(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -77,9 +71,7 @@ pub fn median(values: &[f64]) -> Option<f64> {
     })
 }
 
-/// Interval rates of a byte counter sampled at fixed ticks, as `bytes/s` per
-/// interval with the interval's true width; the first `ramp` seconds are
-/// dropped so a sustained figure is the plateau, not the ramp.
+/// Use true-width bytes/s intervals and exclude the ramp from sustained-rate estimates.
 pub fn interval_rates(samples: &[(f64, u64)], ramp_s: f64) -> Vec<f64> {
     samples
         .windows(2)
@@ -96,8 +88,6 @@ pub struct OriginFile {
     pub length: u64,
 }
 
-/// The origin's files, largest first, from the same manifest walk the oracle
-/// uses; only the top `limit` are kept.
 pub fn origin_files(address: &str, limit: usize) -> Result<Vec<OriginFile>> {
     let base = format!("{}/", address.trim_end_matches('/'));
     let client = reqwest::blocking::Client::builder()
@@ -135,10 +125,7 @@ pub fn origin_files(address: &str, limit: usize) -> Result<Vec<OriginFile>> {
     Ok(files)
 }
 
-/// B1: sustained body-byte throughput of the origin over `seconds`, at one
-/// connection and at Foxy's request budget, from 2 MiB range requests over
-/// the largest files. Rates are interval-correct; the sustained figure is the
-/// median plateau interval, the peak the best 500 ms window.
+/// Network references use interval-correct body rates; the sustained value is the plateau median, the peak a 500 ms window.
 pub fn network(address: &str, seconds: u64, connections: usize, chunk: u64) -> Result<Value> {
     let files = origin_files(address, 16)?;
     let single = range_load(&files, 1, chunk, seconds.min(10))?;
@@ -268,9 +255,7 @@ fn range_load(files: &[OriginFile], connections: usize, chunk: u64, seconds: u64
     }))
 }
 
-/// B4: connect time, a fresh request (new connection, full `repo.json` body)
-/// and a reused request on a kept-alive connection, each a median over
-/// several samples, in seconds.
+/// Latency references are separate medians for connection, fresh request and reused request, in seconds.
 pub fn latency(address: &str, samples: usize) -> Result<Value> {
     let base = format!("{}/", address.trim_end_matches('/'));
     let url = reqwest::Url::parse(&base)?;
@@ -325,9 +310,7 @@ pub fn latency(address: &str, samples: usize) -> Result<Value> {
     }))
 }
 
-/// B4 for any origin, the exact URL included: plain HTTP or HTTPS (the
-/// handshake lands in the fresh request), one entry per host so a multi-host
-/// startup graph can cite a reference per branch.
+/// Keep per-origin latency references; HTTPS handshake cost belongs in fresh requests, not reused requests.
 pub fn host_latency(url: &str, samples: usize) -> Result<Value> {
     let parsed = reqwest::Url::parse(url)?;
     let host = parsed.host_str().context("URL has no host")?;
@@ -387,9 +370,7 @@ pub fn host_latency(url: &str, samples: usize) -> Result<Value> {
     }))
 }
 
-/// B2/B3: sequential write with a durable flush, an unbuffered sequential
-/// read (page cache bypassed, so the device answers) and a buffered re-read
-/// (page cache) of one `mib` MiB file beside the repository path.
+/// Disk references separate durable writes, unbuffered device reads and buffered page-cache reads.
 pub fn disk(repository_path: &Path, mib: u64) -> Result<Value> {
     ensure!(mib >= 64, "Disk calibration needs at least 64 MiB");
     let parent = repository_path
@@ -417,9 +398,7 @@ fn disk_lanes(file: &Path, bytes: u64) -> Result<Value> {
         .collect();
     let write_s = write_lane(file, bytes, &pattern)?;
     let threads = thread::available_parallelism().map_or(1, |n| n.get());
-    // The warm re-reads come first, while the written pages are still cached;
-    // the unbuffered reads bypass the cache whatever its state. The parallel
-    // lanes are the references for a hash pass, which reads with many workers.
+    // Measure warm rereads before cache eviction; unbuffered reads bypass cache and parallel lanes model hash fan-out.
     let warm_s = read_lane(file, bytes, block, 1, false, false)?;
     let warm_parallel_s = read_lane(file, bytes, block, threads, false, false)?;
     let unbuffered_s = read_lane(file, bytes, block, 1, true, false)?;
@@ -520,10 +499,7 @@ fn block_order(blocks: u64, random: bool) -> Vec<u64> {
     order
 }
 
-/// Read the whole file with `threads` workers over disjoint block-aligned
-/// ranges (positioned reads, no shared cursor), buffered or bypassing the
-/// page cache; the wall time in seconds. Unbuffered reads are only available
-/// on Windows and report `None` elsewhere.
+/// Unbuffered parallel reads require Windows; unsupported platforms return None rather than a cached substitute.
 fn read_lane(
     file: &Path,
     bytes: u64,
@@ -608,9 +584,7 @@ fn positioned_read(file: &fs::File, buffer: &mut [u8], offset: u64) -> Result<us
     use std::os::unix::fs::FileExt;
     Ok(file.read_at(buffer, offset)?)
 }
-/// B6: compute-only hash capacity over an in-memory buffer, one thread and
-/// every core, for BLAKE3 and MD5. No file is read, so this is the CPU term
-/// of the hash bound, never the read term.
+/// Compute-only hashing must read no files, keeping CPU capacity independent of storage throughput.
 pub fn hash(mib: u64) -> Result<Value> {
     ensure!(mib >= 16, "Hash calibration needs at least 16 MiB");
     let bytes = (mib * 1024 * 1024) as usize;
@@ -651,11 +625,7 @@ pub fn hash(mib: u64) -> Result<Value> {
     }))
 }
 
-/// B5: metadata enumeration rate of the case's repository tree, the way the
-/// quick scan walks an addon (`read_dir`, file type, metadata per entry):
-/// entries per second on a first pass and on an immediate second pass, so a
-/// warm quick scan has a matched reference and a cold one an honest lower
-/// rate. The first pass is only cold when nothing touched the tree before.
+/// A first metadata pass is cold only if nothing previously touched the tree; retain separate first/warm references.
 pub fn metadata(repository_path: &Path) -> Result<Value> {
     ensure!(
         repository_path.is_dir(),
@@ -707,11 +677,7 @@ fn walk(root: &Path) -> Result<(u64, u64, u64)> {
     Ok((entries, directories, bytes))
 }
 
-/// DB: the Turso workload reference for O7 on the case's volume: `rows`
-/// part rows inserted into a `subfiles`-shaped table with its unique index,
-/// in batches of 256 rows per transaction at `synchronous=NORMAL`, then one
-/// scoped delete and a checkpoint. Uncontended (one writer), so it is the
-/// gate-1 reference the `db_persist` windows are read against.
+/// DB calibration is an uncontended single-writer, synchronous=NORMAL reference; use it only for gate-1 persistence.
 pub fn db(repository_path: &Path, rows: u64) -> Result<Value> {
     let parent = repository_path
         .parent()
@@ -867,8 +833,6 @@ async fn db_workload(file: &Path, rows: u64) -> Result<Value> {
     }))
 }
 
-/// Run the requested lanes for a case and merge them into the calibration
-/// file, each stamped with an id, the time and the environment fingerprint.
 pub fn execute(root: &Path, options: &Options) -> Result<Value> {
     let header: Value = serde_json::from_slice(&fs::read(&options.case)?)?;
     let address = header["repository"]["address"]

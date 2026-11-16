@@ -1,14 +1,4 @@
-//! Content-defined part boundaries for files no container format describes.
-//!
-//! Fixed-size parts stop matching after the first inserted or removed byte,
-//! because every later boundary moves. A boundary chosen from the bytes around
-//! it moves with the content instead, so a rebuilt game executable or data
-//! archive keeps most of its parts and a client only downloads the ones that
-//! changed. This is a gear-hash chunker with normalized chunking (FastCDC).
-//!
-//! The table, masks, and sizes are part of what a published manifest means:
-//! changing any of them moves every boundary, and the next publish re-sends
-//! whole files to every client.
+//! FastCDC parameters are part of the published part layout; changing them invalidates existing boundaries.
 
 pub const CONTENT_CHUNK_MIN_SIZE: u64 = 256 * 1024;
 pub const CONTENT_CHUNK_AVG_SIZE: u64 = 1024 * 1024;
@@ -52,9 +42,7 @@ impl ContentChunker {
         Self::default()
     }
 
-    /// Scan the next bytes of the file. Returns the length of the prefix of
-    /// `data` that completes the current part, after which the chunker starts
-    /// a new part; `None` when all of `data` belongs to the current part.
+    /// Returns the prefix length completing the current part and starts the next; None means all input fits the current part.
     pub fn find_boundary(&mut self, data: &[u8]) -> Option<usize> {
         let mut index = 0;
         while index < data.len() {

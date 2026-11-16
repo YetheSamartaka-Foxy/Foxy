@@ -82,6 +82,10 @@ pub fn foxy_data_dir() -> PathBuf {
     PathBuf::from(".")
 }
 
+pub fn configured_data_dir() -> PathBuf {
+    override_data_dir().unwrap_or_else(|| platform_config_base_dir().join(APP_DIR_NAME))
+}
+
 pub fn foxy_logs_dir() -> PathBuf {
     let mut logs_dir = foxy_data_dir();
     logs_dir.push("logs");
@@ -126,7 +130,6 @@ pub fn foxy_patches_dir() -> PathBuf {
             }
         }
 
-        // Fallback to user cache directory
         let mut cache_dir = foxy_data_dir();
         cache_dir.push("cache");
         cache_dir.push("patches");
@@ -145,7 +148,6 @@ pub fn foxy_patches_dir() -> PathBuf {
         }
     }
 
-    // Final fallback
     let mut fallback = foxy_data_dir();
     fallback.push("patches");
     if ensure_directory(&fallback, "fallback patches") {
@@ -155,10 +157,7 @@ pub fn foxy_patches_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
-/// Delta-patch artifacts of the active game space. They are named by the space
-/// database's file ids, so each space folder (and each separate data root) gets
-/// its own directory; in a shared one a download in one space deleted or reused
-/// another space's prepared plans.
+/// Patch artifacts use database file IDs, so each game space/data root needs its own directory.
 pub fn foxy_patch_artifacts_dir() -> PathBuf {
     let base = foxy_large_payload_dir();
     let space_dir = crate::core::game::spaces::active_game_space_dir();
@@ -190,7 +189,6 @@ pub fn foxy_large_payload_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
-/// On Unix, set directory permissions to 0700 (owner-only access).
 #[cfg(target_os = "linux")]
 fn ensure_directory_permissions(path: &PathBuf) {
     use std::os::unix::fs::PermissionsExt;

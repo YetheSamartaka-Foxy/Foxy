@@ -86,9 +86,7 @@ pub struct ActivationSummary {
     pub skipped_disabled: usize,
 }
 
-/// Entry ids and payload names become path components under the managed
-/// store, so a hand-edited or imported store must never carry one that can
-/// escape it.
+/// Imported entry IDs and payload names become path components; they must never escape the managed store.
 pub fn validate_entry(entry: &ExtraFileEntry) -> Result<(), String> {
     if !is_safe_child_path(&entry.id) || entry.id.contains(['/', '\\']) {
         return Err(format!("Unsafe extra-file id {}", entry.id));
@@ -537,9 +535,6 @@ pub(crate) fn layer_review_signature(conflicts: &[LayerConflict]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-/// Turn a raw OS write failure into something the user can act on when the
-/// cause is that the destination simply is not writable by this account. Only
-/// probed on the failure path so a normal launch does no extra filesystem work.
 fn explain_unwritable_destination(destination_dir: &Path, err: String) -> String {
     if crate::core::utils::fs_safety::destination_is_writable(destination_dir) {
         return err;
@@ -552,12 +547,8 @@ fn explain_unwritable_destination(destination_dir: &Path, err: String) -> String
     )
 }
 
-/// Expand `{game_dir}` and require an absolute result so a pack made on
-/// another machine can never scribble relative to the working directory.
-///
-/// `..` is rejected outright rather than resolved: the containment checks below
-/// compare path text, and a destination that walks out of a guarded root and
-/// back in would otherwise slip past them.
+/// Expand `{game_dir}` and require an absolute destination. Reject `..` because
+/// textual containment checks cannot safely resolve paths that leave and re-enter a root.
 pub fn resolve_destination(destination: &str, game_dir: &str) -> Result<PathBuf, String> {
     let destination = destination.trim();
     if destination.is_empty() {
@@ -582,8 +573,7 @@ pub fn resolve_destination(destination: &str, game_dir: &str) -> Result<PathBuf,
     Ok(path)
 }
 
-/// Reject any `..` path component. Checked on the raw text (not on a
-/// canonicalized path) because the destination usually does not exist yet.
+/// Validate traversal on raw text: a destination may not exist yet and cannot be canonicalized safely.
 fn reject_parent_traversal(path: &str) -> Result<(), String> {
     if path.split(['/', '\\']).any(|component| component == "..") {
         return Err("Destination must not contain a `..` path component".to_string());
@@ -811,7 +801,7 @@ mod tests {
         assert!(add_entry(space.path(), "Relative", &source, "relative/path", true).is_err());
         let store_dest = payload_dir(space.path(), "self").display().to_string();
         assert!(add_entry(space.path(), "Loop", &source, &store_dest, true).is_err());
-        // {game_dir} destinations are accepted without being absolute yet.
+
         assert!(
             add_entry(
                 space.path(),
@@ -824,10 +814,6 @@ mod tests {
         );
     }
 
-    /// `path_is_within` compares path text, so a destination that walks out of
-    /// a guarded root and back in would defeat both containment checks. `..` is
-    /// therefore refused at add time and again at activation time (imported
-    /// packs never went through add-time validation).
     #[test]
     fn parent_traversal_destinations_are_refused() {
         let space = tempfile::tempdir().expect("space dir");
@@ -846,7 +832,7 @@ mod tests {
         assert!(add_entry(space.path(), "Escape", &source, &escape, true).is_err());
         assert!(resolve_destination(&escape, "").is_err());
         assert!(resolve_destination("{game_dir}/../../evil.cfg", "C:/Games/X").is_err());
-        // The same shape without `..` is still accepted.
+
         assert!(resolve_destination("{game_dir}/userconfig/a.cfg", "C:/Games/X").is_ok());
     }
 
@@ -865,8 +851,6 @@ mod tests {
         )
         .expect("add");
 
-        // Simulate an imported pack rewriting the destination after add-time
-        // validation already ran.
         let mut store = load_store(space.path()).expect("store");
         store.entries[0].destination = work
             .path()
@@ -1027,8 +1011,6 @@ mod tests {
         let inside = space.path().join("database.db").display().to_string();
         assert!(add_entry(space.path(), "Bad", &source, &inside, true).is_err());
 
-        // A store that carries such a destination anyway (e.g. from an
-        // imported pack) must fail activation instead of overwriting state.
         let store = ExtraFilesFile {
             entries: vec![ExtraFileEntry {
                 id: "bad".to_string(),

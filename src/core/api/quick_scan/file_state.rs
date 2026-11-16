@@ -22,7 +22,6 @@ pub(super) struct AddonFolderState {
     pub(super) read_error: Option<String>,
 }
 
-/// Probe using a fingerprint the caller already walked.
 pub(super) fn probe_addon_folder_state_with_fingerprint(
     path: &str,
     fingerprint: &AddonRootFingerprint,

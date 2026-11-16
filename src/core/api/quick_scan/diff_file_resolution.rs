@@ -54,17 +54,6 @@ fn inferred_patch_bytes_from_part_stats(
     }
 }
 
-/// Whether a mismatched file must be tree-hashed again before it is reported.
-/// Only disk drift (the stored content fingerprint no longer matches, or was
-/// never recorded), a tree hash that never ran, or a part layout no hash ever
-/// described justify re-reading the file; a tree mismatch with an unchanged
-/// fingerprint is a confirmed pending update whose stored part state is still a
-/// true description of the local file. Parts a manifest update left without
-/// local state give the delta planner nothing to copy from, so one local read
-/// beats a full download.
-/// An outdated file whose size differs is fingerprinted only when its last tree
-/// hash stored a fingerprint to compare with; an unchanged one is then not read
-/// again on every scan, and a file with no baseline costs no sample reads.
 fn fingerprint_resized_file(exists: bool, stored_content_hash: &str) -> bool {
     exists && !stored_content_hash.is_empty()
 }
@@ -82,21 +71,12 @@ fn part_state_incomplete(stats: PartChangeStats) -> bool {
     stats.total_parts > 0 && stats.missing_local_checksums > 0
 }
 
-/// A tree hash gives every part that fits inside the local file a local
-/// checksum, read at the entry's local span or else at the remote one, so a
-/// part left without one after a hash lies past the end of the file. An
-/// unhashed part that does fit is state a manifest update lost, and one read
-/// restores it; a file whose unhashed parts all lie past its end (an outdated
-/// file the update grew) would hash to the same state again, so re-reading it
-/// on every scan would buy nothing.
+/// Rehash to recover part state lost by a manifest re-key. Parts beyond local
+/// EOF remain unhashed, so this trigger converges after one read.
 fn unhashed_part_readable(first_unhashed_part_end: u64, local_length: u64) -> bool {
     first_unhashed_part_end <= local_length
 }
 
-/// Outdated files present on disk whose part state a tree hash would extend.
-/// The unhashed-part lookup runs only for files with some part lacking local
-/// state, so a scan of files that are absent or fully described costs no extra
-/// query.
 async fn files_with_recoverable_part_state(
     db: &FoxyDb,
     files_by_id: &HashMap<i64, FoxyModFile>,
@@ -160,7 +140,6 @@ pub(super) async fn compute_file_diffs(
     let db = context.db();
     let chunk_size = read_chunk_ids();
 
-    // Determine which mods need file metadata
     let mut mods_requiring_file_metadata: HashSet<i64> = HashSet::new();
     mods_requiring_file_metadata.extend(addon_hash.deep_scan_mod_ids.iter().copied());
     mods_requiring_file_metadata.extend(addon_hash.mods_with_tree_mismatch.iter().copied());
@@ -755,8 +734,6 @@ mod tests {
 
     #[test]
     fn outdated_file_with_unchanged_fingerprint_is_not_reverified() {
-        // Tree mismatch, stored fingerprint equals the current one: reported from
-        // stored checksums, no disk read.
         assert!(!file_needs_tree_verify(true, false, false, false));
     }
 
@@ -800,10 +777,7 @@ mod tests {
         assert!(!part_state_incomplete(stats(0, 0)));
     }
 
-    /// Part rows a manifest update re-keyed lose their local state while the
-    /// rows that kept their key do not, so a partly described file must still
-    /// be recovered; a file whose unhashed parts all lie past its end has
-    /// already been hashed as far as it can be.
+    /// Rehash partial local part state after manifest re-keying; parts beyond EOF cannot be read.
     #[tokio::test]
     async fn partly_lost_part_state_is_recovered_and_a_grown_file_is_not_reread() {
         let dir = tempfile::tempdir().unwrap();
@@ -879,8 +853,6 @@ mod tests {
         assert!(!is_stale_tree_only_file_diff(true, true, false, true, 0, 0));
     }
 
-    // ── inferred_patch_bytes_from_part_stats: additional ────────────────
-
     #[test]
     fn inferred_patch_bytes_no_parts_returns_full_size() {
         let stats = PartChangeStats {
@@ -905,7 +877,7 @@ mod tests {
             total_parts: 4,
             missing_local_checksums: 0,
         };
-        // changed + missing = 600 but the file is only 500 bytes.
+
         assert_eq!(inferred_patch_bytes_from_part_stats(stats, 500, true), 500);
     }
 
@@ -918,7 +890,7 @@ mod tests {
             total_parts: 5,
             missing_local_checksums: 1,
         };
-        // No tree mismatch, but missing_local_checksums > 0 still implies a delta.
+
         assert_eq!(inferred_patch_bytes_from_part_stats(stats, 100, false), 40);
     }
 
@@ -933,8 +905,6 @@ mod tests {
         };
         assert_eq!(inferred_patch_bytes_from_part_stats(stats, 100, false), 100);
     }
-
-    // ── is_stale_tree_only_file_diff: additional ────────────────────────
 
     #[test]
     fn stale_tree_only_false_when_file_missing() {

@@ -1,9 +1,4 @@
-//! Recording of user-triggered repository actions into saved benchmarks.
-//!
-//! An entry point arms a capture right before it starts a sync; the capture
-//! samples the live progress state once a second; when the sync reports, the
-//! capture becomes a draft the user can save from a modal. Saving slices the
-//! log, describes the machine and writes the folder on a worker thread.
+//! Capture user-triggered repository actions once per second, then offer the completed record for saving.
 
 mod prompt;
 mod save;
@@ -27,7 +22,6 @@ pub use save::BenchmarkWorkerResult;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Set by a user-facing entry point just before it starts the sync.
 #[derive(Clone, Debug)]
 pub struct BenchmarkArm {
     pub kind: BenchmarkKind,
@@ -47,9 +41,9 @@ pub struct BenchmarkCapture {
     pub last_cpu_percent: f64,
     pub last_disk_write_bps: f64,
     pub last_telemetry_memory: u64,
-    /// Process CPU time at the previous sample, so every capture kind records CPU.
+
     pub last_cpu_time: Option<Duration>,
-    /// Process user and kernel CPU time when the capture started.
+
     pub cpu_at_start: Option<(Duration, Duration)>,
     /// Highest hash counters reported, for the closing sample: the last files
     /// of a pass can finish between two once-a-second samples.
@@ -73,7 +67,6 @@ impl HashCounters {
     }
 }
 
-/// A finished capture waiting for the user's decision in the save modal.
 #[derive(Clone, Debug)]
 pub struct BenchmarkDraft {
     pub record: BenchmarkRecord,
@@ -123,9 +116,7 @@ pub enum BenchmarkOutcomeFilter {
     Failed,
 }
 
-/// Export renders one chart at a time in a window, waits a few frames for
-/// it to lay out, asks the viewport for a screenshot and crops the chart out
-/// of it; one chart per pass so every chart fits on screen.
+/// Render and capture one chart per window pass so each chart fits the screenshot viewport.
 pub struct BenchmarkExportJob {
     pub id: String,
     pub dest: std::path::PathBuf,
@@ -149,7 +140,7 @@ pub struct BenchmarksViewState {
     pub favourites_only: bool,
     pub show_hidden: bool,
     pub expanded: HashSet<String>,
-    /// Up to two ids picked for the comparison view, in pick order.
+
     pub selected: Vec<String>,
     /// Compare the older start as A regardless of pick order.
     pub compare_by_date: bool,
@@ -197,7 +188,6 @@ impl BenchmarksViewState {
         self.records.iter_mut().find(|record| record.id == id)
     }
 
-    /// Ids of the records that pass the search, filters and sort, in order.
     pub fn visible_ids(&self) -> Vec<String> {
         let needle = self.search.trim().to_lowercase();
         let mut visible: Vec<&BenchmarkRecord> = self
@@ -243,7 +233,6 @@ impl BenchmarksViewState {
             .collect()
     }
 
-    /// Distinct repositories among all records, for the repository filter.
     pub fn repositories(&self) -> Vec<(String, String)> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
@@ -273,7 +262,6 @@ impl BenchmarksViewState {
         }
     }
 
-    /// Selected ids as A then B.
     pub fn compare_order(&self) -> Vec<String> {
         let picked: Vec<(&str, i64)> = self
             .selected
@@ -310,8 +298,6 @@ impl BenchmarksViewState {
     }
 }
 
-/// `picked` is (id, started_at) in pick order; `by_date` puts the older start
-/// first, keeping pick order for equal starts.
 fn compare_order(picked: &[(&str, i64)], by_date: bool) -> Vec<String> {
     let mut order = picked.to_vec();
     if by_date {
@@ -333,8 +319,7 @@ impl Default for BenchmarkChannels {
 }
 
 impl Foxy {
-    /// Mark the next sync start as a benchmarkable user action. Ignored while
-    /// the benchmarks setting is off, so entry points call it unconditionally.
+    /// Arm the next sync for capture; callers may invoke this when benchmarks are disabled.
     pub(crate) fn arm_benchmark(&mut self, kind: BenchmarkKind, addons: Vec<String>) {
         if !self.settings_view_state.benchmarks_enabled {
             return;
@@ -342,8 +327,7 @@ impl Foxy {
         self.benchmark_armed = Some(BenchmarkArm { kind, addons });
     }
 
-    /// Called by the sync starter right before it spawns the worker, with the
-    /// arm it took at entry so a refused start cannot leak it to a later sync.
+    /// Consume the arm at sync dispatch so a refused start cannot capture a later sync.
     pub(crate) fn begin_benchmark_capture(&mut self, arm: Option<BenchmarkArm>, repo_idx: usize) {
         let Some(arm) = arm else {
             return;
@@ -379,7 +363,6 @@ impl Foxy {
         );
     }
 
-    /// Feed a progress event into the running capture.
     pub(crate) fn benchmark_observe_event(&mut self, event: &ProgressEvent) {
         let Some(capture) = self.benchmark_capture.as_mut() else {
             return;
@@ -424,7 +407,6 @@ impl Foxy {
         }
     }
 
-    /// Once-a-second sample of the live progress state while a capture runs.
     pub(crate) fn tick_benchmark_capture(&mut self, ctx: &egui::Context) {
         let Some(capture) = self.benchmark_capture.as_ref() else {
             return;
@@ -486,8 +468,7 @@ impl Foxy {
         ctx.request_repaint_after(SAMPLE_INTERVAL);
     }
 
-    /// Turn the running capture into a draft when the sync reports. Cancelled
-    /// runs are dropped; anything else is offered for saving.
+    /// Offer completed captures for saving and discard cancelled runs.
     pub(crate) fn benchmark_finish_capture(
         &mut self,
         event: &ProgressEvent,
@@ -677,8 +658,11 @@ impl Foxy {
             "Loaded {} saved benchmarks",
             self.benchmarks_view.records.len()
         );
+        if self.capture_worker_scope().is_none() {
+            return;
+        }
         let records = self.benchmarks_view.records.clone();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             save::run_blocking(async move {
                 match crate::core::benchmarks::index::reconcile(&records).await {
                     Ok(removed) if removed > 0 => {
@@ -689,6 +673,7 @@ impl Foxy {
                 }
             });
         });
+        self.benchmark_workers.push(handle);
     }
 
     pub(crate) fn reload_benchmarks(&mut self) {

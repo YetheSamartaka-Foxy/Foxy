@@ -26,9 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 
-/// Checksum written by the addon upsert. An enabled addon's published value is
-/// stored only after its manifest is applied, so a crash leaves the previous
-/// checksum and the next refresh still fetches the addon.
+/// Store an enabled addon's checksum after applying its manifest so interruption leaves the prior value stale.
 pub(crate) fn addon_remote_checksum_for_upsert(
     previous: Option<&str>,
     published: &str,
@@ -158,14 +156,12 @@ async fn load_mod_remote_graph_states(
     states
 }
 
-/// Load existing addon rows for the given (remote_path, local_path) identity pairs,
-/// keyed by `"{remote_path}|{local_path}"`. Chunked to stay under the SQLite bind limit.
 async fn load_existing_mods_by_identity(
     db: &FoxyDb,
     parsed_mods: &[ParsedMod],
 ) -> HashMap<String, FoxyMod> {
     let mut map: HashMap<String, FoxyMod> = HashMap::new();
-    // Each pair uses two bind params; keep below the SQLite bind limit.
+
     let chunk_size = (SQLITE_MAX_VARIABLES / 2).saturating_sub(4).max(1);
     let mut idx = 0;
     while idx < parsed_mods.len() {
@@ -220,7 +216,7 @@ pub(super) async fn process_mods_upsert(
                 .to_string();
 
             if mod_name.is_empty() {
-                return None; // Skip if mod_name is empty
+                return None;
             }
 
             let enabled = mod_data
@@ -268,11 +264,9 @@ pub(super) async fn process_mods_upsert(
 
     let db = context.db();
 
-    // Prefetch existing mods to preserve local checksums and reuse after upsert
     let existing_mods: HashMap<String, FoxyMod> =
         load_existing_mods_by_identity(&db, &parsed_mods).await;
 
-    // Single batched upsert instead of per-row insert + fetch
     let previous_mods_by_key = existing_mods.clone();
     {
         let build_values = || -> Vec<DbValue> {
@@ -340,7 +334,6 @@ pub(super) async fn process_mods_upsert(
         }
     }
 
-    // Reuse prefetched models when no new mods were added; re-query only for new IDs
     let has_new_mods = parsed_mods
         .iter()
         .any(|m| !existing_mods.contains_key(&m.key));
@@ -350,8 +343,7 @@ pub(super) async fn process_mods_upsert(
     } else {
         existing_mods
     };
-    // The database still holds the previous checksum. The in-memory model
-    // carries the published one so this refresh can tell that the addon changed.
+
     for m in &parsed_mods {
         if let Some(existing) = mods_by_key.get_mut(&m.key) {
             existing.remote_checksum = m.checksum.clone();
@@ -446,7 +438,6 @@ pub(super) async fn process_mods_upsert(
     let graph_states =
         load_mod_remote_graph_states(&db, &resolved_mod_ids, &existing_repo_linked_mod_ids).await;
 
-    // Process mods
     let mod_limit = mod_task_limit();
     let mod_semaphore = Arc::new(Semaphore::new(mod_limit));
     let fetch_semaphore = Arc::new(Semaphore::new(MANIFEST_FETCH_CONCURRENCY));
@@ -471,8 +462,8 @@ pub(super) async fn process_mods_upsert(
             .unwrap_or_default();
         tasks.push(tokio::spawn(async move {
             let _permit = fetch_semaphore.acquire_owned().await.ok();
-            // Last in each condition: a cold lookup on a hard disk costs a seek, and
-            // a fresh rebuild fails the cheaper terms first.
+
+
             let mut exists = None;
             let mut local_mod_exists = || {
                 *exists.get_or_insert_with(|| {
@@ -558,8 +549,6 @@ pub(super) async fn process_mods_upsert(
                 take(task.await);
             }
         } else {
-            // Every manifest fetched so far forms the group; the rest keep
-            // downloading while it is written.
             if let Some(result) = pending.next().await {
                 take(result);
             }

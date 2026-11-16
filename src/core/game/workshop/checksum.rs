@@ -10,9 +10,7 @@ const CHECKSUM_DOMAIN: &str = "foxy-state-checksum/v1";
 const SHORT_CHECKSUM_LEN: usize = 8;
 const UNPINNED_VERSION: &str = "latest";
 
-/// One mod as it contributes to the state checksum. `version` is the frozen
-/// content hash when the item is pinned, the Workshop update timestamp when it
-/// is not, and `latest` when neither is known.
+/// Version identity is the frozen hash, otherwise Workshop update time, otherwise latest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChecksumMod {
     pub item_id: String,
@@ -27,7 +25,6 @@ pub struct ChecksumMod {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateChecksum {
-    /// Short display form, the value two players read out to each other.
     pub checksum: String,
     /// Full hash, kept so a diff can tell "same short code" from "same state".
     pub full: String,
@@ -139,9 +136,7 @@ pub struct ChecksumVersionMismatch {
     pub title: Option<String>,
     pub local_version: String,
     pub remote_version: String,
-    /// Which side pinned the mod. `remote_pinned` without `local_pinned` is the
-    /// common case worth surfacing: the other player froze a build Steam no
-    /// longer serves, so only their bundle can reproduce it.
+    /// A remote pin may name a revision Steam no longer serves; only that player's bundle can reproduce it.
     #[serde(default)]
     pub local_pinned: bool,
     #[serde(default)]
@@ -153,9 +148,9 @@ pub struct StateChecksumDiff {
     pub matches: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game_build_mismatch: Option<(String, String)>,
-    /// Enabled remotely but not locally.
+
     pub missing_mods: Vec<ChecksumMod>,
-    /// Enabled locally but not remotely.
+
     pub extra_mods: Vec<ChecksumMod>,
     pub version_mismatches: Vec<ChecksumVersionMismatch>,
     pub load_order_differs: bool,

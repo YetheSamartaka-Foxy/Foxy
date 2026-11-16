@@ -8,9 +8,7 @@ const LOCAL_PREFIX: &str = "local:";
 const VERSION_SEPARATOR: char = '@';
 const LOAD_ORDER_SEPARATOR: char = ';';
 
-/// One entry of a shared mod list. The wire format is the pipe-separated code
-/// players paste to each other; `version` is a Foxy extension that pins the
-/// exact frozen snapshot a friend was running.
+/// Pipe-separated share entries use Foxy's optional version extension to identify an exact frozen snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedItem {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -175,7 +173,6 @@ fn render_share_entry(item: &SharedItem, options: ShareCodeOptions) -> String {
     entry
 }
 
-/// The managed items of one app, in launch order, as shareable entries.
 pub fn shared_items_from_store(
     store: &WorkshopFile,
     app_id: u32,
@@ -199,15 +196,12 @@ pub fn shared_items_from_store(
         .collect()
 }
 
-/// How a pasted share code differs from what this space has enabled. Drives the
-/// "what do I still need" answer both the GUI and a future CLI diff report.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShareComparison {
-    /// In the pasted code but not enabled here.
     pub missing: Vec<SharedItem>,
-    /// Enabled here but not in the pasted code.
+
     pub extra: Vec<SharedItem>,
-    /// Named in the pasted code without a Workshop id, so Foxy cannot fetch it.
+
     pub unresolvable: Vec<SharedItem>,
     /// Both sides carry the same mods but hand them to the game in a different
     /// order, which changes which mod wins a conflict.

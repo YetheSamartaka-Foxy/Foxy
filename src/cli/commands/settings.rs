@@ -57,6 +57,11 @@ fn cmd_settings_set(
 ) -> Result<CommandSuccess, CommandError> {
     let mut changed = false;
 
+    if let Some(mode) = args.app_mode {
+        state.settings.app_mode = mode.into();
+        changed = true;
+    }
+
     if let Some(v) = args.show_debug_windows {
         state.settings.show_debug_windows = v;
         changed = true;
@@ -457,4 +462,44 @@ fn parse_additional_folder_alias_assignment(input: &str) -> Result<(String, Stri
     }
 
     Ok((path, alias))
+}
+
+#[cfg(test)]
+mod app_mode_tests {
+    use super::*;
+    use crate::cli::args::CliCommand;
+    use crate::core::app_mode::AppMode;
+    use clap::Parser;
+
+    #[test]
+    fn app_mode_dry_run_preserves_other_settings() {
+        let mut cli = CliArgs::try_parse_from([
+            "foxy",
+            "--dry-run",
+            "settings",
+            "set",
+            "--app-mode",
+            "server",
+        ])
+        .unwrap();
+        let Some(CliCommand::Settings { command }) = cli.command.take() else {
+            panic!("expected settings")
+        };
+        let SettingsCommand::Set(args) = *command else {
+            panic!("expected set")
+        };
+        let mut state = AppState {
+            settings: crate::ui::types::SettingsViewState {
+                show_activity_log: true,
+                ..Default::default()
+            },
+            repositories: Vec::new(),
+            spaces: Vec::new(),
+        };
+        let result = cmd_settings_set(&cli, &mut state, *args).unwrap();
+        assert_eq!(result.data["dry_run"], true);
+        assert_eq!(result.data["settings"]["app_mode"], "server");
+        assert!(state.settings.show_activity_log);
+        assert_eq!(state.settings.app_mode, AppMode::Server);
+    }
 }

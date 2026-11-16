@@ -2,8 +2,6 @@ use anyhow::{Context, Result, bail, ensure};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Pending-update folder key. Matches `content_hash::normalize_path`: slashes,
-/// no trailing slash, and lowercase on Windows.
 pub fn normalize_local_path(path: &str) -> String {
     let mut normalized = path.replace('\\', "/");
     while normalized.ends_with('/') {

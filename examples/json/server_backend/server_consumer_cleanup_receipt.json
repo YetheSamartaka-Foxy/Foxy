@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "consumer_fingerprint": "204b831e5516d544edfbe4fd608dcba87276573a1c8c88fde4a2a04d324cc93e",
+  "consumer": {
+    "schema_version": 2,
+    "installation_key": "v1_0000000000000001_00000000000000000000000000000002",
+    "session": {
+      "owner_id": "owner_previous",
+      "owner_generation": 3,
+      "game_space_id": "alpha",
+      "instance_id": "server_00000000000000000000000000000001",
+      "operation_id": "op_previous",
+      "run_generation": 4
+    },
+    "cleanup": {
+      "receipt_id": "00000000000000000000000000000001",
+      "group_id": "server_00000000000000000000000000000001",
+      "context_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "observation": {
+    "backend": "linux_pid_namespace",
+    "owner_exit_observed": true,
+    "tree_exited": true
+  }
+}

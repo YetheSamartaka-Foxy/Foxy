@@ -253,7 +253,6 @@ pub const DEFINITIONS: &[(&str, bool, f64)] = &[
     ("elapsed_s", false, 0.12),
     ("download.sol", true, 0.08),
     ("download.actual_bps", true, 0.08),
-    // Calibrated estimates against the references the row cites.
     ("download.sol_calibrated", true, 0.08),
     ("hash.sol_calibrated", true, 0.08),
     ("startup_probe.sol_calibrated", true, 0.08),
@@ -264,14 +263,12 @@ pub const DEFINITIONS: &[(&str, bool, f64)] = &[
     // only the last run, one arbitrary page-cache batch on a download row.
     ("breakdown.run_metrics.hash_total_s", false, 0.12),
     ("quick_scan.actual_s", false, 0.12),
-    // Complete-action records (O5, O6 and the pipeline exit itself).
     ("remote_refresh.actual_s", false, 0.12),
     ("sync_action.actual_s", false, 0.12),
     ("summary.total_ms", false, 0.12),
     ("summary.download_stage_ms", false, 0.12),
     ("summary.hash_stage_ms", false, 0.12),
     ("summary.cancel_quiescent_ms", false, 0.12),
-    // Frame probe beside the operation: the worst frame interval the app saw.
     ("summary.ui_probe.frame_ms_max", false, 0.25),
     ("summary.ui_probe.frame_ms_p95_worst", false, 0.25),
     ("download.ramp_s", false, 0.25),
@@ -281,13 +278,10 @@ pub const DEFINITIONS: &[(&str, bool, f64)] = &[
     ("database.permit_wait_ms", false, 0.12),
     ("database.write_retries", false, 0.0),
     ("database.purge_txn_s", false, 0.12),
-    // Footprint moves in steps, not in percent, so it gets a looser band than
-    // wall clock: a 10% commit swing is ordinary allocator behaviour, and a
-    // real regression clears it easily.
+    // Allocator commit varies in steps; footprint needs a looser noise band than wall time.
     ("memory.peak_private_bytes", false, 0.15),
     ("memory.retained_private_bytes", false, 0.15),
     ("memory.growth_private_bytes", false, 0.5),
-    // Process CPU seconds over the operation, sampled beside the footprint.
     ("memory.cpu_s", false, 0.15),
 ];
 const COUNTERS: &[&str] = &[
@@ -298,10 +292,7 @@ const COUNTERS: &[&str] = &[
     "summary.join_ms",
     "summary.dependency_coverage_percent",
 ];
-/// The row fields that must match before two rows measure the same thing.
-/// Persisted with an accepted baseline and checked on every comparison, so a
-/// debug build, a GUI harness or another storage class cannot inherit a
-/// baseline recorded under different conditions.
+/// Comparison identity must reject different builds, harnesses, storage and workloads before comparing timings.
 pub const PROFILE_KEYS: &[&str] = &[
     "harness",
     "build_kind",
@@ -312,9 +303,7 @@ pub const PROFILE_KEYS: &[&str] = &[
     "diagnostics",
 ];
 
-/// Environment properties (from `guards::environment_fingerprint`) whose change
-/// expires an accepted baseline: the numbers were measured on other hardware
-/// or against another origin and are not a reference for this one.
+/// Changed environment fingerprints expire baselines instead of comparing measurements from different machines or origins.
 pub const ENVIRONMENT_KEYS: &[&str] = &["cpu", "os", "memory_gb", "origin"];
 const BASELINE_FORMAT_VERSION: u64 = 2;
 const MIN_BASELINE_SAMPLES: u64 = 5;
@@ -338,10 +327,7 @@ pub fn profile_of(row: &Value) -> Value {
     profile
 }
 
-/// The identity a row's measurements are grouped under: the operation label
-/// when the case gave one (two `quick-check` operations with different
-/// initial states are different measurements), else the operation name, and
-/// a lane suffix for rows that ran against an evicted cache.
+/// Operation labels and cache lanes identify distinct workloads even when operation names match.
 pub fn op_key(row: &Value) -> String {
     let name = row["label"]
         .as_str()
@@ -390,11 +376,7 @@ fn oracle_outcome(row: &Value) -> String {
     }
 }
 
-/// Medians per operation key over the steady-state rows: warm rows and
-/// evicted rows, each in its own lane; cold iteration-zero rows and invalid
-/// rows are left out.
-/// Iteration 0 without warmup is the unprepared first pass and never a
-/// baseline sample; a warm or evicted valid row is.
+/// Use valid warm/evicted steady-state medians in separate lanes; an unprepared iteration zero is never a baseline sample.
 fn is_baseline_sample(row: &Value) -> bool {
     (row["cache_state"] == "warm" || row["cache_state"] == "evicted") && row["verdict"] != "invalid"
 }
@@ -474,10 +456,7 @@ pub fn save_baseline(rows: &[Value], path: &Path, case_hash: &str, git_sha: &str
         "Cannot accept a baseline from rows with different run profiles"
     );
     let mut medians = warm_medians(rows);
-    // An incidental stage (a `wipe-db` before the measured refresh) collects
-    // one sample fewer than the measured operation when iteration 0 is its
-    // unprepared pass, so it stays out of the baseline rather than blocking
-    // the operation the case exists to measure.
+    // An incidental stage missing its first prepared sample must not block the intended operation's baseline.
     let mut unbaselined = json!({});
     for (op, entry) in medians.as_object_mut().unwrap() {
         let expected = &entry["compatibility"];
@@ -551,10 +530,8 @@ pub fn compatibility(baseline: &Value, current: &Value, operation: Option<&Value
     }
     json!({"verdict":"compatible","flags":[]})
 }
-/// Absolute change below which a duration metric is noise whatever the percent
-/// says: a 12 percent band over a 9 ms hash stage, a 4 ms quick scan or a 63 ms
-/// page-cache hash batch flags scheduler jitter as a verdict. Seconds-valued paths end in `_s`, millisecond
-/// paths in `_ms`; ratios, rates, bytes and counters have no floor.
+/// Absolute duration floors exclude scheduler noise even when relative changes are large.
+/// Only _s and _ms durations receive floors; ratios, rates, bytes and counters do not.
 pub fn noise_floor(path: &str) -> f64 {
     if path.ends_with("_s") {
         0.05
@@ -565,14 +542,11 @@ pub fn noise_floor(path: &str) -> f64 {
     }
 }
 
-/// Metrics that are guardrails rather than gates. Foxy deliberately spends
-/// memory and disk to be faster, so a footprint move is reported and never
-/// decides a verdict (conventions/SPEED_OF_LIGHT.md, resource trade policy).
+/// Memory and disk are advisory guardrails: Foxy deliberately trades them for speed.
 pub fn is_advisory(path: &str) -> bool {
     path.starts_with("memory.")
 }
 
-/// `(regression, improvement)` for one metric against its baseline median.
 pub fn classify(now: f64, was: f64, higher: bool, tolerance: f64, floor: f64) -> (bool, bool) {
     if (now - was).abs() < floor {
         return (false, false);
@@ -623,9 +597,7 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
             continue;
         }
         if base.is_null() {
-            // The baseline has no lane for this operation (an evicted lane
-            // recorded before lanes existed, a new label); say so instead of
-            // passing an unmeasured operation.
+            // A missing baseline lane is unmeasured, never a passing comparison.
             flags.push(format!("baseline-missing-op:{op}"));
             rebaseline = true;
             operation_verdicts.insert(op.clone(), "rebaseline-required".into());
@@ -678,9 +650,7 @@ pub fn compare(rows: &[Value], baseline_path: &Path, ledger_path: &Path) -> Resu
                 .map_or((false, false), |n| {
                     classify(n, was, higher, tolerance, noise_floor(path))
                 });
-            // Footprint is a guardrail, not a gate: Foxy trades memory and
-            // disk for speed on purpose, so a footprint move is reported as
-            // advisory and never flips the run's verdict.
+            // Footprint changes remain advisory and cannot flip the performance verdict.
             if is_advisory(path) {
                 let status = if bad {
                     "advisory-regression"
@@ -787,12 +757,11 @@ mod tests {
     }
     #[test]
     fn duration_verdicts_need_both_the_band_and_the_floor() {
-        // 9.5 ms -> 4.0 ms clears 12 percent but not 50 ms: noise.
         assert_eq!(
             classify(4.0, 9.5, false, 0.12, noise_floor("summary.hash_stage_ms")),
             (false, false)
         );
-        // 63 ms -> 90 ms on a seconds path: the same.
+
         assert_eq!(
             classify(
                 0.090,
@@ -803,12 +772,12 @@ mod tests {
             ),
             (false, false)
         );
-        // 4 ms -> 200 ms clears both: a real quick-scan regression still flags.
+
         assert_eq!(
             classify(0.2, 0.004, false, 0.12, noise_floor("quick_scan.actual_s")),
             (true, false)
         );
-        // 40.5 s -> 45.5 s regresses; 40.5 s -> 35.5 s improves.
+
         assert_eq!(
             classify(45.5, 40.5, false, 0.12, noise_floor("elapsed_s")),
             (true, false)
@@ -817,7 +786,7 @@ mod tests {
             classify(35.5, 40.5, false, 0.12, noise_floor("elapsed_s")),
             (false, true)
         );
-        // Ratios have no floor and flip direction.
+
         assert_eq!(noise_floor("download.sol"), 0.0);
         assert_eq!(classify(0.80, 0.92, true, 0.08, 0.0), (true, false));
         assert_eq!(classify(0.99, 0.92, true, 0.08, 0.0), (false, false));
@@ -995,8 +964,7 @@ mod tests {
             expired["flags"],
             json!(["environment-changed:cpu", "environment-changed:origin"])
         );
-        // A row without an environment (older kit) against an environment-bearing
-        // baseline is also not a match.
+
         let legacy = compare(&[row(10.2)], &baseline, &ledger).unwrap();
         assert_eq!(legacy["verdict"], "rebaseline-required");
     }
@@ -1014,7 +982,7 @@ mod tests {
             .map(|offset| with_memory(10.0 + f64::from(offset) / 10.0, 4.0e8))
             .collect();
         save_baseline(&rows, &baseline, "h", "sha").unwrap();
-        // Twice the memory at the same speed: reported, not a regression.
+
         let heavier = compare(&[with_memory(10.2, 8.0e8)], &baseline, &ledger).unwrap();
         assert_eq!(heavier["verdict"], "ok");
         assert_eq!(heavier["flags"], json!(["memory-advisory"]));
@@ -1026,7 +994,7 @@ mod tests {
             .map(|d| d["status"].as_str().unwrap())
             .collect();
         assert_eq!(statuses, ["advisory-regression", "advisory-regression"]);
-        // Less memory does not make a slower run an improvement either.
+
         let slower = compare(&[with_memory(12.0, 1.0e8)], &baseline, &ledger).unwrap();
         assert_eq!(slower["verdict"], "candidate-regression");
         assert!(is_advisory("memory.peak_private_bytes"));

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "occurrence_id": "occ_a185c8b195d49699f249bf8fcd6ccfb2",
+  "instance_id": "server_00000000000000000000000000000001",
+  "job_id": "job_0000000000000001",
+  "policy_revision": 2,
+  "action": "restart",
+  "trigger": {
+    "kind": "scheduled",
+    "scheduled_unix_ms": 1795055400000
+  },
+  "owner_id": "owner_example",
+  "owner_generation": 7,
+  "state": "unknown",
+  "reason": "owner_lost",
+  "attempts": 1,
+  "stop_completed": false,
+  "run_generation_before": 4,
+  "run_generation_after": null,
+  "deferred_since_unix_ms": null,
+  "next_attempt_unix_ms": null,
+  "message": "The owner ended during this occurrence. Its effect is unknown; inspect the server before running the job again.",
+  "created_unix_ms": 1795055401200,
+  "updated_unix_ms": 1795055460000
+}

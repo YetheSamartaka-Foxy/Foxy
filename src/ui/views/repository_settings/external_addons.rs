@@ -80,16 +80,12 @@ impl Foxy {
             *origin_filter = "All".to_string();
         }
 
-        // Build a path-based enabled lookup so that previously saved entries
-        // match even when the display name changed (e.g. numeric workshop ID →
-        // human-readable name from !Workshop symlinks).
+        // Paths remain stable when a discovered addon's display name changes.
         let mut enabled_by_path: HashMap<String, bool> = HashMap::new();
         for (_, enabled, p) in external_addons.iter() {
             enabled_by_path.insert(p.clone(), *enabled);
         }
 
-        // Merge: use discovered candidates as the source of truth for names,
-        // and fall back to saved enabled state by path.
         let mut external_map: HashMap<String, (String, bool)> = HashMap::new();
         for (addon_name, path, _) in &external_candidates {
             let enabled = enabled_by_path.get(path).copied().unwrap_or(false);
@@ -559,7 +555,6 @@ impl Foxy {
                 self.save_repositories();
             }
         } else if ui_state_changed {
-            // UI-only filter controls should not persist repository data.
         }
 
         if let Some((addon_name, addon_directory_path, action)) = external_addon_context_action {

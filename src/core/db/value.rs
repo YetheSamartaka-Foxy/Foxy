@@ -1,11 +1,3 @@
-//! Storage-neutral SQL value type for the DB seam (plan.md §5.1, Phase 1).
-//!
-//! Call sites build parameter lists as `Vec<DbValue>` (see the [`params!`] macro)
-//! and the seam converts them to the engine's native `turso::Value`. Keeping a
-//! single neutral type here is what lets the ~40 call sites stay independent of
-//! the engine's concrete value type.
-
-/// A single bound SQL parameter, independent of the storage engine.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DbValue {
     Null,
@@ -35,7 +27,6 @@ impl From<u32> for DbValue {
 
 impl From<u64> for DbValue {
     fn from(v: u64) -> Self {
-        // Foxy ids are non-negative and fit in i64; SQLite/Turso store INTEGER as i64.
         DbValue::Int(v as i64)
     }
 }
@@ -89,7 +80,6 @@ where
 }
 
 impl DbValue {
-    /// Convert to a Turso bound value (the engine's native parameter type).
     pub(crate) fn into_turso_value(self) -> turso::Value {
         match self {
             DbValue::Null => turso::Value::Null,
@@ -101,11 +91,6 @@ impl DbValue {
     }
 }
 
-/// Build a `Vec<DbValue>` parameter list, converting each argument with `.into()`.
-///
-/// ```ignore
-/// db.execute("INSERT INTO t (a, b) VALUES (?, ?)", params![id, name]).await?;
-/// ```
 macro_rules! params {
     () => { Vec::<$crate::core::db::DbValue>::new() };
     ($($value:expr),+ $(,)?) => {

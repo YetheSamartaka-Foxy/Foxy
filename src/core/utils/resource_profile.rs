@@ -2,11 +2,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use sysinfo::System;
 
-/// Pressure the user's memory setting forces; 0 means Auto.
 static PRESSURE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
-/// Force a pressure tier for every later [`ResourceProfile::sample`], or `None`
-/// to use the sampled one.
 pub(crate) fn set_pressure_override(pressure: Option<ResourcePressure>) {
     let encoded = match pressure {
         None => 0,
@@ -53,11 +50,9 @@ pub(crate) struct ResourceProfile {
     pub(crate) pressure: ResourcePressure,
     pub(crate) total_memory: u64,
     pub(crate) available_memory: u64,
-    /// Logged for diagnosis only. Windows reports commit charge beyond physical
-    /// memory here rather than pagefile use, and swapped pages stay counted
-    /// elsewhere long after the pressure that pushed them out has gone.
+
     pub(crate) used_swap: u64,
-    /// `pressure` came from the user's setting, not from the memory figures.
+
     pub(crate) pressure_overridden: bool,
 }
 

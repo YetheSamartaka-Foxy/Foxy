@@ -33,9 +33,7 @@ pub struct MutateOptions {
     pub entry_count: usize,
     pub file_count: usize,
     pub truncate_by: u64,
-    /// Put every mutated file's modification time back afterwards, so a
-    /// size-and-mtime fingerprint cannot see the change (a silently changed
-    /// patch source).
+    /// Restore original mtimes so metadata-only fingerprints cannot detect the mutated payload.
     pub preserve_mtime: bool,
 }
 

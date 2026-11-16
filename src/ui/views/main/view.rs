@@ -54,6 +54,7 @@ fn activity_log_height_limits(
 impl Foxy {
     fn has_activity_log_safe_space_modal(&self) -> bool {
         self.update_modal_open
+            || self.server_view.dialog.is_some()
             || self.show_add_repository_modal
             || self.pending_repository_duplicate_add.is_some()
             || self.pending_mission_duplicate.is_some()
@@ -177,7 +178,6 @@ impl Foxy {
                         self.open_reference_view(FoxyView::Changelog);
                     }
 
-                    // Update available badge
                     if matches!(
                         &self.app_update_status,
                         crate::core::tasks::app_update::UpdateCheckStatus::Available(_)
@@ -513,12 +513,6 @@ impl Foxy {
                         );
                     }
 
-                    // Cache each entry's shaped line keyed by its absolute index
-                    // in the (append-only between snapshots) log: filtering only
-                    // selects which indices render, so toggling filters never
-                    // re-shapes, and a new snapshot bumps `activity_log_generation`
-                    // to rebuild. Colors are baked in (folded into the
-                    // fingerprint) so the line stays a selectable `Label`.
                     let color_error = self.color_error();
                     let color_warn = self.color_warn();
                     let color_debug = self.color_debug();
