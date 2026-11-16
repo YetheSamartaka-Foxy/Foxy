@@ -569,8 +569,17 @@ Quick scan outputs:
 - clean result: no pending updates, clear pending cache
 - suspicious addons/files: pending update summary, optional targeted tree verify
 - missing addon folder: pending full addon update
-- unexpected files alone: preserve them, normalize the complete folder baseline,
+- previously managed files removed from the accepted manifest: pending `Deleted`
+  file rows with zero transfer bytes, preserved until Update is approved
+- other unexpected files alone: preserve them, normalize the complete folder baseline,
   and report no update when managed files match
+
+Pruned addon-file links retain the prior file records. Check those records by
+both remote addon path and local folder, excluding normalized paths still owned
+by any known repository addon. This removal check also runs when the folder
+baseline matches, recovering a removal that an older check accepted as an extra.
+It reads file presence only, without hashing payloads. Keep deletion rows when
+download estimates replace transfer rows; a removal-only update needs no queue.
 
 Quick scan must use the cheapest available cache:
 
@@ -1567,7 +1576,10 @@ The logs should make it possible to answer:
 
 ## Diagnosing False Redownloads
 
-Extra unmanifested files alone do not require an update when managed files match.
+Unmanifested files with no prior managed ownership do not require an update when
+managed files match. A previously managed file removed from the accepted server
+manifest remains pending cleanup until an approved Update removes it, unless
+another known addon or repository still owns its normalized path.
 Older builds could save a zero-file, zero-byte cleanup-only notice. Startup must
 hold that ambiguous hint as Unknown and run an ordinary local-only check rather
 than restore an Update prompt or infer a clean verdict. Missing addons with no
@@ -1585,7 +1597,7 @@ absolute roots out of these samples and preserve the full list only in the
 explicit diagnostic export.
 Remote refresh and integrity checks preserve candidates until cleanup is approved.
 
-For versioned `.bisign` and `.bikey` candidates, compare the sampled names with
+For untracked versioned `.bisign` and `.bikey` candidates, compare the sampled names with
 the accepted manifest before diagnosing ownership failure. A current published
 signature can verify successfully while an older, differently named signature
 remains unowned beside it. Preserve those extras without marking the addon

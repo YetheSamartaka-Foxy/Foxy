@@ -2616,7 +2616,12 @@ async fn run_repository_pipeline(
             // parts, which is what lets the part insert be deferred (A++).
             match fetch_all_download_targets_with_mod_and_name(context.clone()).await {
                 Ok(targets) => {
-                    mods = build_download_estimate_diffs(&targets);
+                    let mut adjusted_mods = build_download_estimate_diffs(&targets);
+                    super::super::quick_scan::preserve_removed_file_diffs(
+                        &mods,
+                        &mut adjusted_mods,
+                    );
+                    mods = adjusted_mods;
                 }
                 Err(err) => {
                     warn!(
@@ -3038,6 +3043,8 @@ async fn run_repository_pipeline(
             )
             .await
             {
+                let mut adjusted_mods = adjusted_mods;
+                super::super::quick_scan::preserve_removed_file_diffs(&mods, &mut adjusted_mods);
                 mods = adjusted_mods;
                 emit_progress!(ProgressEvent::Diff { mods: mods.clone() });
                 persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
@@ -3061,7 +3068,12 @@ async fn run_repository_pipeline(
                     attach_part_change_details(context.clone(), &mut targets).await;
                     let (patchable_file_ids, planned_bytes, full_bytes) =
                         apply_download_plan_bytes(context.clone(), &mut targets).await;
-                    mods = build_download_estimate_diffs(&targets);
+                    let mut adjusted_mods = build_download_estimate_diffs(&targets);
+                    super::super::quick_scan::preserve_removed_file_diffs(
+                        &mods,
+                        &mut adjusted_mods,
+                    );
+                    mods = adjusted_mods;
                     info!(
                         "Final confirmation plan prepared: repo={} mods={} files={} patch_files={} planned_transfer_bytes={} full_bytes={}",
                         normalized_repo_url,

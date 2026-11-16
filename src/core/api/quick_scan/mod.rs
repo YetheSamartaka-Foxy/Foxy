@@ -8,6 +8,7 @@ mod local_path_preflight;
 mod pending_updates;
 mod persistent_cache;
 mod readiness;
+mod removed_files;
 mod shared_cache;
 mod unexpected_files;
 mod worker;
@@ -57,6 +58,7 @@ pub(super) use readiness::{
     StartupQuickScanEligibility, batch_eligible_repos, launch_quick_scan_repo_eligible_joined,
     launch_quick_scan_repo_startup_eligibility,
 };
+pub(super) use removed_files::preserve_removed_file_diffs;
 pub(super) use unexpected_files::collect_unexpected_files_for_repo_mods;
 #[cfg(test)]
 pub(super) use unexpected_files::delete_unexpected_local_files;

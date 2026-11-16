@@ -575,6 +575,9 @@ pub(crate) async fn apply_patch_plan_estimates_to_pending_updates(
 
         let mut total_bytes = 0u64;
         for file_summary in &mut mod_summary.files {
+            if file_summary.change_kind == FileDiffKind::Deleted {
+                continue;
+            }
             let key = normalize_pending_file_name(&file_summary.name);
             let Some((file_id, file_length)) = file_lookup.get(&(mod_id, key)).copied() else {
                 total_bytes = total_bytes.saturating_add(file_summary.total_bytes);
@@ -953,6 +956,30 @@ mod tests {
     #[test]
     fn patch_plan_estimate_uses_full_size_without_plan() {
         assert_eq!(patch_plan_estimate_bytes(100, None), 100);
+    }
+
+    #[tokio::test]
+    async fn patch_plan_estimates_do_not_charge_removed_files_with_a_matching_leaf_name() {
+        let handle = crate::core::tasks::db_turso::build_test_database().await;
+        let db = FoxyDb::from_turso(handle.clone());
+        let (context, _) = seed_same_url_repositories_for_patch_estimate(&db, handle).await;
+        let mut removed = file_summary("foo.pbo", 0);
+        removed.change_kind = FileDiffKind::Deleted;
+        let mods = vec![mod_summary(
+            "@ace3",
+            1000,
+            vec![file_summary("addons/foo.pbo", 1000), removed],
+        )];
+        let adjusted = apply_patch_plan_estimates_to_pending_updates(
+            context,
+            "https://example.test/repo/",
+            &mods,
+        )
+        .await
+        .unwrap();
+        assert_eq!(adjusted[0].total_bytes, 10);
+        assert_eq!(adjusted[0].files[1].total_bytes, 0);
+        assert_eq!(adjusted[0].files[1].change_kind, FileDiffKind::Deleted);
     }
 
     #[test]

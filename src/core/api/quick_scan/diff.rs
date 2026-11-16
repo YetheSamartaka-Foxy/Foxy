@@ -16,6 +16,7 @@ use super::readiness::{
     content_hash_baseline_ready, partition_tree_hash_ready_files,
     quick_scan_preflight_for_local_check, tree_local_checksums_missing,
 };
+use super::removed_files::removed_managed_file_diffs;
 use super::shared_cache::QuickScanSharedCache;
 use crate::core::db::{DbValue, params};
 use crate::core::models::modification::ADDON_COLUMNS;
@@ -685,13 +686,28 @@ async fn quick_local_change_diff_locked(
         });
     }
 
-    let addon_hash = resolve_addon_hashes(
+    let Some(mut removed_files) =
+        removed_managed_file_diffs(&context, repo_url, &mods, mod_enabled_overrides).await
+    else {
+        context
+            .hash_evidence
+            .record_issue(crate::core::tasks::calculate_hashes::HashIssue {
+                file_path: String::new(),
+                kind: crate::core::tasks::calculate_hashes::HashIssueKind::Skipped,
+                detail: Some("Could not verify files removed from the published addon".into()),
+            });
+        return Vec::new();
+    };
+    let mut addon_hash = resolve_addon_hashes(
         &mods,
         mod_enabled_overrides,
         force_fresh_addon_hash,
         shared_cache,
     )
     .await;
+    addon_hash
+        .mods_with_tree_mismatch
+        .extend(removed_files.keys().copied());
     let addon_hash_elapsed = addon_hash.addon_hash_elapsed;
 
     if !addon_hash.mods_with_missing_path.is_empty() {
@@ -794,7 +810,7 @@ async fn quick_local_change_diff_locked(
         return Vec::new();
     }
 
-    let diff_result = match compute_file_diffs(
+    let mut diff_result = match compute_file_diffs(
         context.clone(),
         repo_url,
         &mods,
@@ -808,6 +824,31 @@ async fn quick_local_change_diff_locked(
         Some(result) => result,
         None => return Vec::new(),
     };
+    for addon in &mods {
+        let Some(files) = removed_files.remove(&(addon.id as i64)) else {
+            continue;
+        };
+        info!(
+            "Quick scan detected published file removals: addon={} removed_files={} transfer_bytes=0",
+            addon.name,
+            files.len()
+        );
+        if let Some(diff) = diff_result
+            .diffs
+            .iter_mut()
+            .find(|diff| diff.name == addon.name)
+        {
+            diff.files.extend(files);
+        } else {
+            diff_result.diffs.push(ModDiffSummary {
+                name: addon.name.clone(),
+                needs_update: true,
+                total_bytes: 0,
+                files,
+            });
+            diff_result.addons_with_updates += 1;
+        }
+    }
     file_fallback_elapsed = diff_result.file_fallback_elapsed;
     tree_part_stats_load_elapsed = diff_result.tree_part_stats_load_elapsed;
 
