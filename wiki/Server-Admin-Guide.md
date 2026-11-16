@@ -194,7 +194,7 @@ Key points:
 foxy-server-backend-cli create config.json ./output
 ```
 
-This reads the config, discovers the files in each mod folder, copies them to the output, computes checksums, writes the manifest files, and prints the server launch line last.
+This reads the config, discovers the files in each mod folder, copies them to the output, computes checksums, and writes the manifest files. For Arma 3 and Reforger it prints the server launch line last; custom games have no server launch line.
 
 Useful options:
 
@@ -228,7 +228,7 @@ Point your web server at the output directory. Foxy clients access `https://your
 
 ### The printed launch line
 
-`create` finishes by printing the server launch line for the generated repository and saves the same single line to `<output>/server_mod_line.txt`, so a wrapper script can read it later:
+For Arma 3 and Reforger, `create` finishes by printing the server launch line for the generated repository and saves the same single line to `<output>/server_mod_line.txt`, so a wrapper script can read it later. Custom game repositories have no server launch line or `server_mod_line.txt`:
 
 ```
 foxy-server-backend-cli create config.json ./output --mod-line-prefix mods
@@ -287,7 +287,7 @@ Set `"game": "reforger"` in the config (`new config.json --game reforger` writes
 
 - Addon folders are hashed the same way as Arma 3 mods. Keep each addon's `addon.gproj`, `.pak` files and `resourceDatabase.rdb` together in its own folder. Packed Reforger addons do not need an Arma 3-style `addons/` subfolder. `.pak` archives inside them are parsed so clients can update individual entries.
 - The printed launch line is `-addonsDir <prefix or .> -addons <id,...>`. Each id is the mod's `.gproj` GUID, with the project ID, the Workshop `ServerData.json` id, and finally the folder name as fallbacks.
-- `dlcContent` and `clientSide` mean nothing for Reforger; they are accepted with a warning and ignored.
+- `dlcContent` has no effect for Reforger and triggers a warning. `clientSide` also triggers a warning because Foxy does not mark Reforger mods as client-side in the repository; a mod marked client-side is omitted from the generated server launch line.
 - The generated `repo.json` carries `"game": "reforger"`. Arma 3 output does not include the key.
 
 ### Generate and regenerate the repository
@@ -473,7 +473,7 @@ Files are split into **parts** for fine-grained checksums and delta updates:
 - **PBO files** (Arma 3) are parsed into a `$$HEADER$$` part, one part per archived entry, and a `$$END$$` tail part, so clients patch at the entry level.
 - **PAK files** (Arma Reforger, PAC1 format) are parsed into a `$$HEADER$$` part, one part per entry, `$$GAP:n$$` parts for bytes between entries, and a `$$END$$` part.
 - **Other files** are split into 5 MB chunks. A 12 MB file becomes three parts: `filename_5000000`, `filename_10000000`, `filename_12000000`.
-- **Other files with `"chunking": "content"`** are split where their content says, into parts of 256 KB to 4 MB (about 1 MB on average). Names keep the `filename_<end offset>` form. An inserted or removed byte changes only the parts around it. PBO and PAK archives keep their per-entry parts. All Foxy clients read these parts. Changing `chunking` on an existing repository makes clients download each affected file once in full.
+- **Other files with `"chunking": "content"`** are split where their content says, into parts of 256 KiB to 4 MiB (about 1 MiB on average). Names keep the `filename_<end offset>` form. An inserted or removed byte changes only the parts around it. PBO and PAK archives keep their per-entry parts. All Foxy clients read these parts. Changing `chunking` on an existing repository makes clients download each affected file once in full.
 - **`.srf` files** in source mod folders are skipped (they are regenerated), and so is a `foxy_addon.json` at a mod's root, so an earlier output can be reused as a source.
 
 ### The `foxyMode` field
@@ -540,7 +540,7 @@ A mod name that appears in several repositories must hash identically in all of 
 
 ### Space options
 
-- `--mode`, `--threads`, `--app-update-url`, the launch line options, `--dry-run`, `--incremental`, `--atomic --yes`, and `--report` work as for `create`, applied to every repository. A launch line and `server_mod_line.txt` are written per repository, and each repository's `modLineFiles` are rewritten with its own line.
+- `--mode`, `--threads`, `--app-update-url`, the launch line options, `--dry-run`, `--incremental`, `--atomic --yes`, and `--report` work as for `create`, applied to every repository. Arma 3 and Reforger repositories get a launch line and `server_mod_line.txt`; custom game repositories do not. Each applicable repository's `modLineFiles` are rewritten with its own line.
 - `--collect-keys` gathers the keys of the whole space into `<output>/keys`. `--per-repo-keys` also writes each repository's keys (plus `--additional-keys`) into `<output>/<folder>/keys`, so a server can symlink one repository's keys folder directly.
 - `--only <folder>` (repeatable) regenerates only the selected repositories and keeps the full space manifest. It refuses mods shared with repositories you did not select, and it cannot rebuild the combined keys folder.
 - `--prune-unused-optionals` works with `copy` and `pool`, not with `link`.
@@ -629,10 +629,10 @@ Foxy supports **self-hosted app updates**, so each community can distribute Foxy
 
 ```
 foxy-server-backend-cli setup-app-updater \
-  --version 1.1.0 \
-  --windows-installer ./installers/Foxy-1.1.0-setup.exe \
-  --linux-installer ./installers/Foxy-1.1.0-linux-x86_64-installer.sh \
-  --linux-aarch64-installer ./installers/Foxy-1.1.0-linux-aarch64-installer.sh \
+  --version 1.2.1 \
+  --windows-installer ./installers/Foxy-1.2.1-setup.exe \
+  --linux-installer ./installers/Foxy-1.2.1-linux-x86_64-installer.sh \
+  --linux-aarch64-installer ./installers/Foxy-1.2.1-linux-aarch64-installer.sh \
   --changelog ./CHANGELOG.md \
   --output ./update-server
 ```
@@ -643,7 +643,7 @@ This produces:
 update-server/
   foxy-app-updater.json         # Update manifest (BLAKE3 hashes, schema version 1)
   changelogs/
-    1.1.0.json                  # Structured changelog extracted from CHANGELOG.md
+    1.2.1.json                  # Structured changelog extracted from CHANGELOG.md
 ```
 
 Requirements:
@@ -655,10 +655,10 @@ Requirements:
 
 ```
 foxy-server-backend-cli new-app-update \
-  --version 1.2.0 \
-  --windows-installer ./installers/Foxy-1.2.0-setup.exe \
-  --linux-installer ./installers/Foxy-1.2.0-linux-x86_64-installer.sh \
-  --linux-aarch64-installer ./installers/Foxy-1.2.0-linux-aarch64-installer.sh \
+  --version 1.2.2 \
+  --windows-installer ./installers/Foxy-1.2.2-setup.exe \
+  --linux-installer ./installers/Foxy-1.2.2-linux-x86_64-installer.sh \
+  --linux-aarch64-installer ./installers/Foxy-1.2.2-linux-aarch64-installer.sh \
   --changelog ./CHANGELOG.md \
   --output ./update-server
 ```
@@ -671,17 +671,17 @@ This keeps every earlier version in the manifest (so players can downgrade from 
 update-server/
   foxy-app-updater.json
   installers/
-    Foxy-1.2.0-setup.exe
-    Foxy-1.2.0-linux-x86_64-installer.sh
-    Foxy-1.2.0-linux-aarch64-installer.sh
-    Foxy-1.1.0-setup.exe
+    Foxy-1.2.2-setup.exe
+    Foxy-1.2.2-linux-x86_64-installer.sh
+    Foxy-1.2.2-linux-aarch64-installer.sh
+    Foxy-1.2.1-setup.exe
     ...
   changelogs/
-    1.2.0.json
-    1.1.0.json
+    1.2.2.json
+    1.2.1.json
 ```
 
-The manifest references installers by relative path (for example `installers/Foxy-1.2.0-setup.exe`), so place them in an `installers/` folder next to it.
+The manifest references installers by relative path (for example `installers/Foxy-1.2.2-setup.exe`), so place them in an `installers/` folder next to it.
 
 ### Connecting updates to repositories
 
@@ -698,32 +698,32 @@ The URL points to the folder containing `foxy-app-updater.json`. Clients fill it
 ```json
 {
   "schemaVersion": 1,
-  "latest": "1.2.0",
+  "latest": "1.2.2",
   "versions": [
     {
-      "version": "1.2.0",
-      "changelog": "changelogs/1.2.0.json",
+      "version": "1.2.2",
+      "changelog": "changelogs/1.2.2.json",
       "platforms": {
         "windows-x86_64": {
-          "installerPath": "installers/Foxy-1.2.0-setup.exe",
+          "installerPath": "installers/Foxy-1.2.2-setup.exe",
           "installerHash": "<blake3-hex>",
           "installerSize": 12345678
         },
         "linux-x86_64": {
-          "installerPath": "installers/Foxy-1.2.0-linux-x86_64-installer.sh",
+          "installerPath": "installers/Foxy-1.2.2-linux-x86_64-installer.sh",
           "installerHash": "<blake3-hex>",
           "installerSize": 9876543
         },
         "linux-aarch64": {
-          "installerPath": "installers/Foxy-1.2.0-linux-aarch64-installer.sh",
+          "installerPath": "installers/Foxy-1.2.2-linux-aarch64-installer.sh",
           "installerHash": "<blake3-hex>",
           "installerSize": 9765432
         }
       }
     },
     {
-      "version": "1.1.0",
-      "changelog": "changelogs/1.1.0.json",
+      "version": "1.2.1",
+      "changelog": "changelogs/1.2.1.json",
       "platforms": { ... }
     }
   ]

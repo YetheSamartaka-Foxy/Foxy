@@ -89,7 +89,8 @@ Configure Arma 3 to use Proton in Steam and start it from Steam once before laun
 
 Requirements:
 - Rust `1.96+` (edition 2024)
-- Windows only: `windres` (MinGW resource compiler, used by `build.rs`)
+- Windows MSVC target: Visual Studio C++ build tools
+- Windows icon rebuilds only: `windres` (MinGW resource compiler) with `BUILD_ICON=1`. Normal builds link the committed `app_icon.o`.
 
 Main app:
 ```bash
@@ -98,10 +99,12 @@ cargo build --release
 
 Foxy's application version comes from the first `# MAJOR.MINOR.PATCH` release heading in `CHANGELOG.md`. The desktop UI, CLI, update checks, and installer builds use that version; `Cargo.toml` retains separate package metadata.
 
-Workspace (main app + server backend CLI):
+Whole workspace (including the server backend CLI and testkit):
 ```bash
 cargo build --workspace --release
 ```
+
+Keep the Steamworks library beside the application when copying a build: `steam_api64.dll` on Windows, `libsteam_api.so` on Linux, or `libsteam_api.dylib` on macOS. `build.rs` stages it beside the executable, and the Windows and Linux installers include it.
 
 Pre-release build (release-optimized, version label and logs carry source commit):
 ```bash
@@ -125,6 +128,8 @@ TARGET=aarch64-unknown-linux-gnu ./scripts/build-linux-installer.sh
 # macOS Apple Silicon, local experimental build
 ./scripts/build-macos-installer.sh
 ```
+
+The experimental macOS DMG script currently copies only the executable into the app bundle. The installed `Foxy.app/Contents/MacOS/` directory also needs the built `libsteam_api.dylib` beside `Foxy` before the app can start.
 
 Native Windows-to-macOS installer builds are not supported by this repo. The macOS dmg path needs macOS SDK/linker support and `hdiutil`. From Windows, use an SSH-accessible Mac and copy the dmg back:
 ```powershell
@@ -166,7 +171,7 @@ Behavior:
 | `--quiet` | Reduce informational output |
 | `--no-progress` | Disable live progress output |
 | `--yes` | Confirm destructive operations |
-| `--dry-run` | Preview behavior without writing changes |
+| `--dry-run` | Preview behavior without writing changes, for commands that support it |
 | `--wipe-db` | Wipe and rebuild the entire local database after a schema upgrade; requires `--yes` |
 
 ### Commands
@@ -202,10 +207,10 @@ Examples:
 ```bash
 foxy version --json
 foxy repo list --json
-foxy repo sync --repo-url https://example/repo/ --mode quick-check
-foxy sync --repo-name "My Repo" --mode remote-refresh
-foxy direct-download --address https://example.com/file.zip --dest /tmp --limit-mbps 25
-foxy launch --repo-name "My Repo" --server "My Server" --execute
+foxy repo sync --repo-url https://repo.example.invalid:8080/MainRepo/ --mode quick-check
+foxy sync --repo-name "MainRepo" --mode remote-refresh
+foxy direct-download --address https://repo.example.invalid:8080/file.zip --dest ./downloads --limit-mbps 25
+foxy launch --repo-name "MainRepo" --server "ServerAlpha" --execute
 foxy game create "Warhammer" --game twwh3
 foxy workshop share --json
 foxy config export ./my-setup.foxypack
@@ -224,7 +229,7 @@ Foxy stores app-global data at the config root and everything that belongs to on
 | `backups/` | Backup storage |
 | `games/<space_id>/game_settings.json` | Settings of that game space (game paths, launch checks, scheduled jobs) |
 | `games/<space_id>/profile_backups/` | Arma 3 player profile backups, three versions per profile |
-| `games/<space_id>/repositories.json` | Repository definitions |
+| `games/<space_id>/repositories.json` | Repository definitions and learned update timings per installation |
 | `games/<space_id>/local-repositories/<id>/` | Default folder assigned to a blank local repository when no folder is chosen |
 | `games/<space_id>/repository_spaces.json` | Repository space definitions |
 | `games/<space_id>/repository_visual_folders.json` | Sidebar folders |
@@ -232,6 +237,7 @@ Foxy stores app-global data at the config root and everything that belongs to on
 | `games/<space_id>/extra_file_activations.json` | Last activated extra-file destinations, used to review later edits |
 | `games/<space_id>/storage_targets.json` | Recorded storage devices of update targets, used to review a changed device |
 | `games/<space_id>/database.db` | Turso (SQLite-compatible) database state |
+| `games/<space_id>/benchmarks/` | Saved benchmark records and their log slices |
 | `games/<space_id>/paused_repositories.json` | Download pauses remembered per repository installation |
 | `games/<space_id>/empty_publications.json` | Accepted empty publications and retained-file removal scope |
 | `games/<space_id>/interrupted_updates/` | Notices for updates that still need verification after interruption |
@@ -277,7 +283,7 @@ foxy-server-backend-cli create config.json ./output --mode hybrid
 foxy-server-backend-cli create config.json ./output --app-update-url https://example.com/foxy-app-updater.json
 ```
 
-`create` finishes by printing the server `-mod=` line for the generated repository,
+For Arma 3, `create` finishes by printing the server `-mod=` line for the generated repository,
 and writes the same single line to `<output>/server_mod_line.txt`, so a wrapper
 script can read it later:
 
@@ -332,17 +338,20 @@ A config with `"game": "reforger"` (`new --game reforger` writes one) hashes the
 addon directories the same way, including the `.pak` entries inside them, and
 prints an Arma Reforger server line instead: `-addonsDir <prefix or .> -addons
 <id,...>`, where each id is the mod's `.gproj` GUID (project ID, `ServerData.json`
-id, then folder name as fallbacks). `dlcContent` and `clientSide` are warned about
-and ignored for Reforger; the generated `repo.json` carries `"game": "reforger"`.
+id, then folder name as fallbacks). Reforger configs warn about `dlcContent` and
+`clientSide`: Creator DLC metadata is ignored, and the client offers no client-side
+marking, but mods with `clientSide: true` are still excluded from the generated
+server line. The generated `repo.json` carries `"game": "reforger"`.
 
 A config with `"game": "generic"` (`new --game generic` writes one) publishes a
 custom game for Generic game spaces. `gameBuild` (`{ "folder", "executable" }`)
 names the folder holding the game build, such as a game folder or a single
 executable; clients show it as the game instead of an addon and launch its
-executable directly. It prints no server line. Its template sets `"chunking": "content"`, which
-splits files that are not PBO or PAK archives at content-defined boundaries (256 KB
-to 4 MB parts) instead of every 5 MB, so a rebuilt executable or data archive keeps
-most of its part checksums and clients download only the changed parts. Any config
+executable directly. It prints no server line and writes no `server_mod_line.txt`.
+Its template sets `"chunking": "content"`, which splits files that are not PBO or PAK
+archives at content-defined boundaries (256 KiB to 4 MiB parts) instead of every
+5 MB, allowing unchanged regions of a rebuilt executable or data archive to keep
+their part checksums so clients can download only changed parts. Any config
 may set `chunking`; the default `fixed` output is unchanged.
 
 For local Reforger addons, keep each addon's `addon.gproj`, `.pak` files and
@@ -425,8 +434,10 @@ successful regeneration. Cleanup does not remove unrelated directories. A pool
 outside the output directory needs an inventory from a previous `create-space`
 run before cleanup is allowed. `--prune-unused-optionals` also works with
 `copy` and `pool` layouts, but cannot be used with `link`, which publishes the
-source directory itself. Each repository gets its own `server_mod_line.txt`, and
-the `modLineFiles` of its own config are rewritten with that repository's line.
+source directory itself. Each Arma 3 or Reforger repository gets its own
+`server_mod_line.txt`, and the `modLineFiles` of its own config are rewritten with
+that repository's line. Generic game repositories have no server line and cannot
+use `modLineFiles`.
 
 The web server must follow symlinks for `pool` and `link` (nginx does by
 default; Apache needs `Options FollowSymLinks`). A mod name that appears in
@@ -484,21 +495,21 @@ For Arma Reforger, `export-reforger-config <config> <output>` writes a
 foxy-server-backend-cli export-reforger-config reforger_config.json reforger_mods.json
 ```
 
-App update manifest flow:
+App update manifest flow, initializing at 1.2.1 and then publishing 1.2.2:
 ```bash
 foxy-server-backend-cli setup-app-updater \
-  --version 1.0.0 \
-  --windows-installer ./installers/Foxy-1.0.0-setup.exe \
-  --linux-installer ./installers/Foxy-1.0.0-linux-x86_64-installer.sh \
-  --linux-aarch64-installer ./installers/Foxy-1.0.0-linux-aarch64-installer.sh \
+  --version 1.2.1 \
+  --windows-installer ./installers/Foxy-1.2.1-setup.exe \
+  --linux-installer ./installers/Foxy-1.2.1-linux-x86_64-installer.sh \
+  --linux-aarch64-installer ./installers/Foxy-1.2.1-linux-aarch64-installer.sh \
   --changelog ./CHANGELOG.md \
   --output ./server-root
 
 foxy-server-backend-cli new-app-update \
-  --version 0.8.1 \
-  --windows-installer ./installers/Foxy-0.8.1-setup.exe \
-  --linux-installer ./installers/Foxy-0.8.1-linux-x86_64-installer.sh \
-  --linux-aarch64-installer ./installers/Foxy-0.8.1-linux-aarch64-installer.sh \
+  --version 1.2.2 \
+  --windows-installer ./installers/Foxy-1.2.2-setup.exe \
+  --linux-installer ./installers/Foxy-1.2.2-linux-x86_64-installer.sh \
+  --linux-aarch64-installer ./installers/Foxy-1.2.2-linux-aarch64-installer.sh \
   --changelog ./CHANGELOG.md \
   --output ./server-root
 ```
