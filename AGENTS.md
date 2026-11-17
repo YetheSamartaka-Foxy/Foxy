@@ -39,7 +39,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Server-side repository generator lives in `foxy-server-backend-cli/`; standalone helper tools live in `tools/`.
 - The developer-machine test kit lives in `testkit/`: three Rust workspace members (`runner/` = `foxy-testkit`, `oracle/` = `foxy-testkit-oracle`, `mutator/` = `foxy-testkit-mutate`) plus `cases/`, `ledger/`, `runs/`, and `origin/data/` (those four git-ignored; the crates, docs, and examples are tracked). The kit crates are covered by workspace clippy and `cargo test`, but the *cases* never run from `cargo test`, CI, or a hook.
 - User-facing documentation is `README.md`, `wiki/User-Guide.md` (desktop app and client CLI), `wiki/Server-Admin-Guide.md` (`foxy-server-backend-cli`, hosting, app update manifests), and the in-app Help page (`src/ui/views/help.rs`, strings in `src/ui/locales/`).
-- Shareable agent workflows live in `skills/`; Codex discovery loaders in `.agents/skills/` and Claude Code loaders in `.claude/skills/` point back there. Paired roles live in `.codex/agents/`, `.claude/agents/`, and `.cursor/agents/`.
+- Shareable agent workflows live in `skills/`; Codex discovery loaders in `.agents/skills/` and Claude Code loaders in `.claude/skills/` point back there. Paired roles live in `.codex/agents/`, `.claude/agents/` and `.cursor/agents/`; `cargo agent-check sync-antigravity` generates their Antigravity form in `.agents/`.
 - Runtime data defaults to `%APPDATA%\Foxy` on Windows and can be overridden with `FOXY_CONFIG_DIR` or CLI `--config-dir`. Only app-global files (`app_settings.json`, `games.json`, logs, backups, window state) live at that root; everything else is per game space under `games/<space_id>/`.
 
 ---
@@ -81,7 +81,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - Sync correctness depends on two checksum systems: remote tree hashes use ordered rollups, while local quick checks use BLAKE3 content rollups before tree-hash verification. See `conventions/SYNC_ALGO_CONVENTION.md`.
 - Download execution is patch-first when a persisted patch plan exists, with automatic fallback to full-file download if patch validation or apply fails.
 - Exactly one process may own a game space's `database.db`. Turso has no multi-process access, so `tasks/db_process_lock.rs` takes an advisory lock before the database is opened; the GUI refuses to continue and the CLI exits `DATABASE_BUSY` when another Foxy holds it. Never open the database on a path this process has not claimed.
-- The schema sidecar is a record of intent, not a check. `tasks/db_schema_check.rs` probes the live database on open (columns parsed from the bootstrap schema, plus a parse-only prepare of the real upserts) because the bootstrap is `CREATE ... IF NOT EXISTS` and silently no-ops on an older database. An outdated or incompatible database remains repair-required until a successful wipe, even when the startup warning is dismissed. Foxy and game Launch/Join remain usable; mod checks and updates are blocked in the UI and CLI. Each final UI Launch/Join shows a separate database reminder after Steam, TeamSpeak, addon, and DLC readiness warnings, with a green wipe-and-continue action, a one-action continue-without-wiping choice, and Cancel. See the core and UI conventions for continuation and accessibility rules.
+- The schema sidecar is a record of intent, not a check. `tasks/db_schema_check.rs` probes the live database on open (columns parsed from the bootstrap schema, plus a parse-only prepare of the real upserts) because the bootstrap is `CREATE ... IF NOT EXISTS` and silently no-ops on an older database. An outdated or incompatible database remains repair-required until a successful wipe, even when the startup warning is dismissed. Foxy and game Launch/Join remain usable; mod checks and updates are blocked in the UI and CLI. Each final UI Launch/Join shows a separate database reminder after the readiness warnings; see the core and UI conventions for its actions, continuation and accessibility rules.
 - Schema changes edit the bootstrap `sql/turso_schema.sql` and, when an existing local DB cannot keep using it, bump `DB_SCHEMA_VERSION` (`src/core/tasks/db_schema_version.rs`) to trigger the startup wipe-and-rebuild prompt; config or manifest schema changes require updated examples in the same change.
 - App update metadata can come from repository-space or repository manifests; empty settings may be auto-filled, but non-empty settings are treated as user override.
 - Arma 3, Arma 3 profile management, Steam Workshop, TeamSpeak 3, editor missions, repo-provided launch parameters, and DLC metadata are user-facing integration areas; inspect the relevant UI/core code before changing them.
@@ -90,7 +90,7 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 - The `steamworks` dependency makes `steam_api64.dll` a load-time dependency of the whole binary. It is delay-loaded on MSVC (`build.rs`) so a missing copy does not prevent startup, staged beside the exe by `build.rs` and the CI packaging step, and shipped by the installer. Delay-loading only defers the fault (the first Steamworks call would raise `0xC06D007E`), so only the `foxy steam-helper` subprocess may call Steamworks, and `workshop::run_steam_helper_command` checks the library exists before spawning it. Any change to how the binary is packaged must keep the redistributable next to `Foxy.exe`; CI runs `Foxy.exe version` as a launch smoke.
 - Foxy never needs or requests administrator rights, and it must not hand an elevated token to the game. Game, Eden Editor, and Steam launches go through `core::utils::deelevate::spawn_unelevated`; see `conventions/CORE_CONVENTIONS.md` (Process launching).
 - A UI launch that dies inside the graphics driver stack leaves no log or panic, so `src/ui/launcher.rs` writes a launch-attempt marker before eframe starts and clears it once the app is constructed; each launch that leaves the marker behind starts one rung lower (all wgpu backends, one safe backend, then Glow persisted into the renderer setting). See `conventions/UI_CONVENTIONS.md` (Renderer startup).
-- Dev rebuild time is dominated by rustc re-processing the single ~180k-line monolithic binary crate, not codegen or linking. `[profile.dev] debug = "line-tables-only"` is the adopted mitigation; `rust-lld` and `sccache` were measured to give no net benefit as defaults. The real future lever is splitting the binary into library crates - do not re-litigate toolchain/linker tweaks.
+- Dev rebuild time is dominated by rustc re-processing the single ~180k-line binary crate, not codegen or linking. `[profile.dev] debug = "line-tables-only"` is the mitigation; `rust-lld` and `sccache` measured no net benefit. The lever is splitting the binary into library crates - do not re-litigate toolchain/linker tweaks.
 
 ---
 
@@ -108,10 +108,10 @@ Keep this file as the compact root router. Put detailed conventions in `conventi
 
 ## Autonomous subagent workflows
 
-Use the paired roles and brief/handoff contract in `conventions/AGENT_WORKFLOWS.md` when delegating. Both clients expose `explorer` (source mapping), `worker` (owned-file implementation), `reviewer` (correctness), and `async-safety-reviewer` (task/lock/cancellation safety).
+Use the paired roles and brief/handoff contract in `conventions/AGENT_WORKFLOWS.md` when delegating. Every client exposes `explorer` (source mapping), `worker` (owned-file implementation), `reviewer` (correctness), and `async-safety-reviewer` (task/lock/cancellation safety).
 
 - Delegate independent bounded work when parallel investigation or separate context materially helps. Keep small, sequential, and overlapping work in the main agent; do not spawn just to fill a quota.
-- Give each child a self-contained brief with scope, relevant nested instructions/conventions, invariants, expected evidence, and a stopping condition. In Codex prefer `fork_turns: "none"`; in Claude Code and Cursor use the role as `subagent_type`. Codex and Claude Code inherit the session model. Cursor uses the Grok 4.7 pins in `conventions/AGENT_WORKFLOWS.md` and omits `model` on launch.
+- Give each child a self-contained brief with scope, relevant nested instructions/conventions, invariants, expected evidence, and a stopping condition. Launch details per client are in `conventions/AGENT_WORKFLOWS.md`: Codex `fork_turns: "none"`, Claude Code and Cursor `subagent_type` without `model`, Antigravity `cargo agent-check role <name> <brief>` on each role's Gemini model.
 - Assign writes only across disjoint files and preserve user changes. Keep schema/DB changes, dependencies/lockfiles, shared module wiring, broad formatting, and runtime state in the main agent. Reuse agents for related follow-ups; avoid nested delegation by default.
 - The main agent owns integration, primary-source verification of consequential findings, final checks once after integration, and the answer. Wait for required results. Say when a conclusion relies on unverified subagent findings.
 - Follow the client's actual availability and session limits. If delegation is unavailable, complete the work single-agent and note the limitation only when relevant.
@@ -119,12 +119,8 @@ Use the paired roles and brief/handoff contract in `conventions/AGENT_WORKFLOWS.
 ---
 
 ## Communication
-- Answer in the fewest words that fully address the request. Lead with the answer; skip preamble, restating the question, and closing summaries.
-- Default to a few sentences or a short bullet list. Reserve headings and multi-section write-ups for genuinely large or multi-part tasks the user asked to see laid out.
-- Keep progress updates sparse and high-signal. Prefer one short sentence only when starting a new phase, making edits, waiting on long commands, or hitting a blocker.
-- Avoid verbose running summaries, repeated status prints, and blow-by-blow narration of routine discovery or validation.
-- Do not paste large command outputs unless the user asks. Summarize only the result and any actionable failures.
-- Keep final handoffs compact by default: changed files, validation, and notable caveats only. Do not re-explain code you just wrote unless asked.
+- Answer in the fewest words that fully address the request: lead with the answer, skip preamble and closing summaries, and default to a few sentences or a short list. Use headings only for large tasks the user asked to see laid out.
+- Keep progress updates sparse: one short sentence when starting a phase, editing, waiting on a long command or hitting a blocker. No running summaries, narration of routine checks, or large pasted output; report the result and actionable failures.
 
 ---
 
@@ -150,6 +146,6 @@ Use the paired roles and brief/handoff contract in `conventions/AGENT_WORKFLOWS.
 ---
 
 ## Final response
-- State what changed and where in 1-3 bullets or a short paragraph.
+- State what changed and where in 1-3 bullets or a short paragraph; do not re-explain code you just wrote unless asked.
 - List validation performed, or clearly say why it was not run.
 - Mention only relevant skipped checks, pre-existing failures, or deferred accessibility/CLI parity notes.

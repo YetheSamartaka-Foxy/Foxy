@@ -6,6 +6,7 @@
 - `skills/<name>/SKILL.md` owns each workflow. `.agents/skills/<name>/SKILL.md` exposes it to Codex; `.claude/skills/<name>/SKILL.md` exposes it to Claude Code. Loaders keep matching names and descriptions and link to the canonical file. Do not copy workflow bodies into loaders.
 - Keep UI metadata in canonical `skills/<name>/agents/openai.yaml` and an identical copy beside the Codex loader. Keep automatic skill selection enabled unless explicitly requested otherwise.
 - `.codex/agents/<role>.toml`, `.claude/agents/<role>.md`, and `.cursor/agents/<role>.md` expose the roles below. Keep their names, descriptions, and shared role reference aligned. Codex and Claude Code inherit the session model. Cursor pins the parent chat to `grok-4.7[reasoning_effort=high,context=500k,fast=false]`. `explorer` is `composer-2.5[fast=false]`. `worker`, `reviewer`, and `async-safety-reviewer` are `grok-4.7[reasoning_effort=medium,context=256k,fast=false]`. Launch a Cursor role with `subagent_type` and no `model` argument. Read-only Cursor roles set `readonly: true`. Do not encode dated prices or model rankings.
+- Antigravity (the `agy` CLI and the desktop app) reads root `AGENTS.md` and `.agents/skills/`, but not nested `AGENTS.md` files below its start folder, `.claude/rules/` or `.claude/agents/`. `cargo agent-check sync-antigravity` generates their Antigravity form: `.agents/agents/<role>.md` (each role's description, prompt and tools), `.agents/rules/folder-*.md` (glob rules that inline each nested `AGENTS.md`) and `.agents/rules/claude-*.md` (glob rules that repeat each `.claude/rules/` file). Never edit them by hand; `cargo agent-check` reports them when stale. Roles run on their own Gemini models; see Antigravity below.
 - Use `skills/foxy-agent-maintenance/SKILL.md` when changing this setup. Run `cargo agent-check` from the repository root to check its structure without launching Foxy.
 
 ## Delegation
@@ -75,9 +76,40 @@ Load [core conventions](CORE_CONVENTIONS.md) and `src/core/AGENTS.md`; add [sync
 
 Report concrete failure scenarios with file:line evidence. Do not edit or run builds or live cases.
 
+## Antigravity
+
+Pick the main session's model and thinking level in the app's model selector or with `agy --model <id>`: `gemini-4-hydrogen-high` for routine work, `gemini-4-argon-high` for hard, long-horizon work. Each role runs on its own model and level, listed in `ROLE_MODELS` in `tools/agent-check/src/antigravity.rs`:
+
+| Role | Gemini model |
+| --- | --- |
+| `explorer` | `gemini-3.8-flash-medium` |
+| `worker` | `gemini-4-hydrogen-medium` |
+| `reviewer` | `gemini-4-hydrogen-high` |
+| `async-safety-reviewer` | `gemini-4-hydrogen-high` |
+
+To delegate, the main agent runs the role in the terminal, from the app or the CLI, and reads the printed answer:
+
+```text
+cargo agent-check role --list
+cargo agent-check role explorer "<brief>"
+cargo agent-check role reviewer --brief-file <path>
+cargo agent-check role reviewer --argon --brief-file <path>
+```
+
+`--argon` runs the role on `gemini-4-argon-high` for one hard review. The delegation contract above applies unchanged. Antigravity's built-in subagent tool is not used: a subagent file cannot name a model or a thinking level, only a coarse class that Google maps on its servers. A role started as `agy --agent <role> --model <id>` runs exactly that model and level, so the generated role files set `subagent: false`.
+
+A headless session cannot ask for permission. The launcher passes session-only rules with `toolPermission: request-review`, so an action outside them is refused even when the owner runs Antigravity without prompts:
+
+- every role reads the checkout; `worker` also writes it and runs commands;
+- read-only roles may run read-only `git` and `rg`, also when a global RTK hook rewrote them to `rtk <command>`;
+- every role is denied git commands that change history or the branch, `cargo run`, `cargo prerelease`, running a built `Foxy` and writes to `.git`;
+- when RTK is installed, its config and data folders are readable and writable so it works inside the role's sandbox.
+
+A refused action is listed after the answer and can end the role's turn early. Antigravity loads `.agents/` only in a folder it trusts, and it trusts folders by exact path; a parent folder does not cover the folders inside it.
+
 ## Structural validation
 
-`cargo agent-check` is a read-only Rust helper in `tools/agent-check/`, with its own workspace and lockfile. It dynamically checks all canonical skills and their references: metadata, discovery parity, loader targets, catalog coverage, UI metadata, role pairs, instruction imports, local Markdown file links, and text rules. It does not prove skill quality, enforce shell permissions, validate every prose path or link anchor, or exercise Foxy.
+`cargo agent-check` is a read-only Rust helper in `tools/agent-check/`, with its own workspace and lockfile. It dynamically checks all canonical skills and their references: metadata, discovery parity, loader targets, catalog coverage, UI metadata, role pairs, instruction imports, local Markdown file links, text rules, and whether the generated Antigravity files match their sources and every role has a Gemini model. It does not prove skill quality, enforce shell permissions, validate every prose path or link anchor, or exercise Foxy.
 
 Claude roles omit edit tools for read-only work, but shell access still permits writes. Codex custom-agent instructions also inherit session permissions. These definitions express task boundaries; they do not create a separate sandbox or authorize external actions.
 
@@ -87,4 +119,5 @@ Claude roles omit edit tools for read-only work, but shell access still permits 
 - [Codex skill discovery](https://learn.chatgpt.com/docs/build-skills) and [custom subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 - [Claude Code skills](https://code.claude.com/docs/en/skills) and [custom subagents](https://code.claude.com/docs/en/sub-agents).
 - [Cursor subagents](https://cursor.com/docs/subagents) and [Grok 4.7](https://cursor.com/docs/models/grok-4-7).
+- Antigravity [models](https://antigravity.google/docs/models/), [custom subagents](https://antigravity.google/docs/subagents/), [rules](https://antigravity.google/docs/rules), [permissions](https://antigravity.google/docs/permissions/) and [CLI](https://antigravity.google/docs/cli/reference).
 - [Tokio shared-state guidance](https://tokio.rs/tokio/tutorial/shared-state) and [blocking-task cancellation](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html).

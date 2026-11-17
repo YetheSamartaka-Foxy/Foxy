@@ -1,3 +1,4 @@
+pub mod antigravity;
 mod imports;
 mod markdown;
 mod roles;
@@ -26,6 +27,7 @@ pub fn validate_repo(repo: &Path) -> Vec<Diagnostic> {
     skills::validate(repo, &mut diagnostics);
     roles::validate(repo, &mut diagnostics);
     imports::validate(repo, &mut diagnostics);
+    antigravity::validate(repo, &mut diagnostics);
     markdown::validate_dashes(repo, &mut diagnostics);
     markdown::validate_links(repo, &mut diagnostics);
     diagnostics.sort_by(|a, b| (&a.path, &a.message).cmp(&(&b.path, &b.message)));
