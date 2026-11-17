@@ -529,7 +529,7 @@ foxy server maintenance history <instance-id> --game-space arma3 --json
 | `--retry-delay-seconds N` | 60 | Wait between attempts, 10-3600 |
 | `--stop-timeout-seconds N` | 60 | Graceful stop timeout of each restart, 5-120 |
 
-`restart` is the only action that runs. It restarts the committed runtime through the same reviewed start plan and the owner's operation admission as a manual restart, under the client id `maintenance`. A scheduled restart never starts a server that is not running: an operator stop before the job records `skipped` with `server_not_running`. If the server stops outside the job during a deferral, or is started outside the job after the job stopped it (even if it was stopped again before a retry), the job records that and does nothing more. When a restart stopped the server but its start failed, the retry only starts it again. `update` and `backup` can be saved, but every occurrence is `blocked` with `adapter_unavailable` until those adapters exist; update an installation explicitly.
+`restart` runs through the reviewed start plan and never starts a stopped server. On Reforger, `reload-scenario` uses the native same-process scenario reload operation; it does not stop and relaunch the process. Arma alone supports `rotate-mission`. `update` and `backup` can be saved, but every occurrence is `blocked` with `adapter_unavailable` until those adapters exist; update an installation explicitly.
 
 Each occurrence is a durable record under the instance's `maintenance/occurrences/`, claimed exactly once from a deterministic id, so a second owner or a repeated tick cannot run the same scheduled time twice. Its state is `claimed`, `deferred`, `running`, `retry_wait`, `succeeded`, `failed`, `skipped`, `blocked`, `cancelled` or `unknown`, with a reason and the run generations before and after. The record is written as `running` before the restart starts. If the owner ends during an occurrence, the next owner records it as `unknown` with `owner_lost` and never repeats it: the server may or may not have restarted. Review the server status and, after a crash, the consumer recovery below. A scheduled time that comes while another occurrence of the same job is still open is recorded as `skipped` with `overlapping_occurrence`, so a manual run just before the schedule does not restart twice. An occurrence that waits behind another one longer than its grace and deferral allowance is skipped as missed. The 64 most recent finished occurrences are kept, plus each job's latest scheduled record, so a pruned record can never let a scheduled time run again. `history` lists records newest first and counts unreadable records without touching them.
 
@@ -577,7 +577,7 @@ foxy server rcon status <instance-id> --game-space arma3 --json
 foxy server rcon test <instance-id> --game-space arma3 --json
 foxy server rcon command <instance-id> --text "players" [--timeout-ms 10000] --game-space arma3 --yes --json
 foxy server rcon history <instance-id> --game-space arma3 --json
-foxy server rcon probe [<instance-id>] [--endpoint 127.0.0.1:2310] [--password-stdin] [--command "players"] [--timeout-ms 5000] --game-space arma3 --json
+foxy server rcon probe [<instance-id>] [--endpoint 127.0.0.1:2310] [--password-stdin] [--command "players"] [--timeout-ms 5000] [--listen-ms 2000] --game-space arma3 --json
 ```
 
 `configure`, `set-password` and `disable` change the draft, need its current revision and honor `--dry-run`; `disable` needs `--yes`. RCon settings are part of the committed configuration, so commit, prepare and activate the new revision, then restart the server, to apply a change. The address defaults to `127.0.0.1`, which keeps RCon on this computer. For Arma the port must stay outside the game port range (game port to game port + 4), and Start review refuses RCon while BattlEye is off. For Reforger, `--permission` applies to every RCon connection (it is not a per-operator account) and defaults to `monitor`.
@@ -590,9 +590,15 @@ While a server with RCon runs, the owner for its game space keeps one RCon sessi
 
 `probe` opens a separate short session without the owner. With an instance id it uses the active runtime's endpoint and protected password; `--endpoint` connects elsewhere, such as a tunnel or port forward, and `--password-stdin` reads a different password. It logs in, exchanges a keepalive, and with `--command` and `--yes` sends one command once. The `login` field is `accepted`, `rejected`, `no_reply`, `unreachable` or `local_socket`.
 
-Typed administration commands, such as player lists, messages, kicks, bans and scenario reload, are not part of this release yet; use `command` with text your server version documents.
+`--listen-ms` defaults to 300 and accepts 0 through 30000. After login, keepalive and any command, the probe listens for this bounded interval and includes captured asynchronous messages in `data.messages`. Increase it when Reforger emits a semantic response, such as a permission denial, after the command ACK. An ACK proves only that the command received a transport reply, not that its effect completed.
+
+The main Foxy binary offers typed native Reforger administration through `server reforger-admin`; see [Reforger administration](Server-Reforger-Administration.md). The raw `command` interface remains available for documented commands that do not have a typed operation.
 
 The desktop **RCon** section shows the draft settings and the live session. It offers **Configure RCon** (or **Edit RCon settings**), **Set RCon password** with a masked field, **Remove RCon**, **Test RCon connection**, and a command field with **Send command...**, whose confirmation focuses **Cancel**. It shows the last command's outcome, its reply, and the recent commands. The [command record example](../examples/json/server_backend/server_rcon_command.json) and [instance example](../examples/json/server_backend/arma3_rcon_instance.json) use synthetic ids.
+
+#### Reforger administration
+
+Native Reforger typed administration is documented separately in [Reforger server administration](Server-Reforger-Administration.md). It provides player and ban list requests, identity-checked kick, ban and unban, scenario reload, and logout through the existing owner. Unknown command outcomes are never resent automatically.
 
 ---
 

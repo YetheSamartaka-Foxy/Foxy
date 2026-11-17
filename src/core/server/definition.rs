@@ -90,6 +90,7 @@ impl ServerDefinition {
                 rcon: None,
             }),
             ServerDefinitionKind::Reforger => Self::Reforger(Box::new(ReforgerServerDefinition {
+                scenario_end: Default::default(),
                 name: name.to_string(),
                 bind_port: 2001,
                 bind_address: None,
@@ -168,6 +169,7 @@ impl ServerDefinition {
                 }
             }
             Self::Reforger(settings) => {
+                settings.scenario_end.validate()?;
                 validate_text(&settings.name, "server name", 256)?;
                 if settings.bind_port == 0
                     || settings.a2s_port == Some(0)
@@ -345,6 +347,11 @@ pub enum Arma3Difficulty {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReforgerServerDefinition {
+    #[serde(
+        default,
+        skip_serializing_if = "super::ReforgerScenarioEnd::is_default"
+    )]
+    pub scenario_end: super::ReforgerScenarioEnd,
     pub name: String,
     pub bind_port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]

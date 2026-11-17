@@ -15,6 +15,9 @@ const OWNER_START_DEADLINE: Duration = Duration::from_secs(30);
 const READY_DEADLINE: Duration = Duration::from_secs(300);
 const SESSION_DEADLINE: Duration = Duration::from_secs(180);
 
+#[path = "server_rcon_native/reforger.rs"]
+mod reforger;
+
 struct Case {
     config: PathBuf,
     space: String,

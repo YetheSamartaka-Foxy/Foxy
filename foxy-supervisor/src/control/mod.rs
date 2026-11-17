@@ -11,7 +11,7 @@ pub use session::{ClientSession, ServerSession};
 use serde::{Deserialize, Serialize};
 use std::{fmt, io};
 
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 1024;
 
@@ -160,6 +160,17 @@ pub enum Operation {
         instance_id: String,
         expected_run_generation: u64,
         command_json: String,
+        timeout_ms: u32,
+    },
+    SendReforgerAdminCommand {
+        instance_id: String,
+        expected_run_generation: u64,
+        command_json: String,
+        timeout_ms: u32,
+    },
+    ReloadReforgerScenario {
+        instance_id: String,
+        expected_run_generation: u64,
         timeout_ms: u32,
     },
     RotateArmaMission {

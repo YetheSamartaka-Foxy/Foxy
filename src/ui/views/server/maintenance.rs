@@ -86,6 +86,7 @@ fn action_text(action: MaintenanceAction) -> String {
     tr(match action {
         MaintenanceAction::Restart => "Restart the server",
         MaintenanceAction::RotateMission => "Rotate mission",
+        MaintenanceAction::ReloadScenario => "Reload Reforger scenario",
         MaintenanceAction::Update => "Update the installation",
         MaintenanceAction::Backup => "Back up the server",
     })
@@ -656,6 +657,9 @@ impl Foxy {
                 if capabilities.arma_administration {
                     choices.push(MaintenanceAction::RotateMission);
                 }
+                if capabilities.reforger_administration {
+                    choices.push(MaintenanceAction::ReloadScenario);
+                }
                 for choice in choices {
                     let reason = choice.unavailable_reason(&capabilities);
                     let response = ui.add_enabled(
@@ -676,6 +680,9 @@ impl Foxy {
                 ui.label(tr(
                     "Mission rotation requires Arma RCon and a mission template already deployed to the server.",
                 ));
+            }
+            if form.action == MaintenanceAction::ReloadScenario {
+                ui.label(tr("This sends the Reforger scenario reload command. Use the lifecycle Restart control to restart the server process."));
             }
             ui.label(RichText::new(tr("When")).strong());
             ui.horizontal(|ui| {

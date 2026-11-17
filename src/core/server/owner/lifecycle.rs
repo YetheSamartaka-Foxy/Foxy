@@ -104,6 +104,7 @@ impl Attachment {
             | Operation::StopInstance { instance_id, .. }
             | Operation::RestartInstance { instance_id, .. }
             | Operation::RotateArmaMission { instance_id, .. }
+            | Operation::ReloadReforgerScenario { instance_id, .. }
             | Operation::StartHeadlessClients { instance_id, .. }
             | Operation::StopHeadlessClients { instance_id, .. }
             | Operation::RestartHeadlessClients { instance_id, .. } => {
@@ -236,6 +237,10 @@ fn validate_lifecycle_outcome(
         | Operation::RotateArmaMission {
             expected_run_generation,
             ..
+        }
+        | Operation::ReloadReforgerScenario {
+            expected_run_generation,
+            ..
         } if outcome.status.run_generation != *expected_run_generation => Err(invalid(
             "Lifecycle stop outcome run does not match the request",
         )),
@@ -277,7 +282,7 @@ fn validate_lifecycle_outcome(
         | Operation::StartHeadlessClients { .. }
         | Operation::StopHeadlessClients { .. }
         | Operation::RestartHeadlessClients { .. } => Ok(()),
-        Operation::RotateArmaMission { .. } => Ok(()),
+        Operation::RotateArmaMission { .. } | Operation::ReloadReforgerScenario { .. } => Ok(()),
         _ => Err(invalid("Invalid lifecycle operation")),
     }
 }

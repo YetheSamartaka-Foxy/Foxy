@@ -1,0 +1,13 @@
+{
+  "shutdown": {
+    "mode": "shutdown",
+    "delay_seconds": 0
+  },
+  "reload": {
+    "mode": "reload",
+    "delay_seconds": 30
+  },
+  "disabled": {
+    "mode": "disabled"
+  }
+}

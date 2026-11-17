@@ -75,6 +75,7 @@ pub(crate) enum ServerDialog {
 #[derive(Default)]
 pub(crate) struct ServerViewState {
     pub arma_admin: super::arma_admin::ArmaAdminViewState,
+    pub reforger_admin: super::reforger_admin::ReforgerAdminViewState,
     pub steam_auth: super::steam_auth::ServerSteamState,
     pub key_review: Option<Box<crate::core::server::ServerKeyReview>>,
     pub key_selection: std::collections::BTreeSet<String>,
@@ -370,6 +371,7 @@ impl ServerViewState {
         self.maintenance = Default::default();
         self.rcon = Default::default();
         self.arma_admin = Default::default();
+        self.reforger_admin = Default::default();
         self.native_install_plan = None;
         self.native_install_outcome = None;
         self.native_install_check = None;

@@ -201,6 +201,7 @@ pub fn run_from_env() -> CliExecution {
                             | args::ServerCommand::Maintenance { .. }
                             | args::ServerCommand::Rcon { .. }
                             | args::ServerCommand::Admin { .. }
+                            | args::ServerCommand::ReforgerAdmin { .. }
                             | args::ServerCommand::ReforgerAddons { .. }
                     }
             )
@@ -243,7 +244,8 @@ pub fn run_from_env() -> CliExecution {
                     | args::ServerCommand::Headless { .. }
                     | args::ServerCommand::Maintenance { .. }
                     | args::ServerCommand::Rcon { .. }
-                    | args::ServerCommand::Admin { .. },
+                    | args::ServerCommand::Admin { .. }
+                    | args::ServerCommand::ReforgerAdmin { .. },
             })
         )
     {
@@ -483,6 +485,7 @@ fn server_database_use(command: &args::ServerCommand) -> ServerDatabaseUse {
         | args::ServerCommand::Maintenance { .. }
         | args::ServerCommand::Rcon { .. }
         | args::ServerCommand::Admin { .. }
+        | args::ServerCommand::ReforgerAdmin { .. }
         | args::ServerCommand::ReforgerAddons { .. }
         | args::ServerCommand::Deploy { .. } => ServerDatabaseUse::LocalMetadata,
     }

@@ -92,6 +92,8 @@ pub struct RconCommandRecord {
     pub response: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub response_truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) messages: Vec<super::ServerText>,
     pub requested_unix_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_unix_ms: Option<i64>,
@@ -121,6 +123,7 @@ impl RconCommandRecord {
             reason: None,
             response: None,
             response_truncated: false,
+            messages: Vec::new(),
             requested_unix_ms: super::unix_ms(),
             sent_unix_ms: None,
             finished_unix_ms: None,
@@ -149,6 +152,13 @@ impl RconCommandRecord {
     fn validate(&self, file_name: &str) -> bool {
         self.schema == RECORD_SCHEMA
             && valid_command_id(&self.command_id)
+            && self.messages.len() <= 64
+            && self
+                .messages
+                .iter()
+                .map(|message| message.text.len())
+                .sum::<usize>()
+                <= MAX_STORED_RESPONSE
             && file_name == format!("{}.json", self.command_id)
             && foxy_supervisor::control::valid_rcon_text(&self.text)
             && self.owner_generation != 0

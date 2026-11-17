@@ -232,6 +232,7 @@ fn definition(
         action: match args.action {
             ServerMaintenanceActionArg::Restart => MaintenanceAction::Restart,
             ServerMaintenanceActionArg::RotateMission => MaintenanceAction::RotateMission,
+            ServerMaintenanceActionArg::ReloadScenario => MaintenanceAction::ReloadScenario,
             ServerMaintenanceActionArg::Update => MaintenanceAction::Update,
             ServerMaintenanceActionArg::Backup => MaintenanceAction::Backup,
         },
@@ -439,6 +440,7 @@ fn job_line(status: &JobStatus) -> String {
     let action = match job.definition.action {
         MaintenanceAction::Restart => "restart",
         MaintenanceAction::RotateMission => "rotate_mission",
+        MaintenanceAction::ReloadScenario => "reload_scenario",
         MaintenanceAction::Update => "update",
         MaintenanceAction::Backup => "backup",
     };

@@ -335,6 +335,7 @@ impl ServerStore {
             .map_err(|_| ServerStoreError::Io)?
             .port();
         let settings = ReforgerServerDefinition {
+            scenario_end: Default::default(),
             name: hostname.clone(),
             bind_port,
             bind_address: Some(Ipv4Addr::LOCALHOST),

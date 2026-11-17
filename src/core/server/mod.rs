@@ -49,6 +49,7 @@ mod runs;
 mod runtime_payload;
 mod saves;
 mod scenario;
+mod scenario_end;
 pub(crate) mod steam_auth;
 mod store;
 mod support;
@@ -142,6 +143,7 @@ pub use reforger_schema::{
     preview_warnings, read_scenario_log, render_server_json, scenario_listing_note,
     write_server_json,
 };
+pub use scenario_end::ReforgerScenarioEnd;
 pub use store::read_bounded;
 pub use store::{DraftChange, ServerCatalog, ServerStore, ServerStoreError};
 pub use support::{RuntimePrerequisites, support_report};

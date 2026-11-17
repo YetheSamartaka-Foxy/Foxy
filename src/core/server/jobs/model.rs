@@ -13,6 +13,7 @@ pub const MAINTENANCE_SCHEMA_VERSION: u32 = 1;
 pub enum MaintenanceAction {
     Restart,
     RotateMission,
+    ReloadScenario,
     Update,
     Backup,
 }
@@ -21,6 +22,10 @@ impl MaintenanceAction {
     /// The reason an occurrence of this action cannot execute for a game, or `None` when it can.
     pub fn unavailable_reason(self, capabilities: &ServerCapabilities) -> Option<&'static str> {
         match self {
+            Self::ReloadScenario if capabilities.reforger_administration => None,
+            Self::ReloadScenario => {
+                Some("Scenario reload requires native Reforger administration.")
+            }
             Self::RotateMission if capabilities.arma_administration => None,
             Self::RotateMission => Some("Mission rotation requires native Arma administration."),
             Self::Restart if capabilities.lifecycle => None,

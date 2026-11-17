@@ -3,6 +3,7 @@
 pub mod arma3;
 pub(in crate::core::server) mod owned;
 pub(crate) mod records;
+pub mod reforger;
 mod session;
 mod settings;
 #[cfg(test)]

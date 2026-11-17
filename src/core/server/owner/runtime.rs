@@ -204,6 +204,7 @@ impl RuntimeService {
             | Operation::StopInstance { instance_id, .. }
             | Operation::RestartInstance { instance_id, .. }
             | Operation::RotateArmaMission { instance_id, .. }
+            | Operation::ReloadReforgerScenario { instance_id, .. }
             | Operation::StartHeadlessClients { instance_id, .. }
             | Operation::StopHeadlessClients { instance_id, .. }
             | Operation::RestartHeadlessClients { instance_id, .. } => instance_id,

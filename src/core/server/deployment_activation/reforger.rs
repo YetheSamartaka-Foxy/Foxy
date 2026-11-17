@@ -31,6 +31,11 @@ struct RconConfiguration {
     port: u16,
     #[serde(default)]
     password: Option<String>,
+    permission: crate::core::server::ReforgerRconPermission,
+    #[serde(default)]
+    whitelist: Vec<String>,
+    #[serde(default)]
+    blacklist: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +68,7 @@ impl NativeConfiguration {
         let configuration: Self =
             serde_json::from_slice(bytes).map_err(|_| ServerStoreError::Corrupt)?;
         let definition = ReforgerServerDefinition {
+            scenario_end: Default::default(),
             name: configuration.game.name.clone(),
             bind_address: configuration.bind_address,
             bind_port: configuration.bind_port,
@@ -197,6 +203,9 @@ pub(super) fn validate_configuration(
 }
 
 pub(super) fn validate_manifest(manifest: &NativeRuntimeManifest) -> Result<(), ServerStoreError> {
+    if let Some(policy) = &manifest.reforger_scenario_end {
+        policy.validate().map_err(|_| ServerStoreError::Corrupt)?;
+    }
     if !manifest.headless_clients.is_empty() {
         return Err(ServerStoreError::Corrupt);
     }
@@ -455,6 +464,11 @@ impl ServerStore {
                     settings.port,
                 ),
                 password_reference: password_reference.to_owned(),
+                reforger: Some(super::launch::NativeReforgerRconAccess {
+                    permission: settings.permission,
+                    whitelist: settings.whitelist.clone(),
+                    blacklist: settings.blacklist.clone(),
+                }),
             });
         }
         let mut arguments = vec![
@@ -478,6 +492,13 @@ impl ServerStore {
             "-maxFPS".into(),
             "30".into(),
         ];
+        arguments.extend(
+            manifest
+                .reforger_scenario_end
+                .clone()
+                .unwrap_or_default()
+                .arguments(),
+        );
         if manifest
             .reforger_addons
             .as_ref()
@@ -509,6 +530,7 @@ impl ServerStore {
             executable,
             directory: engine,
             arguments,
+            reforger_scenario: Some(configuration.game.scenario_id.clone()),
             udp_ports: configuration.ports(),
             environment: super::launch::runtime_environment(
                 &state,
@@ -729,6 +751,7 @@ impl ServerStore {
             credential_bindings: Vec::new(),
             reforger_addons: locked_addons,
             headless_clients: Vec::new(),
+            reforger_scenario_end: Some(settings.scenario_end.clone()),
         };
         validate_manifest(&manifest)?;
         Ok(manifest)

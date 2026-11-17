@@ -58,7 +58,7 @@ impl ServerStore {
             serde_json::from_slice(&bytes).map_err(|_| ServerStoreError::Corrupt)?;
         if manifest.schema_version != 1
             || (manifest.installation.game == super::super::ServerDefinitionKind::Arma3
-                && manifest.reforger_addons.is_some())
+                && (manifest.reforger_addons.is_some() || manifest.reforger_scenario_end.is_some()))
             || manifest.game_space_id != self.context().space_id()
             || &manifest.instance_id != id
             || fingerprint(&manifest)? != reference.manifest_fingerprint

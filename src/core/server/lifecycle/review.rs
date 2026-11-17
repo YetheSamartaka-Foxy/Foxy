@@ -104,6 +104,7 @@ mod tests {
             fingerprint: "b".repeat(64),
             owner_exit_policy: super::super::OWNER_EXIT_POLICY,
             launch: crate::core::server::deployment_activation::NativeRuntimeLaunchPlan {
+                reforger_scenario: None,
                 monitoring: None,
                 instance_id: id,
                 runtime_id: format!("runtime_{}", "a".repeat(64)),

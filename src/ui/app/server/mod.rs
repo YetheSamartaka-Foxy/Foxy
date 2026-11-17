@@ -1,6 +1,7 @@
 pub(crate) mod arma_admin;
 mod maintenance;
 mod rcon;
+pub(crate) mod reforger_admin;
 mod state;
 mod steam_auth;
 mod tasks;
@@ -158,6 +159,7 @@ impl Foxy {
                     | ServerTaskAction::TestRcon { .. }
                     | ServerTaskAction::SendRconCommand { .. }
                     | ServerTaskAction::SendArmaAdminCommand { .. }
+                    | ServerTaskAction::SendReforgerAdminCommand { .. }
             )
         {
             self.server_view.error = Some(ServerStoreError::Invalid(
@@ -279,6 +281,10 @@ impl Foxy {
             self.server_view.status = None;
         }
         let kind = match &action {
+            ServerTaskAction::SendReforgerAdminCommand {
+                command: crate::core::server::rcon::reforger::ReforgerAdminCommand::ReloadScenario,
+                ..
+            } => Some(ServerTaskKind::Lifecycle),
             ServerTaskAction::LoadReforgerAddonLock(_)
             | ServerTaskAction::PlanReforgerAddonAcquisition { .. }
             | ServerTaskAction::AcquireReforgerAddons(_) => Some(ServerTaskKind::Acquisition),
@@ -505,6 +511,7 @@ impl Foxy {
                 | ServerTaskAction::TestRcon { .. }
                 | ServerTaskAction::SendRconCommand { .. } => "server-rcon-controls",
                 ServerTaskAction::SendArmaAdminCommand { .. } => "server-rcon-controls",
+                ServerTaskAction::SendReforgerAdminCommand { .. } => "server-rcon-controls",
                 _ => "server-configuration-controls",
             })
         };
@@ -634,6 +641,9 @@ impl Foxy {
             if result.is_err() {
                 self.server_view.rcon.confirmation = None;
                 self.server_view.arma_admin.confirmation = None;
+                self.server_view.reforger_admin.confirmation = None;
+                self.server_view.reforger_admin.action_error =
+                    result.as_ref().err().map(ToString::to_string);
                 self.server_view.arma_admin.action_error =
                     result.as_ref().err().map(ToString::to_string);
             }

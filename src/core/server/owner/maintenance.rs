@@ -497,7 +497,9 @@ impl MaintenanceService {
         }
         if !matches!(
             occurrence.action,
-            MaintenanceAction::Restart | MaintenanceAction::RotateMission
+            MaintenanceAction::Restart
+                | MaintenanceAction::RotateMission
+                | MaintenanceAction::ReloadScenario
         ) {
             return;
         }
@@ -593,18 +595,26 @@ impl MaintenanceService {
             }
         };
         occurrence.attempts = occurrence.attempts.saturating_add(1);
-        if (occurrence.action == MaintenanceAction::RotateMission
-            || policy
-                .arma
-                .as_ref()
-                .is_some_and(|arma| arma.announcement.is_some()))
+        if (matches!(
+            occurrence.action,
+            MaintenanceAction::RotateMission | MaintenanceAction::ReloadScenario
+        ) || policy
+            .arma
+            .as_ref()
+            .is_some_and(|arma| arma.announcement.is_some()))
             && plan.launch.rcon.is_none()
         {
             return Self::finish(&root, occurrence, OccurrenceState::Blocked,
                 Some(OccurrenceReason::AdapterUnavailable),
                 Some("This Arma maintenance action requires RCon in the committed runtime. Nothing was sent.".into()));
         }
-        let operation = if occurrence.action == MaintenanceAction::RotateMission {
+        let operation = if occurrence.action == MaintenanceAction::ReloadScenario {
+            Operation::ReloadReforgerScenario {
+                instance_id: id.as_str().into(),
+                expected_run_generation: status.as_ref().map_or(0, |status| status.run_generation),
+                timeout_ms: u32::from(policy.stop_timeout_seconds) * 1000,
+            }
+        } else if occurrence.action == MaintenanceAction::RotateMission {
             Operation::RotateArmaMission {
                 instance_id: id.as_str().into(),
                 expected_run_generation: status.as_ref().map_or(0, |status| status.run_generation),
@@ -759,11 +769,13 @@ impl MaintenanceService {
         let cancelled = cancelled || cancel_requested;
         if !completed
             && !cancelled
-            && (occurrence.action == MaintenanceAction::RotateMission
-                || policy
-                    .arma
-                    .as_ref()
-                    .is_some_and(|arma| arma.announcement.is_some()))
+            && (matches!(
+                occurrence.action,
+                MaintenanceAction::RotateMission | MaintenanceAction::ReloadScenario
+            ) || policy
+                .arma
+                .as_ref()
+                .is_some_and(|arma| arma.announcement.is_some()))
         {
             return Self::finish(&root, occurrence, OccurrenceState::Unknown,
                 Some(OccurrenceReason::AttemptFailed), message.or_else(|| Some("The administration effect is unconfirmed; it will not be repeated automatically.".into())));

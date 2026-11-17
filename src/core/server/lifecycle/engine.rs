@@ -21,6 +21,7 @@ use crate::core::server::{
 
 mod administration;
 mod headless;
+mod reforger;
 
 const MAX_RETAINED_INSTANCES: usize = 128;
 
@@ -40,6 +41,7 @@ struct Run {
     headless: headless::HeadlessGroup,
     rcon: Option<crate::core::server::deployment_activation::NativeRconPlan>,
     rcon_stop: RconShutdownDelivery,
+    reforger_scenario: Option<String>,
 }
 
 pub(super) struct Runs {
@@ -242,6 +244,17 @@ impl Runs {
                 execution,
                 control,
             ),
+            Operation::ReloadReforgerScenario {
+                instance_id,
+                expected_run_generation,
+                timeout_ms,
+            } if instance_id == id.as_str() => self.reload_reforger_scenario(
+                &id,
+                expected_run_generation,
+                timeout_ms,
+                execution,
+                control,
+            ),
             Operation::StartHeadlessClients {
                 instance_id,
                 expected_run_generation,
@@ -349,6 +362,7 @@ impl Runs {
                 headless: headless::HeadlessGroup::default(),
                 rcon: None,
                 rcon_stop: RconShutdownDelivery::Unattempted,
+                reforger_scenario: plan.launch.reforger_scenario.clone(),
             },
         );
         self.publish();
@@ -608,8 +622,13 @@ impl Runs {
             return Ok(outcome);
         }
         control.checkpoint()?;
-        let use_rcon = if self.store.capabilities().arma_administration
+        let use_rcon = if (self.store.capabilities().arma_administration
+            || self.store.capabilities().reforger_administration)
             && let Some(rcon_plan) = run.rcon.as_ref()
+            && rcon_plan
+                .reforger
+                .as_ref()
+                .is_none_or(|access| access.permits("#shutdown", true))
         {
             if run.rcon_stop == RconShutdownDelivery::Unattempted {
                 run.rcon_stop = RconShutdownDelivery::SentOrUnknown;

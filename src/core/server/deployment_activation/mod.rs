@@ -53,6 +53,8 @@ pub struct NativeRuntimeManifest {
     pub reforger_addons: Option<super::ReforgerAddonLock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headless_clients: Vec<super::NativeHeadlessClient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reforger_scenario_end: Option<super::ReforgerScenarioEnd>,
 }
 
 #[derive(Clone, Debug, Serialize)]

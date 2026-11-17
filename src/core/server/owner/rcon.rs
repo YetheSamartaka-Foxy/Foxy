@@ -9,6 +9,7 @@ use super::runtime::RuntimeService;
 use super::*;
 use crate::core::server::deployment_activation::NativeRconPlan;
 use crate::core::server::rcon::arma3::ArmaAdminCommand;
+use crate::core::server::rcon::reforger::ReforgerAdminCommand;
 use crate::core::server::rcon::{
     self, CommandOutcome, KEEPALIVE_INTERVAL, LoginFailure, RconPassword, Retransmit, ServerText,
     Session, SessionCounters,
@@ -132,6 +133,27 @@ pub(crate) fn inspect_payload(status: &RconSessionStatus) -> io::Result<Operatio
     }
 }
 
+enum AdminGuard {
+    Arma(ArmaAdminCommand),
+    Reforger(ReforgerAdminCommand),
+}
+
+impl AdminGuard {
+    fn required_preflight(&self) -> Option<&'static str> {
+        match self {
+            Self::Arma(command) => command.required_preflight(),
+            Self::Reforger(command) => command.required_preflight(),
+        }
+    }
+
+    fn validate_preflight(&self, response: &str) -> Result<(), String> {
+        match self {
+            Self::Arma(command) => command.validate_preflight(response),
+            Self::Reforger(command) => command.validate_preflight(response),
+        }
+    }
+}
+
 enum Work {
     Test {
         key: u64,
@@ -140,7 +162,7 @@ enum Work {
         key: u64,
         record: Box<RconCommandRecord>,
         timeout: Duration,
-        guard: Option<ArmaAdminCommand>,
+        guard: Option<AdminGuard>,
     },
 }
 
@@ -156,6 +178,7 @@ struct Shared {
 
 struct Worker {
     run_generation: u64,
+    reforger_access: Option<super::super::deployment_activation::launch::NativeReforgerRconAccess>,
     shared: Arc<Mutex<Shared>>,
     work: mpsc::SyncSender<Work>,
     finished: mpsc::Receiver<Finished>,
@@ -174,16 +197,16 @@ impl Worker {
         status
     }
 
-    /// A worker inside a login or command sees the flag only afterwards; it is detached then,
-    /// and still finalizes its own record.
     fn stop(&mut self, wait: Duration) {
         self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = self.handle.as_ref() {
             let deadline = Instant::now() + wait;
             while !handle.is_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            if handle.is_finished() {
+            if handle.is_finished()
+                && let Some(handle) = self.handle.take()
+            {
                 let _ = handle.join();
             }
         }
@@ -268,6 +291,9 @@ impl RconService {
             if let Some(mut worker) = self.workers.remove(&id) {
                 worker.stop(Duration::ZERO);
                 self.drain(&id, &worker, ledger)?;
+                if worker.handle.is_some() {
+                    self.workers.insert(id, worker);
+                }
             }
         }
         for (id, (generation, plan)) in targets {
@@ -368,6 +394,7 @@ impl RconService {
         let context = self.context.clone();
         let instance = ServerInstanceId::try_from(id.to_owned())
             .map_err(|_| invalid("Invalid RCon instance"))?;
+        let reforger_access = plan.reforger.clone();
         let handle = {
             let shared = shared.clone();
             let stop = stop.clone();
@@ -388,6 +415,7 @@ impl RconService {
         };
         Ok(Worker {
             run_generation,
+            reforger_access,
             shared,
             work,
             finished,
@@ -412,6 +440,7 @@ impl RconService {
                 | Operation::TestRcon { .. }
                 | Operation::SendRconCommand { .. }
                 | Operation::SendArmaAdminCommand { .. }
+                | Operation::SendReforgerAdminCommand { .. }
         ) {
             return Ok(None);
         }
@@ -534,7 +563,7 @@ impl RconService {
                         instance_id,
                         *expected_run_generation,
                         &text,
-                        Some(command),
+                        Some(AdminGuard::Arma(command)),
                         *timeout_ms,
                         session.client_id(),
                         *request_id,
@@ -554,6 +583,48 @@ impl RconService {
                     }
                 }
             }
+            Operation::SendReforgerAdminCommand {
+                instance_id,
+                expected_run_generation,
+                command_json,
+                timeout_ms,
+            } => {
+                let key = self.next_key;
+                self.next_key += 1;
+                let command = serde_json::from_str::<ReforgerAdminCommand>(command_json)
+                    .map_err(|_| command_refused("Invalid typed Reforger command"));
+                let outcome = command.and_then(|command| {
+                    if runtime.busy() {
+                        return Err(command_refused("A server lifecycle or maintenance operation is running; nothing was sent"));
+                    }
+                    let store = ServerStore::new(self.context.clone())
+                        .map_err(|_| command_refused("The server store is unavailable"))?;
+                    if !store.capabilities().reforger_administration {
+                        return Err(command_refused("Reforger administration is unavailable in this game space"));
+                    }
+                    let text = command.wire_text().map_err(command_refused)?;
+                    let access = self.workers.get(instance_id)
+                        .and_then(|worker| worker.reforger_access.as_ref())
+                        .ok_or_else(|| command_refused("The committed runtime has no Reforger RCon access policy"))?;
+                    if !access.permits(&text, command.requires_admin()) {
+                        return Err(command_refused("The committed RCon permission or command filters refuse this action. Nothing was sent."));
+                    }
+                    self.queue_command(instance_id, *expected_run_generation, &text,
+                        Some(AdminGuard::Reforger(command)), *timeout_ms,
+                        session.client_id(), *request_id, key)
+                });
+                match outcome {
+                    Ok(()) => self.jobs.push(Job {
+                        ticket,
+                        key,
+                        instance: instance_id.clone(),
+                        test: false,
+                    }),
+                    Err(reply) => {
+                        ledger.complete_pending(ticket, encode(&reply, false)?)?;
+                    }
+                }
+            }
             _ => {}
         }
         Ok(Some(response))
@@ -565,7 +636,7 @@ impl RconService {
         instance_id: &str,
         expected_run_generation: u64,
         text: &str,
-        guard: Option<ArmaAdminCommand>,
+        guard: Option<AdminGuard>,
         timeout_ms: u32,
         client: &str,
         request_id: u64,
@@ -829,6 +900,39 @@ fn run_worker(inputs: WorkerInputs) {
                 timeout,
                 guard,
             }) => {
+                if matches!(&guard, Some(AdminGuard::Reforger(_))) {
+                    if let Some(mut previous) = session.take() {
+                        let _ = previous.command(
+                            b"@logout",
+                            Duration::from_millis(500),
+                            Retransmit::Never,
+                        );
+                        add(&mut base, previous.counters());
+                    }
+                    let password = store
+                        .as_ref()
+                        .and_then(|store| {
+                            store
+                                .resolve_config_secret(&instance, &plan.password_reference)
+                                .ok()
+                        })
+                        .and_then(|secret| RconPassword::new(secret).ok());
+                    session = password.as_ref().and_then(|password| {
+                        Session::login(plan.endpoint, password, LOGIN_TIMEOUT).ok()
+                    });
+                    drop(password);
+                    update_status(&shared, |status| {
+                        status.connection = if session.is_some() {
+                            RconConnection::Connected
+                        } else {
+                            RconConnection::Lost
+                        };
+                        if session.is_some() {
+                            status.session_generation = status.session_generation.saturating_add(1);
+                            status.connected_unix_ms = Some(rcon::unix_ms());
+                        }
+                    });
+                }
                 let reply = match guard.as_ref() {
                     Some(guard) => send_guarded(
                         &shared,
@@ -913,7 +1017,7 @@ fn send_guarded(
     session: &mut Option<Session>,
     record: &mut RconCommandRecord,
     timeout: Duration,
-    guard: Option<&ArmaAdminCommand>,
+    guard: Option<&AdminGuard>,
 ) -> RconCommandReply {
     let Some(current) = session else {
         record.finish(
@@ -931,8 +1035,30 @@ fn send_guarded(
     if let Some(guard) = guard
         && let Some(preflight) = guard.required_preflight()
     {
-        let valid = match current.command(preflight.as_bytes(), timeout, Retransmit::Never) {
-            CommandOutcome::Replied(body) => guard.validate_preflight(&rcon::response_text(&body)),
+        let (outcome, transcript) = if matches!(guard, AdminGuard::Reforger(_)) {
+            let (outcome, messages) =
+                rcon::reforger::transcript::command(current, preflight, timeout);
+            let transcript = rcon::reforger::transcript::text(&messages);
+            (
+                outcome,
+                Some((transcript, messages.iter().any(|message| message.truncated))),
+            )
+        } else {
+            (
+                current.command(preflight.as_bytes(), timeout, Retransmit::Never),
+                None,
+            )
+        };
+        let valid = match (outcome, transcript) {
+            (CommandOutcome::Replied(_), Some((_, true))) => {
+                Err("The current target transcript was truncated".into())
+            }
+            (CommandOutcome::Replied(_), Some((transcript, false))) => {
+                guard.validate_preflight(&transcript)
+            }
+            (CommandOutcome::Replied(body), None) => {
+                guard.validate_preflight(&rcon::response_text(&body))
+            }
             _ => Err("The current target could not be verified from the server reply".into()),
         };
         if let Err(error) = valid {
@@ -962,7 +1088,15 @@ fn send_guarded(
     if records::update(root, record).is_err() {
         return command_refused("The RCon command record could not be updated; nothing was sent");
     }
-    match current.command(record.text.as_bytes(), timeout, Retransmit::Never) {
+    let outcome = if matches!(guard, Some(AdminGuard::Reforger(_))) {
+        let (outcome, messages) =
+            rcon::reforger::transcript::command(current, &record.text, timeout);
+        record.messages = messages;
+        outcome
+    } else {
+        current.command(record.text.as_bytes(), timeout, Retransmit::Never)
+    };
+    match outcome {
         CommandOutcome::Replied(body) => {
             record.set_response(rcon::response_text(&body));
             record.finish(RconCommandState::Replied, None);
@@ -992,6 +1126,28 @@ fn send_guarded(
 }
 
 impl Attachment {
+    pub(crate) fn reforger_admin_command(
+        &self,
+        instance: &ServerInstanceId,
+        run_generation: u64,
+        command: &ReforgerAdminCommand,
+        timeout_ms: u32,
+    ) -> io::Result<RconCommandReply> {
+        command
+            .wire_text()
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+        self.rcon_request(
+            Operation::SendReforgerAdminCommand {
+                instance_id: instance.as_str().into(),
+                expected_run_generation: run_generation,
+                command_json: serde_json::to_string(command)
+                    .map_err(|_| invalid("Reforger command encoding failed"))?,
+                timeout_ms,
+            },
+            Duration::from_millis(u64::from(timeout_ms) * 2) + Duration::from_secs(20),
+        )
+    }
+
     fn rcon_request<T: serde::de::DeserializeOwned>(
         &self,
         operation: Operation,
@@ -1186,6 +1342,29 @@ mod tests {
     }
 
     #[test]
+    fn stopping_worker_retains_its_handle_until_in_flight_work_finishes() {
+        let (release, blocked) = mpsc::sync_channel::<()>(0);
+        let handle = std::thread::spawn(move || blocked.recv().unwrap());
+        let (work, _queue) = mpsc::sync_channel(1);
+        let (_done, finished) = mpsc::channel();
+        let mut worker = Worker {
+            run_generation: 1,
+            reforger_access: None,
+            shared: Arc::new(shared()),
+            work,
+            finished,
+            stop: Arc::new(AtomicBool::new(false)),
+            handle: Some(handle),
+        };
+        worker.stop(Duration::ZERO);
+        assert!(worker.handle.is_some());
+        assert!(worker.stop.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        worker.stop(Duration::from_secs(1));
+        assert!(worker.handle.is_none());
+    }
+
+    #[test]
     fn owner_commands_are_recorded_before_sending_and_a_lost_reply_stays_unknown() {
         let server = accepting(|socket, peer, kind, payload| {
             if kind == 0x01 && payload[1..] != *b"say -1 lost" {
@@ -1302,7 +1481,7 @@ mod tests {
             &mut session,
             &mut wrong,
             Duration::from_secs(1),
-            Some(&guard),
+            Some(&AdminGuard::Arma(guard.clone())),
         );
         assert_eq!(refused.state, Some(RconCommandState::NotSent));
         assert_eq!(refused.reason, Some(RconCommandReason::TargetChanged));
@@ -1325,7 +1504,7 @@ mod tests {
             &mut session,
             &mut correct,
             Duration::from_secs(1),
-            Some(&guard),
+            Some(&AdminGuard::Arma(guard.clone())),
         );
         assert_eq!(replied.state, Some(RconCommandState::Replied));
         assert_eq!(

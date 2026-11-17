@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "instance_id": "server_00000000000000000000000000000001",
+  "revision": 1,
+  "jobs": [
+    {
+      "id": "job_0000000000000001",
+      "revision": 1,
+      "revised_unix_ms": 1795000000000,
+      "definition": {
+        "name": "Scenario reload",
+        "enabled": false,
+        "action": "reload_scenario",
+        "schedule": {
+          "Recurring": {
+            "minutes_of_day": 270,
+            "weekdays": 127
+          }
+        },
+        "clock": "local",
+        "policy": {
+          "grace_minutes": 10,
+          "player_policy": "ignore",
+          "max_defer_minutes": 0,
+          "max_attempts": 1,
+          "retry_delay_seconds": 60,
+          "stop_timeout_seconds": 60
+        }
+      }
+    }
+  ]
+}

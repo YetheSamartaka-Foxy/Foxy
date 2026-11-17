@@ -622,7 +622,7 @@ fn probe(
             }
         }
     }
-    let _ = session.pump(Duration::from_millis(300));
+    let _ = session.pump(Duration::from_millis(u64::from(args.listen_ms)));
     Ok(CommandSuccess {
         action: action.into(),
         message,

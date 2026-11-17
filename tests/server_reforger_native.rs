@@ -10,6 +10,18 @@ mod layout;
 mod lifecycle;
 
 #[test]
+#[ignore = "Requires a read-only Reforger source and private native scenario-end scratch"]
+fn native_reforger_scenario_end_and_stop_wins() -> std::io::Result<()> {
+    layout::run_scenario_end()
+}
+
+#[test]
+#[ignore = "Requires a read-only Reforger source, verified private payload and native RCon scratch"]
+fn native_reforger_rcon_permissions_and_filters() -> std::io::Result<()> {
+    layout::run_rcon_permissions()
+}
+
+#[test]
 #[ignore = "Requires an explicit read-only Reforger dedicated source and private scratch directory"]
 fn native_reforger_scenario_discovery() -> std::io::Result<()> {
     discovery::run()

@@ -515,6 +515,12 @@ pub(super) fn validate_client(message: &ClientMessage) -> io::Result<()> {
                     expected_run_generation,
                     command_json,
                     timeout_ms,
+                }
+                | super::Operation::SendReforgerAdminCommand {
+                    instance_id,
+                    expected_run_generation,
+                    command_json,
+                    timeout_ms,
                 } if !super::valid_server_instance_id(instance_id)
                     || *expected_run_generation == 0
                     || command_json.is_empty()
@@ -522,6 +528,16 @@ pub(super) fn validate_client(message: &ClientMessage) -> io::Result<()> {
                     || !(1_000..=60_000).contains(timeout_ms) =>
                 {
                     return Err(invalid("invalid Arma administration request"));
+                }
+                super::Operation::ReloadReforgerScenario {
+                    instance_id,
+                    expected_run_generation,
+                    timeout_ms,
+                } if !super::valid_server_instance_id(instance_id)
+                    || *expected_run_generation == 0
+                    || !(1_000..=120_000).contains(timeout_ms) =>
+                {
+                    return Err(invalid("invalid Reforger scenario reload request"));
                 }
                 super::Operation::RotateArmaMission {
                     instance_id,

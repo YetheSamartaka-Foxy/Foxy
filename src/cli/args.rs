@@ -1,6 +1,9 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+mod reforger_admin;
+pub use reforger_admin::*;
+
 #[derive(Parser, Debug)]
 #[command(name = "foxy")]
 #[command(about = "Foxy command line interface")]
@@ -2215,6 +2218,13 @@ pub enum ServerCommand {
         #[command(subcommand)]
         command: ServerArmaAdminCommand,
     },
+    /// Send typed Reforger administration commands through the authenticated owner.
+    ReforgerAdmin {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerReforgerAdminCommand,
+    },
     /// Review, acquire and verify Arma Workshop items as pinned server content.
     Workshop {
         #[command(flatten)]
@@ -2414,6 +2424,7 @@ pub enum ServerMaintenanceActionArg {
     Update,
     Backup,
     RotateMission,
+    ReloadScenario,
 }
 
 #[derive(Args, Debug)]
@@ -2577,6 +2588,9 @@ pub struct ServerRconCommandArgs {
 
 #[derive(Args, Debug)]
 pub struct ServerRconProbeArgs {
+    /// Collect asynchronous server messages for this many milliseconds after the command.
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(0..=30_000))]
+    pub listen_ms: u32,
     /// Use this instance's active runtime endpoint and protected password.
     pub id: Option<String>,
     /// Connect to this socket address instead, such as a tunnel or port forward.

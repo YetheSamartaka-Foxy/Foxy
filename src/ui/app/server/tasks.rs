@@ -290,6 +290,12 @@ pub(crate) enum ServerTaskAction {
         run_generation: u64,
         command: crate::core::server::rcon::arma3::ArmaAdminCommand,
     },
+    SendReforgerAdminCommand {
+        id: ServerInstanceId,
+        run_generation: u64,
+        command: crate::core::server::rcon::reforger::ReforgerAdminCommand,
+        timeout_ms: u32,
+    },
 }
 
 pub(crate) enum ServerTaskOutput {
@@ -446,6 +452,7 @@ pub(crate) fn execute(
             | ServerTaskAction::TestRcon { .. }
             | ServerTaskAction::SendRconCommand { .. }
             | ServerTaskAction::SendArmaAdminCommand { .. }
+            | ServerTaskAction::SendReforgerAdminCommand { .. }
     );
     let _permit = if deployment_effect {
         None
@@ -1180,6 +1187,47 @@ pub(crate) fn execute(
                 return Err(ServerStoreError::Invalid(error));
             }
             rcon_output(&store, &id, None, record)?
+        }
+        ServerTaskAction::SendReforgerAdminCommand {
+            id,
+            run_generation,
+            command,
+            timeout_ms,
+        } => {
+            let owner = rcon_owner(&store)?;
+            if scope.owner.as_ref().is_none_or(|(id, generation)| {
+                id != &owner.scope().owner_id || *generation != owner.scope().generation
+            }) {
+                return Err(ServerStoreError::Ownership);
+            }
+            if command == crate::core::server::rcon::reforger::ReforgerAdminCommand::ReloadScenario
+            {
+                let outcome = owner
+                    .run_instance(
+                        foxy_supervisor::control::Operation::ReloadReforgerScenario {
+                            instance_id: id.as_str().into(),
+                            expected_run_generation: run_generation,
+                            timeout_ms,
+                        },
+                        &stage_control,
+                    )
+                    .map_err(|error| ServerStoreError::Invalid(error.to_string()))?;
+                ServerTaskOutput::InstanceRuntimeOutcome(outcome)
+            } else {
+                let reply = owner
+                    .reforger_admin_command(&id, run_generation, &command, timeout_ms)
+                    .map_err(|error| ServerStoreError::Invalid(error.to_string()))?;
+                let record = reply
+                    .command_id
+                    .as_deref()
+                    .and_then(|command_id| store.rcon_command(&id, command_id).ok().flatten());
+                if record.is_none()
+                    && let Some(error) = reply.error
+                {
+                    return Err(ServerStoreError::Invalid(error));
+                }
+                rcon_output(&store, &id, None, record)?
+            }
         }
         ServerTaskAction::LoadScenarioDiscovery(id) => {
             ServerTaskOutput::ScenarioDiscovery(store.read_scenario_discovery(&id)?.map(Box::new))

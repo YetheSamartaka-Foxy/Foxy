@@ -246,6 +246,7 @@ impl MaintenanceForm {
             }
         };
         let rotate_mission = self.action == MaintenanceAction::RotateMission;
+        let reload_scenario = self.action == MaintenanceAction::ReloadScenario;
         let restart_hooks = matches!(
             self.action,
             MaintenanceAction::Restart | MaintenanceAction::RotateMission
@@ -294,8 +295,10 @@ impl MaintenanceForm {
                 max_attempts: self.max_attempts,
                 retry_delay_seconds: self.retry_delay_seconds,
                 stop_timeout_seconds: self.stop_timeout_seconds,
-                arma: (restart_hooks || rotate_mission || self.require_backup).then_some(
-                    ArmaMaintenancePolicy {
+                arma: (restart_hooks
+                    || rotate_mission
+                    || (self.require_backup && !reload_scenario))
+                    .then_some(ArmaMaintenancePolicy {
                         announcement,
                         announcement_delay_seconds: if restart_hooks {
                             self.announcement_delay_seconds
@@ -303,9 +306,8 @@ impl MaintenanceForm {
                             0
                         },
                         mission_template,
-                        require_backup: self.require_backup,
-                    },
-                ),
+                        require_backup: self.require_backup && !reload_scenario,
+                    }),
             },
         };
         definition.validate()?;

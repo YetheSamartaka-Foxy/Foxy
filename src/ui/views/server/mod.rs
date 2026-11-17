@@ -23,6 +23,7 @@ mod rcon;
 mod reconciliation;
 mod recovery;
 mod reforger_addons;
+mod reforger_admin;
 mod steam_auth;
 mod workshop;
 
@@ -166,6 +167,7 @@ impl Foxy {
                 let maintenance = self.render_server_maintenance(ui);
                 let rcon = self.render_server_rcon(ui);
                 self.render_arma_administration(ui);
+                self.render_reforger_administration(ui);
                 self.render_consumer_recovery(ui);
                 (configuration, content, stage, acquisition, composition, records, reconciliation, preparation, activation, lifecycle, native_install, workshop, reforger_addons, maintenance, rcon)
             }).inner;

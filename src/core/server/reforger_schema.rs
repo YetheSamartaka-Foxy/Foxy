@@ -229,6 +229,7 @@ pub fn import_server_json(bytes: &[u8]) -> Result<ReforgerImportReview, String> 
         );
     }
     let definition = ReforgerServerDefinition {
+        scenario_end: Default::default(),
         name,
         bind_port,
         bind_address,

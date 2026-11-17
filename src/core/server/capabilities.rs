@@ -35,6 +35,7 @@ pub struct ServerCapabilities {
     pub consumer_recovery: bool,
     pub headless_clients: bool,
     pub arma_administration: bool,
+    pub reforger_administration: bool,
 }
 
 impl ServerCapabilities {
@@ -58,6 +59,7 @@ impl ServerCapabilities {
             workshop_acquisition: native_arma,
             headless_clients: native_arma,
             arma_administration: native_arma,
+            reforger_administration: kind == ServerDefinitionKind::Reforger && native,
             lifecycle: native,
             durable_owner: native,
             consumer_recovery: native,

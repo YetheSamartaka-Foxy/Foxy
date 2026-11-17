@@ -23,6 +23,7 @@ mod owner_control;
 mod rcon;
 mod reconciliation;
 mod reforger_addons;
+mod reforger_admin;
 mod reforger_configuration;
 mod steam_auth;
 mod workshop;
@@ -107,6 +108,9 @@ pub fn run_server_command(
         ServerCommand::Maintenance { context, command } => maintenance::run(cli, context, command),
         ServerCommand::Rcon { context, command } => rcon::run(cli, context, command),
         ServerCommand::Admin { context, command } => arma_admin::run(cli, context, command),
+        ServerCommand::ReforgerAdmin { context, command } => {
+            reforger_admin::run(cli, context, command)
+        }
         ServerCommand::Installation {
             context,
             command: crate::cli::args::ServerInstallationCommand::Install { command },

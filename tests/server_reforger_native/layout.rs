@@ -23,6 +23,10 @@ mod logs;
 mod network;
 #[path = "layout/paths.rs"]
 mod paths;
+#[path = "layout/rcon_permissions.rs"]
+mod rcon_permissions;
+#[path = "layout/scenario_end.rs"]
+mod scenario_end;
 
 #[cfg(target_os = "linux")]
 use files::check_linux_prerequisites;
@@ -253,6 +257,14 @@ pub(super) fn run() -> io::Result<()> {
 
 pub(super) fn run_addons() -> io::Result<()> {
     addons::run()
+}
+
+pub(super) fn run_scenario_end() -> io::Result<()> {
+    scenario_end::run()
+}
+
+pub(super) fn run_rcon_permissions() -> io::Result<()> {
+    rcon_permissions::run()
 }
 
 fn create_instance(root: &Path, name: &'static str) -> io::Result<Instance> {

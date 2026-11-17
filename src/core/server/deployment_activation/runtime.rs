@@ -359,6 +359,7 @@ impl ServerStore {
         realized_entries.sort_by(|a, b| a.path.cmp(&b.path));
         validate_generic_entries(&realized_entries, entry_bytes(&realized_entries)?)?;
         Ok(NativeRuntimeManifest {
+            reforger_scenario_end: None,
             schema_version: 1,
             game_space_id: self.context().space_id().into(),
             instance_id: id.clone(),

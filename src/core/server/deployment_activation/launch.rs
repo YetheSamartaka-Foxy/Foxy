@@ -70,6 +70,8 @@ pub struct NativeRuntimeLaunchPlan {
     pub executable: PathBuf,
     pub directory: PathBuf,
     pub arguments: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reforger_scenario: Option<String>,
     pub udp_ports: Vec<u16>,
     pub environment: Vec<(String, String)>,
     pub profiles: PathBuf,
@@ -93,6 +95,32 @@ pub struct NativeRuntimeLaunchPlan {
 pub struct NativeRconPlan {
     pub endpoint: std::net::SocketAddr,
     pub password_reference: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reforger: Option<NativeReforgerRconAccess>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeReforgerRconAccess {
+    pub permission: crate::core::server::ReforgerRconPermission,
+    #[serde(default)]
+    pub whitelist: Vec<String>,
+    #[serde(default)]
+    pub blacklist: Vec<String>,
+}
+
+impl NativeReforgerRconAccess {
+    pub(crate) fn permits(&self, text: &str, requires_admin: bool) -> bool {
+        if requires_admin && self.permission != crate::core::server::ReforgerRconPermission::Admin {
+            return false;
+        }
+        let name = text.split_whitespace().next().unwrap_or("");
+        let matches = |entry: &String| {
+            entry == text || entry == name || entry == name.trim_start_matches('#')
+        };
+        !self.blacklist.iter().any(matches)
+            && (self.whitelist.is_empty() || self.whitelist.iter().any(matches))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -617,6 +645,7 @@ impl ServerStore {
                             settings.port,
                         ),
                         password_reference: reference.clone(),
+                        reforger: None,
                     });
                     Some(crate::core::server::config_import::BattlEyeRcon {
                         address: settings.address,
@@ -711,6 +740,7 @@ impl ServerStore {
             headless,
             rcon: rcon_plan,
             battleye,
+            reforger_scenario: None,
             spawned: false,
         })
     }
@@ -736,6 +766,24 @@ impl ServerStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reforger_access_uses_committed_permission_and_filters() {
+        use crate::core::server::ReforgerRconPermission::{Admin, Monitor};
+        let mut access = super::NativeReforgerRconAccess {
+            permission: Monitor,
+            whitelist: Vec::new(),
+            blacklist: Vec::new(),
+        };
+        assert!(access.permits("#players", false));
+        assert!(!access.permits("#restart", true));
+        access.permission = Admin;
+        access.whitelist.push("players".into());
+        assert!(!access.permits("#restart", true));
+        assert!(access.permits("#players", false));
+        access.blacklist.push("#players".into());
+        assert!(!access.permits("#players", false));
+    }
+
     use super::*;
 
     #[test]

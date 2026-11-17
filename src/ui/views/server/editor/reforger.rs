@@ -70,6 +70,11 @@ pub(super) fn render(
     ui.label(tr(
         "A scenario resource name does not prove that the scenario is installed.",
     ));
+    scenario_end(
+        ui,
+        &mut settings.scenario_end,
+        field_scope.with("scenario-end"),
+    );
     ui.heading(tr("Advanced Reforger fields"));
     tri_state(
         ui,
@@ -158,6 +163,53 @@ pub(super) fn render(
         keys.push(*next_key);
         *next_key += 1;
     }
+}
+
+fn scenario_end(ui: &mut Ui, policy: &mut crate::core::server::ReforgerScenarioEnd, id: egui::Id) {
+    use crate::core::server::ReforgerScenarioEnd;
+    let mut mode = match policy {
+        ReforgerScenarioEnd::Shutdown { .. } => 0,
+        ReforgerScenarioEnd::Reload { .. } => 1,
+        ReforgerScenarioEnd::Disabled => 2,
+    };
+    let mut delay = match policy {
+        ReforgerScenarioEnd::Shutdown { delay_seconds }
+        | ReforgerScenarioEnd::Reload { delay_seconds } => *delay_seconds,
+        ReforgerScenarioEnd::Disabled => 0,
+    };
+    ui.horizontal_wrapped(|ui| {
+        let label = ui.label(tr("When the scenario ends"));
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(tr(match mode {
+                0 => "Shut down the process",
+                1 => "Reload the scenario",
+                _ => "Disable automatic scenario reload",
+            }))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut mode, 0, tr("Shut down the process"));
+                ui.selectable_value(&mut mode, 1, tr("Reload the scenario"));
+                ui.selectable_value(&mut mode, 2, tr("Disable automatic scenario reload"));
+            })
+            .response
+            .labelled_by(label.id);
+    });
+    if mode != 2 {
+        ui.horizontal(|ui| {
+            let label = ui.label(tr("Scenario-end delay (seconds)"));
+            ui.add(egui::DragValue::new(&mut delay).range(0..=3600))
+                .labelled_by(label.id);
+        });
+    }
+    *policy = match mode {
+        0 => ReforgerScenarioEnd::Shutdown {
+            delay_seconds: delay,
+        },
+        1 => ReforgerScenarioEnd::Reload {
+            delay_seconds: delay,
+        },
+        _ => ReforgerScenarioEnd::Disabled,
+    };
+    ui.label(tr("Scenario reload keeps the owned process. Shutdown does not automatically start another process. Disabled reload retains the shutdown safeguard."));
 }
 
 fn tri_state(ui: &mut Ui, label: &str, id: egui::Id, value: &mut Option<bool>) {

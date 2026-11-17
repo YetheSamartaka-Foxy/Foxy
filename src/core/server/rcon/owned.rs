@@ -130,7 +130,15 @@ pub(in crate::core::server) fn command_once(
     if control.snapshot().cancel_requested {
         return finish(&root, &mut record, RconCommandState::NotSent, None);
     }
-    let result = match session.command(text.as_bytes(), command_budget, Retransmit::Never) {
+    let outcome = if plan.reforger.is_some() {
+        let (outcome, messages) =
+            rcon::reforger::transcript::command(&mut session, text, command_budget);
+        record.messages = messages;
+        outcome
+    } else {
+        session.command(text.as_bytes(), command_budget, Retransmit::Never)
+    };
+    let result = match outcome {
         CommandOutcome::Replied(response) => {
             record.set_response(rcon::response_text(&response));
             finish(&root, &mut record, RconCommandState::Replied, None)
@@ -228,6 +236,7 @@ mod tests {
         NativeRconPlan {
             endpoint: address,
             password_reference: reference.into(),
+            reforger: None,
         }
     }
 
