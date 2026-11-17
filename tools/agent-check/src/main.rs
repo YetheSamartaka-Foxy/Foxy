@@ -8,8 +8,8 @@ Usage:
   cargo agent-check sync-antigravity [--repo <path>]
       Regenerate .agents/agents/ and the generated .agents/rules/ files from the Claude Code files.
   cargo agent-check role --list
-  cargo agent-check role <name> (<brief> | --brief-file <path> | -) [--argon] [--dry-run]
-      Run one role in Google Antigravity on its Gemini model and thinking level, or on Gemini 4 Argon.
+  cargo agent-check role <name> (<brief> | --brief-file <path> | -) [--model <id>] [--dry-run]
+      Run one role on its Gemini model and thinking level; override only when the owner names a model.
   cargo agent-check models [--repo <path>]
       Report whether the pinned role models are still offered and whether newer ones appeared. Read-only.";
 
@@ -76,7 +76,7 @@ fn validate(repo: &std::path::Path) {
 fn role(repo: &std::path::Path, args: &[String]) {
     let mut name = None;
     let mut brief = None;
-    let mut argon = false;
+    let mut model = None;
     let mut dry_run = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -91,7 +91,15 @@ fn role(repo: &std::path::Path, args: &[String]) {
                 }
                 return;
             }
-            "--argon" => argon = true,
+            "--model" => {
+                let Some(id) = iter
+                    .next()
+                    .filter(|id| !id.trim().is_empty() && !id.starts_with('-'))
+                else {
+                    fail("--model requires a model id");
+                };
+                model = Some(id.as_str());
+            }
             "--dry-run" => dry_run = true,
             "--brief-file" => {
                 let Some(path) = iter.next() else {
@@ -109,6 +117,9 @@ fn role(repo: &std::path::Path, args: &[String]) {
                     .unwrap_or_else(|error| fail(&format!("cannot read stdin: {error}")));
                 brief = Some(text);
             }
+            other if other.starts_with('-') => {
+                fail(&format!("unknown option `{other}` (try --help)"));
+            }
             other if name.is_none() => name = Some(other.to_owned()),
             other if brief.is_none() => brief = Some(other.to_owned()),
             other => fail(&format!("unexpected argument `{other}` (try --help)")),
@@ -124,7 +135,7 @@ fn role(repo: &std::path::Path, args: &[String]) {
     let run = agent_check::antigravity::RoleRun {
         name: &name,
         brief: &brief,
-        argon,
+        model,
         dry_run,
     };
     match agent_check::antigravity::run_role(repo, &run) {

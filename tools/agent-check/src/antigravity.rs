@@ -21,7 +21,6 @@ pub const ROLE_MODELS: &[(&str, &str)] = &[
     ("reviewer", "gemini-4-hydrogen-high"),
     ("async-safety-reviewer", "gemini-4-hydrogen-high"),
 ];
-pub const ARGON_MODEL: &str = "gemini-4-argon-high";
 const ROLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const PRINT_TIMEOUT: &str = "1740s";
 const SYNC_HINT: &str = "run `cargo agent-check sync-antigravity`";
@@ -531,7 +530,7 @@ pub(crate) fn find_agy() -> Option<PathBuf> {
 pub struct RoleRun<'a> {
     pub name: &'a str,
     pub brief: &'a str,
-    pub argon: bool,
+    pub model: Option<&'a str>,
     pub dry_run: bool,
 }
 
@@ -549,11 +548,10 @@ pub fn run_role(repo: &Path, run: &RoleRun<'_>) -> Result<i32, String> {
             known.join(", ")
         ));
     };
-    let model = if run.argon {
-        ARGON_MODEL
-    } else {
-        model_for(&role.name).ok_or_else(|| format!("role `{}` has no Gemini model", role.name))?
-    };
+    let model = run
+        .model
+        .or_else(|| model_for(&role.name))
+        .ok_or_else(|| format!("role `{}` has no Gemini model", role.name))?;
     let root = std::path::absolute(repo).map_err(|error| error.to_string())?;
     let settings = settings_json(&path_to_string(&root), role, &rtk_rules());
     let agy = find_agy().ok_or("agy (Antigravity CLI) is not installed or not on PATH")?;

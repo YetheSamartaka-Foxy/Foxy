@@ -4,7 +4,7 @@
 //! model, so they pin nothing. Antigravity pins are compared with `agy models` for the signed-in
 //! account; no local CLI lists Cursor's models, so its pins are only reported.
 
-use crate::antigravity::{ARGON_MODEL, ROLE_MODELS, find_agy, run_captured};
+use crate::antigravity::{ROLE_MODELS, find_agy, run_captured};
 use crate::skills::parse_frontmatter;
 use serde_yaml_ng::Value as YamlValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +16,7 @@ use std::time::Duration;
 const AGY_TIMEOUT: Duration = Duration::from_secs(90);
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const WORKFLOWS: &str = "conventions/AGENT_WORKFLOWS.md";
+const OWNER_CHOICE_GEMINI: [&str; 2] = ["argon", "carbon"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pin {
@@ -115,11 +116,6 @@ pub fn pins(repo: &Path) -> Vec<Pin> {
             model: (*model).to_owned(),
         })
         .collect::<Vec<_>>();
-    pins.push(Pin {
-        client: "antigravity",
-        role: "--argon".to_owned(),
-        model: ARGON_MODEL.to_owned(),
-    });
     let pinned = pins
         .iter()
         .map(|pin| pin.model.clone())
@@ -206,6 +202,9 @@ pub(crate) fn findings(pins: &[Pin], listed: Option<&BTreeSet<String>>) -> Vec<F
                 let Some((version, family, _)) = parse_gemini(id) else {
                     continue;
                 };
+                if OWNER_CHOICE_GEMINI.contains(&family.as_str()) {
+                    continue;
+                }
                 match families.get(&family) {
                     Some(pinned) if version > *pinned => findings.push(Finding::new(
                         Kind::Candidate,
