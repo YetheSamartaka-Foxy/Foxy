@@ -2845,6 +2845,16 @@ impl Foxy {
         value["consumer_recovery_confirmation"] =
             json!(self.server_view.consumer_recovery_confirmation);
         value["lifecycle_status"] = json!(self.server_view.lifecycle_status);
+        value["arma_admin"] = json!({
+            "action": format!("{:?}", self.server_view.arma_admin.action),
+            "confirmation": self.server_view.arma_admin.confirmation.as_ref().map(|review| json!({
+                "instance_id": review.instance_id, "owner_id": review.owner_id,
+                "owner_generation": review.owner_generation, "run_generation": review.run_generation,
+                "command": review.command, "wire_text": review.wire_text,
+            })),
+            "last_submitted": self.server_view.arma_admin.last_submitted,
+            "error": self.server_view.arma_admin.action_error,
+        });
         value["lifecycle_monitoring"] = json!(self.server_view.lifecycle_monitoring);
         value["monitoring_view"] = json!({
             "paused": self.server_view.monitoring_paused,

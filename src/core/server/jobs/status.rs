@@ -89,6 +89,16 @@ pub fn job_statuses(
                 Some("Disabled.".to_owned())
             } else if let Some(reason) = definition.action.unavailable_reason(capabilities) {
                 Some(reason.to_owned())
+            } else if definition
+                .policy
+                .arma
+                .as_ref()
+                .is_some_and(|arma| arma.require_backup)
+            {
+                Some(
+                    "This job requires a consistent backup; backup support is unavailable."
+                        .to_owned(),
+                )
             } else if !owner_running {
                 Some(
                     "No server owner is running for this game space, so this job is inactive."

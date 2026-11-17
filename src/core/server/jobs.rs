@@ -15,8 +15,8 @@ pub use ledger::{
 };
 pub(in crate::core::server) use ledger::{claim, prune, read, recover_abandoned, update};
 pub use model::{
-    MAX_JOBS_PER_INSTANCE, MaintenanceAction, MaintenanceChange, MaintenanceJob,
-    MaintenanceJobDefinition, MaintenancePolicy, PlayerPolicy, valid_job_id,
+    ArmaMaintenancePolicy, MAX_JOBS_PER_INSTANCE, MaintenanceAction, MaintenanceChange,
+    MaintenanceJob, MaintenanceJobDefinition, MaintenancePolicy, PlayerPolicy, valid_job_id,
 };
 pub use status::{JobStatus, MaintenanceOverview};
 pub use store::unix_ms;

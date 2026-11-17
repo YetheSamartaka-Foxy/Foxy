@@ -162,6 +162,19 @@ fn lifecycle_operations_round_trip_and_validate_boundaries() {
             instance_id: instance_id.clone(),
             occurrence_id: format!("occ_{}", "a".repeat(32)),
         },
+        Operation::InspectRcon {
+            instance_id: instance_id.clone(),
+        },
+        Operation::TestRcon {
+            instance_id: instance_id.clone(),
+            expected_run_generation: 1,
+        },
+        Operation::SendRconCommand {
+            instance_id: instance_id.clone(),
+            expected_run_generation: 1,
+            text: "x".repeat(1024),
+            timeout_ms: 60_000,
+        },
         Operation::CancelLifecycle { request_id: 1 },
     ];
     for (index, operation) in operations.into_iter().enumerate() {
@@ -273,6 +286,39 @@ fn lifecycle_operations_round_trip_and_validate_boundaries() {
         Operation::CancelMaintenanceOccurrence {
             instance_id: "server_0123456789abcdef0123456789abcdef".into(),
             occurrence_id: "occ_../x".into(),
+        },
+        Operation::InspectRcon {
+            instance_id: "server_x".into(),
+        },
+        Operation::TestRcon {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            expected_run_generation: 0,
+        },
+        Operation::SendRconCommand {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            expected_run_generation: 1,
+            text: "say -1 a
+b"
+            .into(),
+            timeout_ms: 10_000,
+        },
+        Operation::SendRconCommand {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            expected_run_generation: 1,
+            text: "   ".into(),
+            timeout_ms: 10_000,
+        },
+        Operation::SendRconCommand {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            expected_run_generation: 1,
+            text: "x".repeat(1025),
+            timeout_ms: 10_000,
+        },
+        Operation::SendRconCommand {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            expected_run_generation: 1,
+            text: "players".into(),
+            timeout_ms: 999,
         },
         Operation::CancelLifecycle { request_id: 0 },
     ];

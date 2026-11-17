@@ -2201,6 +2201,20 @@ pub enum ServerCommand {
         #[command(subcommand)]
         command: ServerMaintenanceCommand,
     },
+    /// Manage protected RCon credentials, check the owner's RCon session and send commands.
+    Rcon {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerRconCommand,
+    },
+    /// Send typed Arma 3 administration commands through an authenticated running owner.
+    Admin {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerArmaAdminCommand,
+    },
     /// Review, acquire and verify Arma Workshop items as pinned server content.
     Workshop {
         #[command(flatten)]
@@ -2399,6 +2413,7 @@ pub enum ServerMaintenanceActionArg {
     Restart,
     Update,
     Backup,
+    RotateMission,
 }
 
 #[derive(Args, Debug)]
@@ -2441,6 +2456,18 @@ pub struct ServerMaintenanceDefinitionArgs {
     /// Graceful stop timeout for a restart, 5-120 seconds.
     #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u16).range(5..=120))]
     pub stop_timeout_seconds: u16,
+    /// Arma only: announce before rotating missions.
+    #[arg(long)]
+    pub announcement: Option<String>,
+    /// Delay after the announcement before mission rotation, 0-300 seconds.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u16).range(0..=300))]
+    pub announcement_delay_seconds: u16,
+    /// Arma only: mission template to load after rotating.
+    #[arg(long)]
+    pub mission_template: Option<String>,
+    /// Require a successful backup before rotating missions.
+    #[arg(long)]
+    pub require_backup: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2483,6 +2510,185 @@ pub struct ServerMaintenanceRunArgs {
 pub struct ServerMaintenanceCancelArgs {
     pub id: String,
     pub occurrence_id: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerRconCommand {
+    /// Show the saved RCon settings, whether a protected password is stored, and the owner's live session.
+    Status(ServerInstanceSelector),
+    /// Turn RCon on in the draft or change its endpoint. Commit, prepare and activate to apply.
+    Configure(ServerRconConfigureArgs),
+    /// Remove the RCon settings and password reference from the draft. Requires --yes.
+    Disable(ServerRconPasswordArgs),
+    /// Store a new protected RCon password read from stdin and reference it from the draft.
+    SetPassword(ServerRconPasswordArgs),
+    /// Round-trip an empty keepalive through the owner's live RCon session.
+    Test(ServerInstanceSelector),
+    /// Send one command through the owner's live RCon session. Requires --yes; never resent.
+    Command(ServerRconCommandArgs),
+    /// Show retained RCon command records, newest first.
+    History(ServerInstanceSelector),
+    /// Open a separate short RCon session to check an endpoint, tunnel or password.
+    Probe(ServerRconProbeArgs),
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ServerRconPermissionArg {
+    Admin,
+    Monitor,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerRconConfigureArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+    /// RCon UDP port. For Arma it must stay outside the game port range (game port to game port + 4).
+    #[arg(long)]
+    pub port: u16,
+    /// IPv4 address the server listens on for RCon. Defaults to 127.0.0.1 (this computer only).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub address: std::net::Ipv4Addr,
+    /// Reforger only: what every RCon connection may do.
+    #[arg(long, value_enum)]
+    pub permission: Option<ServerRconPermissionArg>,
+    /// Reforger only: maximum simultaneous RCon clients, 1-16.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=16))]
+    pub max_clients: Option<u8>,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerRconPasswordArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_revision: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerRconCommandArgs {
+    pub id: String,
+    /// Command text exactly as the server's RCon expects it.
+    #[arg(long)]
+    pub text: String,
+    /// How long to wait for the reply before the outcome is unknown.
+    #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1_000..=60_000))]
+    pub timeout_ms: u32,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerRconProbeArgs {
+    /// Use this instance's active runtime endpoint and protected password.
+    pub id: Option<String>,
+    /// Connect to this socket address instead, such as a tunnel or port forward.
+    #[arg(long)]
+    pub endpoint: Option<String>,
+    /// Read the password from one stdin line instead of the protected store.
+    #[arg(long)]
+    pub password_stdin: bool,
+    /// Send this command once after login (requires --yes). Without it only a keepalive is sent.
+    #[arg(long)]
+    pub command: Option<String>,
+    #[arg(long, default_value_t = 5_000, value_parser = clap::value_parser!(u32).range(500..=60_000))]
+    pub timeout_ms: u32,
+}
+
+#[derive(Subcommand, Debug)]
+#[command(rename_all = "kebab-case")]
+pub enum ServerArmaAdminCommand {
+    /// List the current player roster.
+    Players(ServerArmaAdminRequestArgs),
+    /// List current GUID and IP bans.
+    Bans(ServerArmaAdminRequestArgs),
+    /// List mission templates currently available to the server.
+    Missions(ServerArmaAdminRequestArgs),
+    /// Send an announcement to all players.
+    Announce(ServerArmaAdminMessageArgs),
+    /// Kick a player only if the current player id still has the supplied verified GUID.
+    Kick(ServerArmaAdminKickArgs),
+    /// Add a GUID ban.
+    AddBan(ServerArmaAdminAddBanArgs),
+    /// Remove a GUID ban only if its current id still has the supplied GUID.
+    RemoveBan(ServerArmaAdminRemoveBanArgs),
+    /// Lock the server against new players.
+    Lock(ServerArmaAdminRequestArgs),
+    /// Unlock the server for new players.
+    Unlock(ServerArmaAdminRequestArgs),
+    /// Change to a mission template currently available to the server.
+    Mission(ServerArmaAdminMissionArgs),
+    /// Restart the current mission.
+    RestartMission(ServerArmaAdminRequestArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerArmaAdminRequestArgs {
+    /// Existing server instance id.
+    pub id: String,
+    /// Exact active run generation; side-effecting commands require this value.
+    #[arg(long)]
+    pub expected_run_generation: Option<u64>,
+    /// Maximum time to wait for the RCon reply, 1000-30000 ms.
+    #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1_000..=30_000))]
+    pub timeout_ms: u32,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerArmaAdminMessageArgs {
+    #[command(flatten)]
+    pub request: ServerArmaAdminRequestArgs,
+    /// Announcement text.
+    #[arg(long)]
+    pub message: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerArmaAdminKickArgs {
+    #[command(flatten)]
+    pub request: ServerArmaAdminRequestArgs,
+    /// Current player id from a recent players listing.
+    #[arg(long)]
+    pub player_id: u32,
+    /// Verified 32-character GUID from a recent players listing.
+    #[arg(long)]
+    pub expected_guid: String,
+    /// Kick reason.
+    #[arg(long)]
+    pub reason: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerArmaAdminAddBanArgs {
+    #[command(flatten)]
+    pub request: ServerArmaAdminRequestArgs,
+    /// 32-character BattlEye GUID to ban.
+    #[arg(long)]
+    pub guid: String,
+    /// Ban duration in minutes; zero is passed through to BattlEye.
+    #[arg(long)]
+    pub minutes: u32,
+    /// Ban reason.
+    #[arg(long)]
+    pub reason: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerArmaAdminRemoveBanArgs {
+    #[command(flatten)]
+    pub request: ServerArmaAdminRequestArgs,
+    /// Current ban id from a recent bans listing.
+    #[arg(long)]
+    pub ban_id: u32,
+    /// 32-character GUID shown for that ban.
+    #[arg(long)]
+    pub expected_guid: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerArmaAdminMissionArgs {
+    #[command(flatten)]
+    pub request: ServerArmaAdminRequestArgs,
+    /// World-qualified mission basename without the .pbo suffix.
+    #[arg(long)]
+    pub template: String,
 }
 
 #[derive(Args, Debug)]

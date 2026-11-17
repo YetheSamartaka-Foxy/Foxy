@@ -1,7 +1,10 @@
 # Examples conventions
 
+- `server_arma_administration_command.json` illustrates a strict typed Arma command with synthetic target identity. `server_arma_maintenance_jobs.json` adds optional Arma announcement/rotation/backup policy to schema-v1 jobs; older jobs without `policy.arma` remain valid. These examples authorize no live operation.
+
 - `examples/json/server_backend/server_consumer_cleanup_receipt.json` is a strict v1 cleanup receipt containing a context-bound v2 consumer with a valid canonical synthetic hash. `server_consumer_recovery_plan.json` illustrates reviewed eligible and retained legacy records. All identities and plan fingerprints are synthetic and grant no recovery authority. The existing v1 consumer example remains legacy-readable.
 - `examples/json/server_backend/server_scheduled_jobs.json` is a valid maintenance job catalog (a weekly local-time restart that requires an empty server and a one-time UTC restart), and `server_scheduled_occurrence.json` is an `unknown`/`owner_lost` occurrence of its first job whose id is the real derivation from instance, job, policy revision and trigger. A unit test parses both; change them together with the catalog or ledger schema. The older `server_maintenance_intent.json` and `server_maintenance_receipt.json` describe native installation maintenance, not scheduled jobs.
+- `examples/json/server_backend/arma3_rcon_instance.json` is a valid Arma instance with BattlEye on and an `rcon` block that references a protected password (never a value), and `server_rcon_command.json` is a replied RCon command record. A unit test parses both; change them together with the definition or command record schema.
 
 - Use `examples/` for reference data, test fixtures, and reproducible sample configs.
 - Current JSON examples live in:

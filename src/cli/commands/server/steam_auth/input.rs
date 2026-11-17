@@ -11,7 +11,7 @@ mod windows_file;
 const MAX_INPUT: usize = 4096;
 const MAX_CREDENTIAL_FILE: usize = 16 * 1024;
 
-pub(super) struct PrivateInput {
+pub(in crate::cli::commands::server) struct PrivateInput {
     bytes: Vec<u8>,
     skip_line_feed: bool,
     terminal: TerminalMode,
@@ -27,7 +27,7 @@ enum TerminalMode {
 }
 
 impl PrivateInput {
-    pub(super) fn new() -> Result<Self, AuthError> {
+    pub(in crate::cli::commands::server) fn new() -> Result<Self, AuthError> {
         #[cfg(unix)]
         {
             let terminal = unsafe { libc::isatty(0) } == 1;
@@ -101,7 +101,9 @@ impl PrivateInput {
         }
     }
 
-    pub(super) fn poll_line(&mut self) -> Result<Option<Secret>, AuthError> {
+    pub(in crate::cli::commands::server) fn poll_line(
+        &mut self,
+    ) -> Result<Option<Secret>, AuthError> {
         #[cfg(unix)]
         {
             let mut pollfd = libc::pollfd {

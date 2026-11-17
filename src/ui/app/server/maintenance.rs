@@ -5,8 +5,8 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, TimeZone, Timelike
 use crate::core::schedule::{JobSchedule, ScheduleClock, first_valid_local_instant};
 use crate::core::server::ServerInstanceId;
 use crate::core::server::jobs::{
-    MaintenanceAction, MaintenanceJob, MaintenanceJobDefinition, MaintenanceOverview,
-    MaintenancePolicy, Occurrence, PlayerPolicy,
+    ArmaMaintenancePolicy, MaintenanceAction, MaintenanceJob, MaintenanceJobDefinition,
+    MaintenanceOverview, MaintenancePolicy, Occurrence, PlayerPolicy,
 };
 use crate::ui::types::{ScheduleKind, WEEKDAYS_ALL};
 
@@ -100,6 +100,11 @@ pub(crate) struct MaintenanceForm {
     pub utc: bool,
     pub enabled: bool,
     pub require_empty: bool,
+    pub arma_hooks: bool,
+    pub announcement: String,
+    pub announcement_delay_seconds: u16,
+    pub mission_template: String,
+    pub require_backup: bool,
     pub grace_minutes: u16,
     pub max_defer_minutes: u16,
     pub max_attempts: u8,
@@ -127,6 +132,11 @@ impl MaintenanceForm {
             utc: false,
             enabled: true,
             require_empty: false,
+            arma_hooks: false,
+            announcement: String::new(),
+            announcement_delay_seconds: 0,
+            mission_template: String::new(),
+            require_backup: false,
             grace_minutes: policy.grace_minutes,
             max_defer_minutes: policy.max_defer_minutes,
             max_attempts: policy.max_attempts,
@@ -184,6 +194,13 @@ impl MaintenanceForm {
         form.max_attempts = policy.max_attempts;
         form.retry_delay_seconds = policy.retry_delay_seconds;
         form.stop_timeout_seconds = policy.stop_timeout_seconds;
+        if let Some(arma) = &policy.arma {
+            form.arma_hooks = true;
+            form.announcement = arma.announcement.clone().unwrap_or_default();
+            form.announcement_delay_seconds = arma.announcement_delay_seconds;
+            form.mission_template = arma.mission_template.clone().unwrap_or_default();
+            form.require_backup = arma.require_backup;
+        }
         form
     }
 
@@ -228,6 +245,38 @@ impl MaintenanceForm {
                 }
             }
         };
+        let rotate_mission = self.action == MaintenanceAction::RotateMission;
+        let restart_hooks = matches!(
+            self.action,
+            MaintenanceAction::Restart | MaintenanceAction::RotateMission
+        ) && self.arma_hooks;
+        let announcement = if restart_hooks {
+            let value = self.announcement.trim();
+            if !value.is_empty() && (value.len() > 256 || value.chars().any(char::is_control)) {
+                return Err(
+                    "Announcement must be 256 bytes or fewer and contain no control characters."
+                        .into(),
+                );
+            }
+            if self.announcement_delay_seconds > 300 {
+                return Err("Announcement delay must be between 0 and 300 seconds.".into());
+            }
+            if value.is_empty() && self.announcement_delay_seconds > 0 {
+                return Err("An announcement delay requires an announcement.".into());
+            }
+            (!value.is_empty()).then(|| value.to_owned())
+        } else {
+            None
+        };
+        let mission_template = if rotate_mission {
+            let value = self.mission_template.trim();
+            if value.is_empty() {
+                return Err("Enter a deployed mission template to rotate to.".into());
+            }
+            Some(value.to_owned())
+        } else {
+            None
+        };
         let definition = MaintenanceJobDefinition {
             name: self.name.trim().to_owned(),
             enabled: self.enabled,
@@ -245,6 +294,18 @@ impl MaintenanceForm {
                 max_attempts: self.max_attempts,
                 retry_delay_seconds: self.retry_delay_seconds,
                 stop_timeout_seconds: self.stop_timeout_seconds,
+                arma: (restart_hooks || rotate_mission || self.require_backup).then_some(
+                    ArmaMaintenancePolicy {
+                        announcement,
+                        announcement_delay_seconds: if restart_hooks {
+                            self.announcement_delay_seconds
+                        } else {
+                            0
+                        },
+                        mission_template,
+                        require_backup: self.require_backup,
+                    },
+                ),
             },
         };
         definition.validate()?;
@@ -289,6 +350,92 @@ mod tests {
         let reopened = MaintenanceForm::from_job(&job(definition.clone()), now);
         assert_eq!(reopened.editing.as_deref(), Some("job_0123456789abcdef"));
         assert_eq!(reopened.build(0).unwrap(), definition);
+    }
+
+    #[test]
+    fn arma_restart_hook_settings_round_trip_through_an_edit() {
+        let now = Local::now();
+        let mut form = MaintenanceForm::new_add(now);
+        form.name = "Arma restart".into();
+        form.arma_hooks = true;
+        form.announcement = "Restart in five minutes".into();
+        form.announcement_delay_seconds = 15;
+        let definition = form.build(0).unwrap();
+        let arma = definition.policy.arma.as_ref().unwrap();
+        assert_eq!(
+            arma.announcement.as_deref(),
+            Some("Restart in five minutes")
+        );
+        assert_eq!(arma.announcement_delay_seconds, 15);
+        assert_eq!(arma.mission_template, None);
+
+        let reopened = MaintenanceForm::from_job(&job(definition.clone()), now);
+        assert!(reopened.arma_hooks);
+        assert_eq!(reopened.announcement, "Restart in five minutes");
+        assert_eq!(reopened.announcement_delay_seconds, 15);
+        assert_eq!(reopened.build(0).unwrap(), definition);
+    }
+
+    #[test]
+    fn arma_rotation_requires_a_mission_and_only_stores_it_for_rotation() {
+        let now = Local::now();
+        let mut form = MaintenanceForm::new_add(now);
+        form.name = "Arma rotation".into();
+        form.action = MaintenanceAction::RotateMission;
+        assert!(
+            form.build(0)
+                .unwrap_err()
+                .contains("deployed mission template")
+        );
+        form.mission_template = "mission_one.vr".into();
+        let definition = form.build(0).unwrap();
+        assert_eq!(
+            definition
+                .policy
+                .arma
+                .as_ref()
+                .unwrap()
+                .mission_template
+                .as_deref(),
+            Some("mission_one.vr")
+        );
+
+        form.arma_hooks = true;
+        form.announcement = "Mission rotation shortly".into();
+        form.announcement_delay_seconds = 10;
+        let announced = form.build(0).unwrap();
+        assert_eq!(
+            MaintenanceForm::from_job(&job(announced.clone()), now)
+                .build(0)
+                .unwrap(),
+            announced
+        );
+
+        form.action = MaintenanceAction::Restart;
+        form.arma_hooks = false;
+        let restarted = form.build(0).unwrap();
+        assert_eq!(restarted.policy.arma, None);
+    }
+
+    #[test]
+    fn arma_announcement_validation_uses_bytes_delay_and_control_characters() {
+        let mut form = MaintenanceForm::new_add(Local::now());
+        form.name = "Arma restart".into();
+        form.arma_hooks = true;
+        form.announcement = "x".repeat(257);
+        assert!(form.build(0).unwrap_err().contains("256 bytes"));
+        form.announcement = "line one\nline two".into();
+        assert!(form.build(0).unwrap_err().contains("control characters"));
+        form.announcement.clear();
+        form.announcement_delay_seconds = 1;
+        assert!(
+            form.build(0)
+                .unwrap_err()
+                .contains("requires an announcement")
+        );
+        form.announcement = "A short message".into();
+        form.announcement_delay_seconds = 301;
+        assert!(form.build(0).unwrap_err().contains("0 and 300"));
     }
 
     #[test]

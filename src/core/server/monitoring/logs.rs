@@ -48,6 +48,7 @@ pub(super) struct LogCollector {
     next_sequence: u64,
     next_file_index: usize,
     truncated: bool,
+    secrets: Vec<zeroize::Zeroizing<String>>,
 }
 
 #[derive(Default)]
@@ -87,6 +88,7 @@ impl LogCollector {
             next_sequence: 1,
             next_file_index: 0,
             truncated: roots_truncated,
+            secrets: Vec::new(),
         };
         let (files, _) = collector.discover();
         for file in files {
@@ -341,6 +343,13 @@ impl LogCollector {
         ))
     }
 
+    /// Exact values the engine may echo, such as a protected RCon password, are replaced
+    /// before a line is sanitized or stored.
+    pub(super) fn redact_values(&mut self, values: Vec<zeroize::Zeroizing<String>>) {
+        self.secrets
+            .extend(values.into_iter().filter(|value| value.len() >= 3));
+    }
+
     fn consume_chunk(&mut self, path: &Path, bytes: &[u8]) {
         let Some(cursor) = self.cursors.get_mut(path) else {
             return;
@@ -372,7 +381,12 @@ impl LogCollector {
             .cloned()
             .unwrap_or_else(|| "engine".into());
         for line in complete {
-            let decoded = String::from_utf8_lossy(&line);
+            let mut decoded = zeroize::Zeroizing::new(String::from_utf8_lossy(&line).into_owned());
+            for secret in &self.secrets {
+                if decoded.contains(secret.as_str()) {
+                    *decoded = decoded.replace(secret.as_str(), "[redacted]");
+                }
+            }
             let sanitized = sanitize_text(&decoded);
             self.push_line(stream.clone(), sanitized);
         }
@@ -626,6 +640,7 @@ fn open_read_nofollow(path: &Path) -> Result<File, ReadFailure> {
 pub(super) fn sanitize_text(input: &str) -> String {
     let mut chars: Vec<char> = input.chars().collect();
     redact_sensitive_assignments(&mut chars);
+    redact_spaced_password_keys(&mut chars);
     redact_user_paths(&mut chars);
     redact_endpoints_and_ids(&mut chars);
     let sanitized: String = chars.into_iter().collect();
@@ -703,6 +718,49 @@ fn redact_sensitive_assignments(chars: &mut Vec<char>) {
             continue;
         }
         index = end.max(index + 1);
+    }
+}
+
+/// Config echoes such as `RConPassword value` separate key and value by whitespace only.
+fn redact_spaced_password_keys(chars: &mut Vec<char>) {
+    let mut index = 0;
+    while index < chars.len() {
+        if !(chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+            || (index > 0 && (chars[index - 1].is_ascii_alphanumeric() || chars[index - 1] == '_'))
+        {
+            index += 1;
+            continue;
+        }
+        let mut key_end = index;
+        while key_end < chars.len()
+            && (chars[key_end].is_ascii_alphanumeric() || chars[key_end] == '_')
+        {
+            key_end += 1;
+        }
+        let key: String = chars[index..key_end]
+            .iter()
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let compound =
+            key.contains("password") && !matches!(key.as_str(), "password" | "passwords");
+        let mut value_start = key_end;
+        while value_start < chars.len() && matches!(chars[value_start], ' ' | '\t') {
+            value_start += 1;
+        }
+        if !compound
+            || value_start == key_end
+            || value_start >= chars.len()
+            || matches!(chars[value_start], '=' | ':')
+        {
+            index = key_end;
+            continue;
+        }
+        let mut end = value_start;
+        while end < chars.len() && !chars[end].is_whitespace() && !matches!(chars[end], ',' | ';') {
+            end += 1;
+        }
+        chars.splice(value_start..end, "[redacted]".chars());
+        index = value_start + "[redacted]".len();
     }
 }
 
@@ -1049,6 +1107,43 @@ mod tests {
         assert_eq!(
             snapshot.entries.last().map(|line| line.text.as_str()),
             Some("fresh")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn engine_config_echoes_and_known_secrets_never_reach_log_history() {
+        let echoed =
+            sanitize_text(" 1:32:46 BattlEye Server: Config entry: RConPassword synthetic22value");
+        assert!(echoed.ends_with("RConPassword [redacted]"), "{echoed}");
+        assert!(
+            !sanitize_text("passwordAdmin\tsynthetic22value; next").contains("synthetic22value")
+        );
+        assert_eq!(
+            sanitize_text("Wrong password attempt"),
+            "Wrong password attempt"
+        );
+        assert_eq!(sanitize_text("RConPassword"), "RConPassword");
+        let root = temp_dir("known-secret");
+        let file = root.join("run.log");
+        fs::write(&file, b"").unwrap();
+        let mut collector = LogCollector::new(vec![root.clone()], 1);
+        collector.redact_values(vec![zeroize::Zeroizing::new("plain-value-77".into())]);
+        fs::write(
+            &file,
+            b"engine echoed plain-value-77 twice: plain-value-77
+",
+        )
+        .unwrap();
+        let snapshot = collector.sample();
+        let text = snapshot
+            .entries
+            .last()
+            .map(|line| line.text.clone())
+            .unwrap_or_default();
+        assert!(
+            !text.contains("plain-value-77") && text.contains("[redacted]"),
+            "{text}"
         );
         fs::remove_dir_all(root).unwrap();
     }

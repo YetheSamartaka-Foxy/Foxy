@@ -116,6 +116,8 @@ mod tests {
                 profile_seed: None,
                 configuration_seeds: Vec::new(),
                 headless: Vec::new(),
+                rcon: None,
+                battleye: None,
                 spawned: false,
             },
         };

@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "command_id": "cmd_00000000000000000000000000000001",
+  "instance_id": "server_00000000000000000000000000000001",
+  "owner_id": "owner_example",
+  "owner_generation": 1,
+  "run_generation": 3,
+  "session_generation": 1,
+  "text": "players",
+  "state": "replied",
+  "response": "Players on server:\n[#] [IP Address]:[Port] [Ping] [GUID] [Name]\n--------------------------------------------------\n(0 players in total)",
+  "requested_unix_ms": 1794872400000,
+  "sent_unix_ms": 1794872400012,
+  "finished_unix_ms": 1794872400047
+}

@@ -309,6 +309,7 @@ fn errors_preserve_edits_and_finished_workers_remain_busy_until_consumed() {
             stage_control: None,
             kind: None,
             maintenance_poll: false,
+            rcon_poll: false,
         }),
         ..Default::default()
     };
@@ -342,6 +343,7 @@ fn passive_monitoring_keeps_controls_available_and_queues_only_first_action() {
             stage_control: None,
             kind: None,
             maintenance_poll: false,
+            rcon_poll: false,
         }),
         ..Default::default()
     };

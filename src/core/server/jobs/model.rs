@@ -12,6 +12,7 @@ pub const MAINTENANCE_SCHEMA_VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum MaintenanceAction {
     Restart,
+    RotateMission,
     Update,
     Backup,
 }
@@ -20,6 +21,8 @@ impl MaintenanceAction {
     /// The reason an occurrence of this action cannot execute for a game, or `None` when it can.
     pub fn unavailable_reason(self, capabilities: &ServerCapabilities) -> Option<&'static str> {
         match self {
+            Self::RotateMission if capabilities.arma_administration => None,
+            Self::RotateMission => Some("Mission rotation requires native Arma administration."),
             Self::Restart if capabilities.lifecycle => None,
             Self::Restart => Some("This game has no native server lifecycle to restart."),
             Self::Update => Some(
@@ -41,6 +44,8 @@ pub enum PlayerPolicy {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenancePolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arma: Option<ArmaMaintenancePolicy>,
     /// A scheduled time missed by more than this many minutes is recorded as skipped, not run late.
     #[serde(default = "default_grace")]
     pub grace_minutes: u16,
@@ -54,6 +59,43 @@ pub struct MaintenancePolicy {
     pub retry_delay_seconds: u16,
     #[serde(default = "default_stop_timeout")]
     pub stop_timeout_seconds: u16,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArmaMaintenancePolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announcement: Option<String>,
+    #[serde(default)]
+    pub announcement_delay_seconds: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_template: Option<String>,
+    #[serde(default)]
+    pub require_backup: bool,
+}
+
+impl ArmaMaintenancePolicy {
+    pub fn validate(&self) -> Result<(), String> {
+        use crate::core::server::rcon::arma3::ArmaAdminCommand;
+        if self.announcement_delay_seconds > 300 {
+            return Err("The announcement delay must be 0-300 seconds.".into());
+        }
+        if let Some(message) = &self.announcement {
+            ArmaAdminCommand::Announce {
+                message: message.clone(),
+            }
+            .wire_text()?;
+        } else if self.announcement_delay_seconds > 0 {
+            return Err("An announcement delay requires an announcement.".into());
+        }
+        if let Some(template) = &self.mission_template {
+            ArmaAdminCommand::ChangeMission {
+                template: template.clone(),
+            }
+            .wire_text()?;
+        }
+        Ok(())
+    }
 }
 
 fn default_grace() -> u16 {
@@ -75,6 +117,7 @@ fn default_stop_timeout() -> u16 {
 impl Default for MaintenancePolicy {
     fn default() -> Self {
         Self {
+            arma: None,
             grace_minutes: default_grace(),
             player_policy: PlayerPolicy::default(),
             max_defer_minutes: default_defer(),
@@ -87,6 +130,9 @@ impl Default for MaintenancePolicy {
 
 impl MaintenancePolicy {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(arma) = &self.arma {
+            arma.validate()?;
+        }
         if self.grace_minutes > 1440 {
             return Err("The missed-run grace must be 0-1440 minutes.".into());
         }
@@ -205,6 +251,26 @@ impl MaintenanceJobDefinition {
                 return Err("A weekly job needs a time of day and at least one weekday.".into());
             }
             _ => {}
+        }
+        if self.action == MaintenanceAction::RotateMission
+            && self
+                .policy
+                .arma
+                .as_ref()
+                .and_then(|arma| arma.mission_template.as_ref())
+                .is_none()
+        {
+            return Err("Mission rotation requires an Arma mission template.".into());
+        }
+        if self.action != MaintenanceAction::RotateMission
+            && self
+                .policy
+                .arma
+                .as_ref()
+                .and_then(|arma| arma.mission_template.as_ref())
+                .is_some()
+        {
+            return Err("A mission template is only valid for mission rotation.".into());
         }
         self.policy.validate()
     }

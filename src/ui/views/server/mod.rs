@@ -1,3 +1,4 @@
+mod arma_admin;
 mod configuration;
 mod consumer_recovery;
 mod content;
@@ -18,6 +19,7 @@ mod maintenance;
 mod missions;
 mod monitoring;
 mod native_install;
+mod rcon;
 mod reconciliation;
 mod recovery;
 mod reforger_addons;
@@ -142,7 +144,7 @@ impl Foxy {
             }
             if let Some(id) = selected { self.server_view.select(&id); }
             ui.separator();
-            let (configuration_anchor, content_anchor, stage_anchor, acquisition_anchor, composition_anchor, records_anchor, reconciliation_anchor, preparation_anchor, activation_anchor, lifecycle_anchor, native_install_anchor, workshop_anchor, reforger_addon_anchor, maintenance_anchor) = ui.add_enabled_ui(!busy, |ui| {
+            let (configuration_anchor, content_anchor, stage_anchor, acquisition_anchor, composition_anchor, records_anchor, reconciliation_anchor, preparation_anchor, activation_anchor, lifecycle_anchor, native_install_anchor, workshop_anchor, reforger_addon_anchor, maintenance_anchor, rcon_anchor) = ui.add_enabled_ui(!busy, |ui| {
                 self.render_server_editor(ui);
                 self.render_server_installation(ui);
                 let native_install = self.render_server_native_install(ui);
@@ -162,8 +164,10 @@ impl Foxy {
                 let activation = self.render_server_deployment_activation(ui);
                 let lifecycle = self.render_server_lifecycle(ui);
                 let maintenance = self.render_server_maintenance(ui);
+                let rcon = self.render_server_rcon(ui);
+                self.render_arma_administration(ui);
                 self.render_consumer_recovery(ui);
-                (configuration, content, stage, acquisition, composition, records, reconciliation, preparation, activation, lifecycle, native_install, workshop, reforger_addons, maintenance)
+                (configuration, content, stage, acquisition, composition, records, reconciliation, preparation, activation, lifecycle, native_install, workshop, reforger_addons, maintenance, rcon)
             }).inner;
             if !self.server_view.busy() && self.server_view.dialog.is_none() && !self.server_view.reforger_addon_confirmation && let Some(target) = self.server_view.pending_focus && target != consumer_recovery::CONFIRM_CANCEL_FOCUS {
                 let response = if target == "server-configuration-controls" { configuration_anchor }
@@ -178,6 +182,7 @@ impl Foxy {
                     else if target == "server-deployment-activation-controls" { activation_anchor }
                     else if target == "server-lifecycle-controls" { lifecycle_anchor }
                     else if target == "server-maintenance-controls" { maintenance_anchor }
+                    else if target == "server-rcon-controls" { rcon_anchor }
                     else if target == "server-native-install-controls" { native_install_anchor }
                     else if target == "server-workshop-controls" { workshop_anchor }
                     else if target == "server-key-controls" { self.server_view.key_controls_focus.and_then(|id| ui.ctx().read_response(id)) }

@@ -1,4 +1,4 @@
-mod input;
+pub(super) mod input;
 
 use std::io::Write;
 use std::thread;

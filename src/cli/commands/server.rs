@@ -1,4 +1,5 @@
 use super::{CommandError, CommandSuccess};
+mod arma_admin;
 mod configuration_transfer;
 mod configurations;
 mod consumer_recovery;
@@ -19,6 +20,7 @@ mod maintenance;
 mod missions;
 mod native_install;
 mod owner_control;
+mod rcon;
 mod reconciliation;
 mod reforger_addons;
 mod reforger_configuration;
@@ -103,6 +105,8 @@ pub fn run_server_command(
         ServerCommand::Workshop { context, command } => workshop::run(cli, context, command),
         ServerCommand::Headless { context, command } => headless::run(cli, context, command),
         ServerCommand::Maintenance { context, command } => maintenance::run(cli, context, command),
+        ServerCommand::Rcon { context, command } => rcon::run(cli, context, command),
+        ServerCommand::Admin { context, command } => arma_admin::run(cli, context, command),
         ServerCommand::Installation {
             context,
             command: crate::cli::args::ServerInstallationCommand::Install { command },

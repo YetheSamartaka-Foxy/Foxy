@@ -87,6 +87,7 @@ impl ServerDefinition {
                 configuration: Box::default(),
                 key_trust: None,
                 headless_clients: Vec::new(),
+                rcon: None,
             }),
             ServerDefinitionKind::Reforger => Self::Reforger(Box::new(ReforgerServerDefinition {
                 name: name.to_string(),
@@ -102,6 +103,7 @@ impl ServerDefinition {
                 game_properties: ReforgerGameProperties::default(),
                 preserved: ReforgerPreservedJson::default(),
                 redacted_secret_paths: Vec::new(),
+                rcon: None,
             })),
         }
     }
@@ -153,6 +155,9 @@ impl ServerDefinition {
                 if let Some(profile) = &settings.difficulty {
                     profile.validate()?;
                 }
+                if let Some(rcon) = &settings.rcon {
+                    rcon.validate(settings.game_port, settings.battleye)?;
+                }
                 for mission in &settings.mission_cycle {
                     if mission.params.len() > 256 {
                         return Err("Arma 3 missions accept at most 256 parameters".into());
@@ -182,6 +187,21 @@ impl ServerDefinition {
                     }
                     if let Some(version) = &addon.version {
                         validate_text(version, "addon version", 128)?;
+                    }
+                }
+                if let Some(rcon) = &settings.rcon {
+                    rcon.validate(settings.bind_port, settings.a2s_port)?;
+                    if !settings.preserved.rcon.is_empty()
+                        && settings.preserved.rcon.keys().any(|key| {
+                            matches!(
+                                key.as_str(),
+                                "address" | "port" | "permission" | "maxClients"
+                            )
+                        })
+                    {
+                        return Err(
+                            "Preserved Reforger rcon values duplicate typed RCon settings".into(),
+                        );
                     }
                 }
                 super::reforger_schema::validate_reforger(settings)?;
@@ -269,6 +289,8 @@ pub struct Arma3ServerDefinition {
     pub key_trust: Option<Box<super::ServerKeyTrust>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headless_clients: Vec<super::Arma3HeadlessClient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rcon: Option<super::Arma3RconSettings>,
 }
 
 impl Arma3ServerDefinition {
@@ -342,6 +364,8 @@ pub struct ReforgerServerDefinition {
     pub preserved: ReforgerPreservedJson,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redacted_secret_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rcon: Option<super::ReforgerRconSettings>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

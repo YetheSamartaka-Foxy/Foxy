@@ -85,6 +85,7 @@ fn schedule_text(job: &MaintenanceJob) -> String {
 fn action_text(action: MaintenanceAction) -> String {
     tr(match action {
         MaintenanceAction::Restart => "Restart the server",
+        MaintenanceAction::RotateMission => "Rotate mission",
         MaintenanceAction::Update => "Update the installation",
         MaintenanceAction::Backup => "Back up the server",
     })
@@ -358,6 +359,33 @@ impl Foxy {
                     },
                     &[("revision", job.revision.to_string())],
                 ));
+                if capabilities.arma_administration
+                    && let Some(arma) = &policy.arma
+                {
+                    if let Some(announcement) = &arma.announcement {
+                        ui.label(tr_fmt(
+                            "Arma maintenance announcement: {message} (wait {seconds} seconds)",
+                            &[
+                                ("message", announcement.clone()),
+                                (
+                                    "seconds",
+                                    arma.announcement_delay_seconds.to_string(),
+                                ),
+                            ],
+                        ));
+                    }
+                    if let Some(template) = &arma.mission_template {
+                        ui.label(tr_fmt("Mission rotation template: {template}", &[(
+                            "template",
+                            template.clone(),
+                        )]));
+                    }
+                    if arma.require_backup {
+                        ui.label(tr(
+                            "This job requires a backup and will be blocked until backup support is implemented.",
+                        ));
+                    }
+                }
                 ui.label(tr_fmt(
                     "Players: {players}; missed-run grace {grace} min; deferral limit {defer} min; up to {attempts} attempts {retry} s apart; stop timeout {timeout} s",
                     &[
@@ -620,11 +648,15 @@ impl Foxy {
             });
             ui.label(tr("Action:"));
             ui.horizontal_wrapped(|ui| {
-                for choice in [
+                let mut choices = vec![
                     MaintenanceAction::Restart,
                     MaintenanceAction::Update,
                     MaintenanceAction::Backup,
-                ] {
+                ];
+                if capabilities.arma_administration {
+                    choices.push(MaintenanceAction::RotateMission);
+                }
+                for choice in choices {
                     let reason = choice.unavailable_reason(&capabilities);
                     let response = ui.add_enabled(
                         reason.is_none(),
@@ -639,6 +671,11 @@ impl Foxy {
             });
             if let Some(reason) = form.action.unavailable_reason(&capabilities) {
                 ui.label(tr(reason));
+            }
+            if form.action == MaintenanceAction::RotateMission {
+                ui.label(tr(
+                    "Mission rotation requires Arma RCon and a mission template already deployed to the server.",
+                ));
             }
             ui.label(RichText::new(tr("When")).strong());
             ui.horizontal(|ui| {
@@ -709,6 +746,51 @@ impl Foxy {
                     ui.add(egui::DragValue::new(&mut form.stop_timeout_seconds).range(5..=120));
                     ui.end_row();
                 });
+            if capabilities.arma_administration {
+                ui.separator();
+                ui.label(RichText::new(tr("Arma maintenance options")).strong());
+                if matches!(form.action, MaintenanceAction::Restart | MaintenanceAction::RotateMission) {
+                    ui.checkbox(
+                        &mut form.arma_hooks,
+                        tr("Announce before Arma maintenance"),
+                    );
+                    if form.arma_hooks {
+                        ui.label(tr(
+                            "When a message is entered and RCon is configured, send it before restarting the server or rotating the mission.",
+                        ));
+                        ui.label(tr("Announcement (optional, up to 256 bytes)"));
+                        ui.add(
+                            egui::TextEdit::multiline(&mut form.announcement)
+                                .desired_rows(2)
+                                .char_limit(256),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label(tr("Announcement delay (seconds)"));
+                            ui.add(
+                                egui::DragValue::new(&mut form.announcement_delay_seconds)
+                                    .range(0..=300),
+                            );
+                        });
+                    }
+                }
+                if form.action == MaintenanceAction::RotateMission {
+                    ui.label(tr("Mission template"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut form.mission_template)
+                            .char_limit(256)
+                            .desired_width(320.0),
+                    );
+                }
+                ui.checkbox(
+                    &mut form.require_backup,
+                    tr("Require a backup before this job can run"),
+                );
+                if form.require_backup {
+                    ui.label(tr(
+                        "This job will be blocked until backup support is implemented.",
+                    ));
+                }
+            }
             if let Some(error) = &form.error {
                 ui.colored_label(self.color_text_error(), tr(error));
             }

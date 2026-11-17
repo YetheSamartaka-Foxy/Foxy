@@ -23,6 +23,7 @@ pub enum ServerStoreError {
     InstallationNotFound,
     StaleRevision,
     Ownership,
+    RconOutcomeUnknown,
     Io,
     UnsafePath,
     Cancelled,
@@ -52,6 +53,9 @@ impl std::fmt::Display for ServerStoreError {
                 "Server draft changed; reload it and retry with the current revision"
             }
             Self::Ownership => "An exclusive claim on the selected game space is required",
+            Self::RconOutcomeUnknown => {
+                "The RCon effect may have occurred but its durable outcome is unavailable. Inspect the owned server before another action."
+            }
             Self::Io => {
                 "Cannot read or write server definitions; check permissions and available storage"
             }
@@ -412,6 +416,7 @@ impl ServerStore {
                 let mut instance = after.instances[index].clone();
                 instance.id = ServerInstanceId::new();
                 instance.display_name = name;
+                super::rcon::clear_password_reference(&mut instance.definition);
                 instance.revision = 1;
                 instance
                     .validate(self.context.space_id(), self.kind)

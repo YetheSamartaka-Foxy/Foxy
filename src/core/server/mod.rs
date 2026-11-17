@@ -40,7 +40,7 @@ mod operations;
 pub(crate) mod owner;
 mod preflight;
 mod publish;
-mod rcon;
+pub(crate) mod rcon;
 mod reconciliation;
 mod recovery_inspection;
 mod reforger_addons;
@@ -131,6 +131,7 @@ pub use native_install::{
     NativeInstallationCheck, NativeInstallationValidation, NativeMaintenanceAction,
 };
 pub use preflight::DeploymentPreflight;
+pub use rcon::{Arma3RconSettings, ReforgerRconPermission, ReforgerRconSettings};
 pub use reconciliation::{DeploymentPins, ReconciliationOutcome, ReconciliationPlan};
 pub use recovery_inspection::{InstallationRecoveryInspection, RecoveryMetadataEvidence};
 pub use reforger_addons::{

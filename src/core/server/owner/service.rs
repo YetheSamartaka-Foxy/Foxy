@@ -315,6 +315,7 @@ fn serve_claimed(
     let mut deployment: Option<DeploymentWorker> = None;
     let mut runtime = super::runtime::RuntimeService::new(context, &scope)?;
     let mut maintenance = super::maintenance::MaintenanceService::new(context, &scope);
+    let mut rcon = super::rcon::RconService::new(context, &scope);
     let result = (|| {
         while !stopped.load(Ordering::Acquire)
             && !durable::parent_eof_stops(
@@ -330,7 +331,8 @@ fn serve_claimed(
             if let Some(completion) = runtime.finish(&mut ledger)? {
                 maintenance.completed(completion, &runtime);
             }
-            maintenance.tick(&mut runtime, deployment.is_some(), directory);
+            maintenance.tick(&mut runtime, deployment.is_some() || rcon.busy(), directory);
+            rcon.tick(&runtime, &mut ledger)?;
             publish_deployment_progress(&mut deployment, &mut ledger)?;
             let accept_budget = IoBudget {
                 deadline: Instant::now() + CONNECT_TIMEOUT,
@@ -422,6 +424,13 @@ fn serve_claimed(
                     }
                     continue;
                 }
+                if let Some(response) = rcon.handle(&session, &message, &mut ledger, &runtime)? {
+                    let _ = session.send(&response, budget);
+                    if matches!(session.receive(budget), Ok(ClientMessage::Close)) {
+                        let _ = session.send(&ServerMessage::Closed, budget);
+                    }
+                    continue;
+                }
                 if let Some(response) =
                     maintenance.handle(&session, &message, &mut ledger, &runtime)?
                 {
@@ -436,7 +445,7 @@ fn serve_claimed(
                     &message,
                     &mut ledger,
                     directory,
-                    deployment.is_some(),
+                    deployment.is_some() || rcon.busy(),
                 )? {
                     let _ = session.send(&response, budget);
                     if matches!(session.receive(budget), Ok(ClientMessage::Close)) {
@@ -628,6 +637,7 @@ fn serve_claimed(
                 }
             }
         }
+        rcon.shutdown(&mut ledger)?;
         if let Some(worker) = &deployment {
             worker.control.cancel();
         }

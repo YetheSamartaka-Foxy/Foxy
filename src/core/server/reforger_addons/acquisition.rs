@@ -348,6 +348,7 @@ impl ServerStore {
             game_properties: Default::default(),
             preserved: Default::default(),
             redacted_secret_paths: Vec::new(),
+            rcon: None,
         };
         let config = super::super::render_server_json(&settings);
         fs::write(

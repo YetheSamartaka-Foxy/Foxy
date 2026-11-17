@@ -21,6 +21,8 @@ pub(crate) struct SessionIdentity {
 }
 
 pub(crate) struct DeploymentExecution {
+    pub(crate) arma_maintenance: Option<(String, crate::core::server::jobs::ArmaMaintenancePolicy)>,
+    pub(crate) maintenance_player_policy: Option<crate::core::server::jobs::PlayerPolicy>,
     context: ServerContext,
     scope: Scope,
     identity: SessionIdentity,
@@ -55,6 +57,8 @@ impl DeploymentExecution {
         let claim = db_process_lock::pin_held_claim(&context.database_path())
             .map_err(|_| invalid("An exclusive game-space claim is required"))?;
         Ok(Self {
+            arma_maintenance: None,
+            maintenance_player_policy: None,
             context: context.clone(),
             scope: scope.clone(),
             identity: SessionIdentity {

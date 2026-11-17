@@ -11,7 +11,7 @@ pub use session::{ClientSession, ServerSession};
 use serde::{Deserialize, Serialize};
 use std::{fmt, io};
 
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 11;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 1024;
 
@@ -143,6 +143,31 @@ pub enum Operation {
         instance_id: String,
         occurrence_id: String,
     },
+    InspectRcon {
+        instance_id: String,
+    },
+    TestRcon {
+        instance_id: String,
+        expected_run_generation: u64,
+    },
+    SendRconCommand {
+        instance_id: String,
+        expected_run_generation: u64,
+        text: String,
+        timeout_ms: u32,
+    },
+    SendArmaAdminCommand {
+        instance_id: String,
+        expected_run_generation: u64,
+        command_json: String,
+        timeout_ms: u32,
+    },
+    RotateArmaMission {
+        instance_id: String,
+        expected_run_generation: u64,
+        template: String,
+        timeout_ms: u32,
+    },
     CancelLifecycle {
         request_id: u64,
     },
@@ -171,6 +196,11 @@ fn valid_server_instance_id(value: &str) -> bool {
     value
         .strip_prefix("server_")
         .is_some_and(|suffix| valid_lower_hex(suffix, 32))
+}
+
+/// RCon command text: 1-1024 bytes, not blank, no control characters.
+pub fn valid_rcon_text(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

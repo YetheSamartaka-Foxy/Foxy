@@ -75,10 +75,15 @@ impl ServerStore {
             }
             let source_text =
                 std::str::from_utf8(&source).map_err(|_| ServerStoreError::Corrupt)?;
-            prepared.push((
-                filename.to_owned(),
-                render_secret_values(self, id, source_text, &seed.bindings, control)?,
-            ));
+            let rendered = if filename == "server.json" {
+                if !seed.bindings.is_empty() {
+                    return Err(ServerStoreError::Corrupt);
+                }
+                render_json_secrets(self, id, source_text)?
+            } else {
+                render_secret_values(self, id, source_text, &seed.bindings, control)?
+            };
+            prepared.push((filename.to_owned(), rendered));
         }
         let runtime = runtime_name.ok_or(ServerStoreError::Corrupt)?;
         publish_private_config(self, id, &state_root, &runtime, &prepared, control)
@@ -176,6 +181,45 @@ fn render_secret_values(
         .map_err(|_| ServerStoreError::Corrupt)
 }
 
+/// Resolves the Reforger `rcon.password` reference; every other value is copied unchanged.
+fn render_json_secrets(
+    store: &ServerStore,
+    id: &ServerInstanceId,
+    source: &str,
+) -> Result<Vec<u8>, ServerStoreError> {
+    replace_rcon_password(source, |reference| {
+        store.resolve_config_secret(id, reference)
+    })
+}
+
+fn replace_rcon_password(
+    source: &str,
+    resolve: impl FnOnce(&str) -> Result<String, ServerStoreError>,
+) -> Result<Vec<u8>, ServerStoreError> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(source).map_err(|_| ServerStoreError::Corrupt)?;
+    let password = value
+        .get_mut("rcon")
+        .and_then(|rcon| rcon.get_mut("password"))
+        .ok_or(ServerStoreError::Corrupt)?;
+    let reference = password
+        .as_str()
+        .and_then(|text| text.strip_prefix("foxy-secret:"))
+        .filter(|reference| crate::core::server::rcon::valid_secret_reference(reference))
+        .ok_or(ServerStoreError::Corrupt)?
+        .to_owned();
+    let secret = zeroize::Zeroizing::new(resolve(&reference)?);
+    *password = serde_json::Value::String(secret.to_string());
+    let bytes = serde_json::to_vec_pretty(&value).map_err(|_| ServerStoreError::Corrupt)?;
+    if let Some(serde_json::Value::String(text)) = value
+        .get_mut("rcon")
+        .and_then(|rcon| rcon.get_mut("password"))
+    {
+        zeroize::Zeroize::zeroize(text);
+    }
+    Ok(bytes)
+}
+
 fn collect_assignments<'a>(nodes: &'a [Node], found: &mut Vec<&'a Node>) {
     for node in nodes {
         match &node.kind {
@@ -205,7 +249,7 @@ fn secret_name(name: &str) -> bool {
     name.contains("password") || name.contains("secret") || name.contains("token")
 }
 
-fn validate_state_marker(
+pub(super) fn validate_state_marker(
     store: &ServerStore,
     id: &ServerInstanceId,
     root: &Path,
@@ -374,7 +418,7 @@ fn private_marker(
     }
 }
 
-fn check_private_dir(path: &Path) -> Result<(), ServerStoreError> {
+pub(super) fn check_private_dir(path: &Path) -> Result<(), ServerStoreError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| ServerStoreError::UnsafePath)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(ServerStoreError::UnsafePath);
@@ -389,7 +433,7 @@ fn check_private_dir(path: &Path) -> Result<(), ServerStoreError> {
     Ok(())
 }
 
-fn create_protected_directory(path: &Path) -> Result<(), ServerStoreError> {
+pub(super) fn create_protected_directory(path: &Path) -> Result<(), ServerStoreError> {
     foxy_supervisor::control::handoff::ProtectedDirectory::create(path)
         .map(drop)
         .map_err(|_| ServerStoreError::UnsafePath)
@@ -449,6 +493,9 @@ fn is_hex32(value: &str) -> bool {
 }
 
 fn portable_config_name(value: &str) -> bool {
+    if value == "server.json" {
+        return true;
+    }
     value.len() <= 128
         && value.ends_with(".cfg")
         && value
@@ -461,6 +508,34 @@ fn portable_config_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reforger_rcon_password_references_resolve_only_their_own_value() {
+        let reference = format!("secret_{}", "d".repeat(32));
+        let source = format!(
+            r#"{{"bindPort":2001,"rcon":{{"address":"127.0.0.1","port":19999,"password":"foxy-secret:{reference}","permission":"monitor"}},"game":{{"name":"A"}}}}"#
+        );
+        let rendered = replace_rcon_password(&source, |asked| {
+            assert_eq!(asked, reference);
+            Ok("synthetic-pass".into())
+        })
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&rendered).unwrap();
+        assert_eq!(value["rcon"]["password"], "synthetic-pass");
+        assert_eq!(value["rcon"]["port"], 19999);
+        assert_eq!(value["game"]["name"], "A");
+        for bad in [
+            r#"{"rcon":{"password":"plain"}}"#.to_string(),
+            r#"{"rcon":{"port":1}}"#.to_string(),
+            r#"{"rcon":{"password":"foxy-secret:secret_x"}}"#.to_string(),
+            "not json".to_string(),
+        ] {
+            assert!(
+                replace_rcon_password(&bad, |_| Ok("x".into())).is_err(),
+                "{bad}"
+            );
+        }
+    }
 
     #[test]
     fn protected_configuration_uses_private_home_beneath_a_legacy_runtime_root() {

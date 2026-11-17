@@ -1,7 +1,7 @@
 pub(in crate::core::server) mod launch;
 mod profile;
 mod reforger;
-pub(in crate::core::server) use launch::NativeRuntimeLaunchPlan;
+pub(in crate::core::server) use launch::{NativeRconPlan, NativeRuntimeLaunchPlan};
 pub use profile::NativeProfileSeed;
 mod runtime;
 mod store;

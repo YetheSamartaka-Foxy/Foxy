@@ -81,7 +81,19 @@ impl ServerStore {
         if current.revision != expected_revision {
             return Err(ServerStoreError::StaleRevision);
         }
-        apply_change(&current, change, unix_ms()).map_err(ServerStoreError::Invalid)
+        let (next, affected) =
+            apply_change(&current, change, unix_ms()).map_err(ServerStoreError::Invalid)?;
+        if !self.capabilities().arma_administration
+            && next
+                .jobs
+                .iter()
+                .any(|job| job.definition.policy.arma.is_some())
+        {
+            return Err(ServerStoreError::Invalid(
+                "Arma maintenance options are unavailable in this game space.".into(),
+            ));
+        }
+        Ok((next, affected))
     }
 
     fn change_maintenance_owned(

@@ -490,7 +490,15 @@ impl MaintenanceService {
                 Some(reason.into()),
             );
         }
-        if occurrence.action != MaintenanceAction::Restart {
+        if policy.arma.as_ref().is_some_and(|arma| arma.require_backup) {
+            return Self::finish(&root, occurrence, OccurrenceState::Blocked,
+                Some(OccurrenceReason::AdapterUnavailable),
+                Some("The job requires a consistent backup; the backup adapter is unavailable. No administration command was sent.".into()));
+        }
+        if !matches!(
+            occurrence.action,
+            MaintenanceAction::Restart | MaintenanceAction::RotateMission
+        ) {
             return;
         }
         let status = runtime.instance_status(&id);
@@ -585,7 +593,29 @@ impl MaintenanceService {
             }
         };
         occurrence.attempts = occurrence.attempts.saturating_add(1);
-        let operation = if start_only {
+        if (occurrence.action == MaintenanceAction::RotateMission
+            || policy
+                .arma
+                .as_ref()
+                .is_some_and(|arma| arma.announcement.is_some()))
+            && plan.launch.rcon.is_none()
+        {
+            return Self::finish(&root, occurrence, OccurrenceState::Blocked,
+                Some(OccurrenceReason::AdapterUnavailable),
+                Some("This Arma maintenance action requires RCon in the committed runtime. Nothing was sent.".into()));
+        }
+        let operation = if occurrence.action == MaintenanceAction::RotateMission {
+            Operation::RotateArmaMission {
+                instance_id: id.as_str().into(),
+                expected_run_generation: status.as_ref().map_or(0, |status| status.run_generation),
+                template: policy
+                    .arma
+                    .as_ref()
+                    .and_then(|arma| arma.mission_template.clone())
+                    .unwrap_or_default(),
+                timeout_ms: u32::from(policy.stop_timeout_seconds) * 1000,
+            }
+        } else if start_only {
             Operation::StartInstance {
                 instance_id: id.as_str().into(),
                 expected_activation_generation: plan.activation_generation,
@@ -605,7 +635,7 @@ impl MaintenanceService {
                 timeout_ms: u32::from(policy.stop_timeout_seconds) * 1000,
             }
         };
-        let execution = match DeploymentExecution::new(
+        let mut execution = match DeploymentExecution::new(
             &context,
             &scope,
             CLIENT_ID,
@@ -628,6 +658,11 @@ impl MaintenanceService {
                 );
             }
         };
+        execution.arma_maintenance = policy
+            .arma
+            .clone()
+            .map(|arma| (occurrence.occurrence_id.clone(), arma));
+        execution.maintenance_player_policy = Some(policy.player_policy);
         occurrence.state = OccurrenceState::Running;
         occurrence.reason = None;
         occurrence.deferred_since_unix_ms = None;
@@ -721,6 +756,18 @@ impl MaintenanceService {
             Ok(outcome) => (outcome.completed, outcome.cancelled, outcome.message),
             Err(error) => (false, false, Some(error)),
         };
+        let cancelled = cancelled || cancel_requested;
+        if !completed
+            && !cancelled
+            && (occurrence.action == MaintenanceAction::RotateMission
+                || policy
+                    .arma
+                    .as_ref()
+                    .is_some_and(|arma| arma.announcement.is_some()))
+        {
+            return Self::finish(&root, occurrence, OccurrenceState::Unknown,
+                Some(OccurrenceReason::AttemptFailed), message.or_else(|| Some("The administration effect is unconfirmed; it will not be repeated automatically.".into())));
+        }
         occurrence.run_generation_after = after.as_ref().map(|status| status.run_generation);
         self.record_attempt(
             &root,
@@ -728,7 +775,7 @@ impl MaintenanceService {
             &policy,
             AttemptResult {
                 completed,
-                cancelled: cancelled || cancel_requested,
+                cancelled,
                 stop_completed: stopped_by_us,
             },
             message,

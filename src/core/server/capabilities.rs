@@ -34,6 +34,7 @@ pub struct ServerCapabilities {
     pub durable_owner: bool,
     pub consumer_recovery: bool,
     pub headless_clients: bool,
+    pub arma_administration: bool,
 }
 
 impl ServerCapabilities {
@@ -56,6 +57,7 @@ impl ServerCapabilities {
             native_installation_channels: kind == ServerDefinitionKind::Reforger && native,
             workshop_acquisition: native_arma,
             headless_clients: native_arma,
+            arma_administration: native_arma,
             lifecycle: native,
             durable_owner: native,
             consumer_recovery: native,
@@ -126,6 +128,7 @@ mod tests {
                 caps.definition_kind == Some(super::ServerDefinitionKind::Arma3) && caps.lifecycle
             );
             assert_eq!(caps.headless_clients, caps.workshop_acquisition);
+            assert_eq!(caps.arma_administration, caps.headless_clients);
             assert_eq!(
                 caps.native_installation_channels,
                 caps.definition_kind == Some(super::ServerDefinitionKind::Reforger)

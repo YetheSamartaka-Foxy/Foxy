@@ -74,6 +74,7 @@ pub(crate) enum ServerDialog {
 
 #[derive(Default)]
 pub(crate) struct ServerViewState {
+    pub arma_admin: super::arma_admin::ArmaAdminViewState,
     pub steam_auth: super::steam_auth::ServerSteamState,
     pub key_review: Option<Box<crate::core::server::ServerKeyReview>>,
     pub key_selection: std::collections::BTreeSet<String>,
@@ -111,6 +112,7 @@ pub(crate) struct ServerViewState {
     pub consumer_recovery_outcome: Option<crate::core::server::ConsumerRecoveryOutcome>,
     pub consumer_recovery_confirmation: bool,
     pub maintenance: super::maintenance::MaintenanceViewState,
+    pub rcon: super::rcon::RconViewState,
     pub monitoring_search: String,
     pub monitoring_paused: bool,
     pub monitoring_auto_scroll: bool,
@@ -366,6 +368,8 @@ impl ServerViewState {
         self.consumer_recovery_outcome = None;
         self.consumer_recovery_confirmation = false;
         self.maintenance = Default::default();
+        self.rcon = Default::default();
+        self.arma_admin = Default::default();
         self.native_install_plan = None;
         self.native_install_outcome = None;
         self.native_install_check = None;
@@ -1021,6 +1025,38 @@ impl ServerViewState {
                 }
                 self.maintenance.load_error = None;
                 self.maintenance.snapshot = Some(*snapshot);
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::Rcon(snapshot, notice, record),
+                ..
+            }) => {
+                if let Some(notice) = notice {
+                    match notice {
+                        super::rcon::RconNotice::SettingsSaved
+                        | super::rcon::RconNotice::Disabled => self.rcon.form = None,
+                        super::rcon::RconNotice::PasswordStored => self.rcon.password = None,
+                        super::rcon::RconNotice::TestReplied { .. } => {}
+                    }
+                    self.rcon.notice = Some(notice);
+                    self.rcon.confirmation = None;
+                    self.error = None;
+                }
+                if let Some(record) = record {
+                    if self.arma_admin.confirmation.as_ref().is_some_and(|review| {
+                        review.instance_id.as_str() == record.instance_id
+                            && review.run_generation == record.run_generation
+                            && review.wire_text == record.text
+                    }) {
+                        self.arma_admin.confirmation = None;
+                    }
+                    self.rcon.last_command = Some(*record);
+                    self.rcon.confirmation = None;
+                    self.rcon.command_text.clear();
+                    self.rcon.notice = None;
+                    self.error = None;
+                }
+                self.rcon.load_error = None;
+                self.rcon.snapshot = Some(*snapshot);
             }
             Ok(ServerTaskResult {
                 output: ServerTaskOutput::ConsumerRecoveryPlan(plan),

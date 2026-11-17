@@ -485,6 +485,60 @@ pub(super) fn validate_client(message: &ClientMessage) -> io::Result<()> {
                 {
                     return Err(invalid("invalid maintenance cancellation request"));
                 }
+                super::Operation::InspectRcon { instance_id }
+                    if !super::valid_server_instance_id(instance_id) =>
+                {
+                    return Err(invalid("invalid RCon inspection request"));
+                }
+                super::Operation::TestRcon {
+                    instance_id,
+                    expected_run_generation,
+                } if !super::valid_server_instance_id(instance_id)
+                    || *expected_run_generation == 0 =>
+                {
+                    return Err(invalid("invalid RCon test request"));
+                }
+                super::Operation::SendRconCommand {
+                    instance_id,
+                    expected_run_generation,
+                    text,
+                    timeout_ms,
+                } if !super::valid_server_instance_id(instance_id)
+                    || *expected_run_generation == 0
+                    || !super::valid_rcon_text(text)
+                    || !(1_000..=60_000).contains(timeout_ms) =>
+                {
+                    return Err(invalid("invalid RCon command request"));
+                }
+                super::Operation::SendArmaAdminCommand {
+                    instance_id,
+                    expected_run_generation,
+                    command_json,
+                    timeout_ms,
+                } if !super::valid_server_instance_id(instance_id)
+                    || *expected_run_generation == 0
+                    || command_json.is_empty()
+                    || command_json.len() > 768
+                    || !(1_000..=60_000).contains(timeout_ms) =>
+                {
+                    return Err(invalid("invalid Arma administration request"));
+                }
+                super::Operation::RotateArmaMission {
+                    instance_id,
+                    expected_run_generation,
+                    template,
+                    timeout_ms,
+                } if !super::valid_server_instance_id(instance_id)
+                    || *expected_run_generation == 0
+                    || template.is_empty()
+                    || template.len() > 128
+                    || !template
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+                    || !(1_000..=120_000).contains(timeout_ms) =>
+                {
+                    return Err(invalid("invalid Arma mission rotation request"));
+                }
                 super::Operation::CancelLifecycle { request_id: 0 } => {
                     return Err(invalid("invalid lifecycle cancellation request"));
                 }

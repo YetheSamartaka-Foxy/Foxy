@@ -10,7 +10,8 @@ use foxy_supervisor::process::{CommandSpec, ConsoleSignalHelper, TreeExit};
 use foxy_supervisor::session::{ForegroundSession, SessionIdentity, SessionPhase};
 
 use super::{
-    InstanceRuntimePhase, InstanceRuntimeStatus, RuntimeOperationOutcome, manager::Snapshots,
+    InstanceRuntimePhase, InstanceRuntimeStatus, RuntimeOperationOutcome,
+    manager::{RconTargets, Snapshots},
 };
 use crate::core::server::{
     ContentStageControl, ServerInstanceId, ServerStore, ServerStoreError,
@@ -18,9 +19,17 @@ use crate::core::server::{
     owner::DeploymentExecution,
 };
 
+mod administration;
 mod headless;
 
 const MAX_RETAINED_INSTANCES: usize = 128;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RconShutdownDelivery {
+    Unattempted,
+    NotSent,
+    SentOrUnknown,
+}
 
 struct Run {
     session: Option<ForegroundSession>,
@@ -29,21 +38,30 @@ struct Run {
     ports: Vec<u16>,
     monitoring: Option<RunObserver>,
     headless: headless::HeadlessGroup,
+    rcon: Option<crate::core::server::deployment_activation::NativeRconPlan>,
+    rcon_stop: RconShutdownDelivery,
 }
 
 pub(super) struct Runs {
     store: ServerStore,
     scope: Scope,
     snapshots: Snapshots,
+    rcon_targets: RconTargets,
     runs: BTreeMap<String, Run>,
 }
 
 impl Runs {
-    pub(super) fn new(store: ServerStore, scope: Scope, snapshots: Snapshots) -> Self {
+    pub(super) fn new(
+        store: ServerStore,
+        scope: Scope,
+        snapshots: Snapshots,
+        rcon_targets: RconTargets,
+    ) -> Self {
         Self {
             store,
             scope,
             snapshots,
+            rcon_targets,
             runs: BTreeMap::new(),
         }
     }
@@ -55,6 +73,19 @@ impl Runs {
             .unwrap_or_else(|error| error.into_inner());
         for (id, run) in &self.runs {
             snapshots.insert(id.clone(), (run.status.clone(), run.observed));
+        }
+        drop(snapshots);
+        let mut targets = self
+            .rcon_targets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        targets.clear();
+        for (id, run) in &self.runs {
+            if let (Some(_), Some(plan)) = (&run.session, &run.rcon)
+                && run.status.process_exists
+            {
+                targets.insert(id.clone(), (run.status.run_generation, plan.clone()));
+            }
         }
     }
 
@@ -182,6 +213,7 @@ impl Runs {
                 let plan = self.store.plan_instance_start(&id, control)?;
                 plan.require_review(expected_activation_generation, &review_fingerprint)?;
                 let carried = self.runs.get(id.as_str()).map(|run| run.headless.carried());
+                self.announce_maintenance(&id, expected_run_generation, execution, control)?;
                 let stopped =
                     self.stop(&id, expected_run_generation, force, timeout_ms, control)?;
                 let cancelled = control.snapshot().cancel_requested;
@@ -197,6 +229,19 @@ impl Runs {
                     carried.as_ref(),
                 )
             }
+            Operation::RotateArmaMission {
+                instance_id,
+                expected_run_generation,
+                template,
+                timeout_ms,
+            } if instance_id == id.as_str() => self.rotate_mission(
+                &id,
+                expected_run_generation,
+                &template,
+                timeout_ms,
+                execution,
+                control,
+            ),
             Operation::StartHeadlessClients {
                 instance_id,
                 expected_run_generation,
@@ -302,6 +347,8 @@ impl Runs {
                 ports,
                 monitoring: None,
                 headless: headless::HeadlessGroup::default(),
+                rcon: None,
+                rcon_stop: RconShutdownDelivery::Unattempted,
             },
         );
         self.publish();
@@ -317,15 +364,25 @@ impl Runs {
             }
         };
         let profile_seed = plan.launch.profile_seed.clone();
+        let rcon_secret = plan.launch.rcon.as_ref().and_then(|rcon| {
+            self.store
+                .resolve_config_secret(id, &rcon.password_reference)
+                .ok()
+                .map(zeroize::Zeroizing::new)
+        });
         let monitoring = plan.launch.monitoring.clone().map(|input| {
-            PreparedObserver::new(
+            let mut observer = PreparedObserver::new(
                 &self.store,
                 &self.runs.get(id.as_str()).expect("starting run").status,
                 input,
                 self.output_path(id, generation),
-            )
+            );
+            observer.redact_values(rcon_secret.into_iter().collect());
+            observer
         });
         let configuration_seeds = plan.launch.configuration_seeds.clone();
+        let battleye_seed = plan.launch.battleye.clone();
+        let rcon_plan = plan.launch.rcon.clone();
         let headless_plans = plan.launch.headless.clone();
         let spec = CommandSpec {
             executable: plan.launch.executable,
@@ -393,6 +450,13 @@ impl Runs {
                             io::Error::other("Protected runtime configuration preparation failed")
                         })?;
                 }
+                if let Some(seed) = &battleye_seed {
+                    self.store
+                        .prepare_battleye_state(id, seed, control)
+                        .map_err(|_| {
+                            io::Error::other("Private BattlEye state preparation failed")
+                        })?;
+                }
                 if let Some(seed) = &profile_seed {
                     self.store
                         .prepare_native_profile(id, seed, control)
@@ -413,6 +477,7 @@ impl Runs {
                 run.monitoring = monitoring
                     .and_then(|observer| observer.start(session.process_id(), shared).ok());
                 run.session = Some(session);
+                run.rcon = rcon_plan;
             }
             Err(_) => {
                 run.status.phase = InstanceRuntimePhase::CleanupUncertain;
@@ -542,16 +607,55 @@ impl Runs {
             self.publish();
             return Ok(outcome);
         }
+        control.checkpoint()?;
+        let use_rcon = if self.store.capabilities().arma_administration
+            && let Some(rcon_plan) = run.rcon.as_ref()
+        {
+            if run.rcon_stop == RconShutdownDelivery::Unattempted {
+                run.rcon_stop = RconShutdownDelivery::SentOrUnknown;
+                let result = crate::core::server::rcon::owned::command_once(
+                    &self.store,
+                    id,
+                    &self.scope,
+                    run.status.run_generation,
+                    rcon_plan,
+                    "shutdown",
+                    "#shutdown",
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_secs(5)),
+                    control,
+                );
+                match result {
+                    Ok(record)
+                        if record.state == crate::core::server::rcon::RconCommandState::NotSent =>
+                    {
+                        run.rcon_stop = RconShutdownDelivery::NotSent
+                    }
+                    Err(error) if error != ServerStoreError::RconOutcomeUnknown => {
+                        run.rcon_stop = RconShutdownDelivery::NotSent
+                    }
+                    _ => {}
+                }
+            }
+            run.rcon_stop != RconShutdownDelivery::NotSent
+        } else {
+            false
+        };
+        control.checkpoint()?;
         let helper = Self::helper(
             self.store.capabilities().definition_kind
                 == Some(super::super::ServerDefinitionKind::Reforger),
         )
         .map_err(|_| ServerStoreError::Io)?;
-        let mut delivery = run
-            .session
-            .as_mut()
-            .expect("retained run exists")
-            .deliver_soft_stop(Some(&helper));
+        let mut delivery = if use_rcon {
+            Ok(())
+        } else {
+            run.session
+                .as_mut()
+                .expect("retained run exists")
+                .deliver_soft_stop(Some(&helper))
+        };
         run.status.phase = InstanceRuntimePhase::StopRequested;
         run.status.stop_timed_out = false;
         run.observed = Instant::now();
@@ -566,7 +670,7 @@ impl Runs {
             if control.snapshot().cancel_requested || Instant::now() >= deadline {
                 break;
             }
-            if Instant::now() >= next_delivery {
+            if !use_rcon && Instant::now() >= next_delivery {
                 delivery = run
                     .session
                     .as_mut()

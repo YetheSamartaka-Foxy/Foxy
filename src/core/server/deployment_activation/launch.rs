@@ -81,7 +81,18 @@ pub struct NativeRuntimeLaunchPlan {
     pub configuration_seeds: Vec<crate::core::server::config_import::NativeConfigurationSeed>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub headless: Vec<crate::core::server::HeadlessLaunchPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcon: Option<NativeRconPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub battleye: Option<crate::core::server::config_import::NativeBattlEyeSeed>,
     pub spawned: bool,
+}
+
+/// Where the owner connects for RCon; the password stays in the protected store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NativeRconPlan {
+    pub endpoint: std::net::SocketAddr,
+    pub password_reference: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +106,17 @@ struct LaunchIntent {
     basic_config: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     profile_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rcon: Option<LaunchRcon>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchRcon {
+    port: u16,
+    address: std::net::Ipv4Addr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +126,10 @@ struct RuntimeStateMarker {
     instance_id: ServerInstanceId,
     game_space_id: String,
     context_fingerprint: String,
+}
+
+pub(in crate::core::server) fn missing_rcon_password() -> ServerStoreError {
+    ServerStoreError::Invalid("The protected RCon password of this runtime is unavailable. Set the RCon password again, then commit, prepare and activate.".into())
 }
 
 pub(in crate::core::server) fn argument_path(path: &Path) -> Result<String, ServerStoreError> {
@@ -176,6 +202,15 @@ fn parse_launch_intent(bytes: &[u8]) -> Result<LaunchIntent, ServerStoreError> {
     }
     .validate()
     .map_err(|_| ServerStoreError::Corrupt)?;
+    if let Some(rcon) = &intent.rcon
+        && (rcon.port == 0
+            || (intent.game_port..=intent.game_port.saturating_add(4)).contains(&rcon.port)
+            || rcon.password_ref.as_deref().is_some_and(|reference| {
+                !crate::core::server::rcon::valid_secret_reference(reference)
+            }))
+    {
+        return Err(ServerStoreError::Corrupt);
+    }
     Ok(intent)
 }
 
@@ -549,16 +584,58 @@ impl ServerStore {
         if intent.auto_init {
             arguments.push("-autoInit".into());
         }
-        if server_config_source
+        let battleye_enabled = server_config_source
             .as_deref()
-            .is_some_and(battleye_requested)
-            && !manifest
-                .payload
-                .entries
-                .iter()
-                .any(|entry| entry.path.eq_ignore_ascii_case("battleye"))
-        {
+            .is_some_and(battleye_requested);
+        let battleye_entry = manifest
+            .payload
+            .entries
+            .iter()
+            .find(|entry| entry.path.eq_ignore_ascii_case("battleye"));
+        if battleye_enabled && battleye_entry.is_none() {
             return Err(ServerStoreError::Invalid("BattlEye is enabled in the committed server configuration, but this managed Arma runtime has no BattlEye files, so the server would not start its mission. Turn BattlEye off in the draft, then commit, prepare and activate again.".into()));
+        }
+        if intent.rcon.is_some() && !battleye_enabled {
+            return Err(ServerStoreError::Invalid("Arma RCon is provided by BattlEye, but BattlEye is off in the committed server configuration. Turn BattlEye on or remove the RCon settings, then commit, prepare and activate again.".into()));
+        }
+        let mut rcon_plan = None;
+        let mut battleye = None;
+        if let (true, Some(entry)) = (battleye_enabled, battleye_entry) {
+            let platform = manifest.installation.platform;
+            let (configuration, library) =
+                crate::core::server::config_import::battleye_names(platform);
+            let rcon = match &intent.rcon {
+                Some(settings) => {
+                    let reference = settings.password_ref.clone().ok_or_else(|| {
+                        ServerStoreError::Invalid("RCon is configured without a password. Set the RCon password, then commit, prepare and activate again.".into())
+                    })?;
+                    self.resolve_config_secret(id, &reference)
+                        .map_err(|_| missing_rcon_password())?;
+                    rcon_plan = Some(NativeRconPlan {
+                        endpoint: crate::core::server::rcon::connect_endpoint(
+                            settings.address,
+                            settings.port,
+                        ),
+                        password_reference: reference.clone(),
+                    });
+                    Some(crate::core::server::config_import::BattlEyeRcon {
+                        address: settings.address,
+                        port: settings.port,
+                        password_reference: reference,
+                    })
+                }
+                None => None,
+            };
+            let destination = state_root.join("home/battleye");
+            super::runtime::check_native_path(&destination, platform)?;
+            arguments.push(format!("-bepath={}", argument_path(&destination)?));
+            battleye = Some(crate::core::server::config_import::NativeBattlEyeSeed {
+                source: runtime.join("engine").join(&entry.path),
+                destination,
+                configuration: configuration.into(),
+                library: library.into(),
+                rcon,
+            });
         }
         let environment = runtime_environment(&state_root, manifest.installation.platform)?;
         let headless = if manifest.headless_clients.is_empty() {
@@ -595,6 +672,12 @@ impl ServerStore {
             plans
         };
         let mut udp_ports = arma_ports(intent.game_port)?;
+        if let Some(rcon) = &intent.rcon
+            && !udp_ports.contains(&rcon.port)
+        {
+            udp_ports.push(rcon.port);
+            udp_ports.sort_unstable();
+        }
         if let Some(query_port) = monitoring_config.query_port
             && !udp_ports.contains(&query_port)
         {
@@ -626,6 +709,8 @@ impl ServerStore {
             profile_seed,
             configuration_seeds,
             headless,
+            rcon: rcon_plan,
+            battleye,
             spawned: false,
         })
     }
@@ -668,6 +753,28 @@ mod tests {
     }
 
     #[test]
+    fn launch_intent_rcon_is_bounded_outside_the_game_ports() {
+        let reference = format!("secret_{}", "e".repeat(32));
+        let intent = parse_launch_intent(
+            format!(r#"{{"game_port":2302,"auto_init":false,"rcon":{{"port":2310,"address":"127.0.0.1","password_ref":"{reference}"}}}}"#).as_bytes(),
+        )
+        .unwrap();
+        let rcon = intent.rcon.unwrap();
+        assert_eq!(
+            (rcon.port, rcon.password_ref.as_deref()),
+            (2310, Some(reference.as_str()))
+        );
+        for bad in [
+            r#"{"game_port":2302,"auto_init":false,"rcon":{"port":2306,"address":"127.0.0.1"}}"#,
+            r#"{"game_port":2302,"auto_init":false,"rcon":{"port":0,"address":"127.0.0.1"}}"#,
+            r#"{"game_port":2302,"auto_init":false,"rcon":{"port":2310,"address":"127.0.0.1","password_ref":"plain"}}"#,
+            r#"{"game_port":2302,"auto_init":false,"rcon":{"port":2310,"address":"127.0.0.1","password":"x"}}"#,
+        ] {
+            assert!(parse_launch_intent(bad.as_bytes()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn launch_intent_is_strict_and_port_is_bounded() {
         assert_eq!(
             parse_launch_intent(br#"{"game_port":2302,"auto_init":true}"#).unwrap(),
@@ -677,6 +784,7 @@ mod tests {
                 server_config: None,
                 basic_config: None,
                 profile_name: None,
+                rcon: None,
             }
         );
         assert!(

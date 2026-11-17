@@ -194,6 +194,7 @@ impl ServerStore {
         )
         .map_err(ServerStoreError::Invalid)?;
         instance.definition = pack.definition;
+        super::super::rcon::clear_password_reference(&mut instance.definition);
         instance.configuration_import = pack.configuration_import;
         if let Some(imported) = &mut instance.configuration_import {
             imported.paths_reviewed = imported.unresolved_paths.is_empty();

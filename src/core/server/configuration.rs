@@ -135,6 +135,18 @@ pub(super) fn render(instance: &ServerInstance) -> Result<ConfigurationPreview, 
             if let Some(profile) = &names.profile_name {
                 intent.insert("profile_name".into(), profile.as_str().into());
             }
+            if let Some(rcon) = &settings.rcon {
+                let mut value = serde_json::Map::new();
+                value.insert("port".into(), rcon.port.into());
+                value.insert("address".into(), rcon.address.to_string().into());
+                if let Some(reference) = &rcon.password_ref {
+                    value.insert("password_ref".into(), reference.as_str().into());
+                    warnings.push("The RCon password is protected. It is written only into private BattlEye state when the server starts.".into());
+                } else {
+                    warnings.push("RCon is configured without a password. Set the RCon password before this configuration can start.".into());
+                }
+                intent.insert("rcon".into(), serde_json::Value::Object(value));
+            }
             files.push(file(
                 "launch-intent.json",
                 serde_json::to_string_pretty(&serde_json::Value::Object(intent))
@@ -176,7 +188,14 @@ pub(super) fn render(instance: &ServerInstance) -> Result<ConfigurationPreview, 
             }
         }
         ServerDefinition::Reforger(settings) => {
-            let value = super::reforger_schema::render_server_json(settings);
+            let mut value = super::reforger_schema::render_server_json(settings);
+            if let Some(reference) = settings
+                .rcon
+                .as_ref()
+                .and_then(|rcon| rcon.password_ref.as_deref())
+            {
+                value["rcon"]["password"] = format!("foxy-secret:{reference}").into();
+            }
             warnings.extend(super::reforger_schema::preview_warnings(settings));
             files.push(file(
                 "server.json",

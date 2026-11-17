@@ -126,6 +126,18 @@ impl RuntimeService {
         }
     }
 
+    pub(super) fn rcon_targets(
+        &self,
+    ) -> std::collections::BTreeMap<
+        String,
+        (
+            u64,
+            crate::core::server::deployment_activation::NativeRconPlan,
+        ),
+    > {
+        self.owner.rcon_targets()
+    }
+
     pub(super) fn instance_status(
         &self,
         id: &ServerInstanceId,
@@ -191,6 +203,7 @@ impl RuntimeService {
             Operation::StartInstance { instance_id, .. }
             | Operation::StopInstance { instance_id, .. }
             | Operation::RestartInstance { instance_id, .. }
+            | Operation::RotateArmaMission { instance_id, .. }
             | Operation::StartHeadlessClients { instance_id, .. }
             | Operation::StopHeadlessClients { instance_id, .. }
             | Operation::RestartHeadlessClients { instance_id, .. } => instance_id,

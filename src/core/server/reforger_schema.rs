@@ -53,6 +53,7 @@ const PROPERTY_OWNED: &[&str] = &[
     "battlEye",
 ];
 const MOD_OWNED: &[&str] = &["modId", "version", "required"];
+const RCON_TYPED: &[&str] = &["address", "port", "permission", "maxClients"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,8 +144,20 @@ pub fn import_server_json(bytes: &[u8]) -> Result<ReforgerImportReview, String> 
         (bind, _) => bind,
     };
     preserved.a2s = query.preserved;
+    let mut rcon_settings = None;
     if let Some(rcon) = root.get("rcon") {
-        preserved.rcon = import_object_map(rcon, "rcon", &mut redacted, &mut unknown_paths)?;
+        let mut map = import_object_map(rcon, "rcon", &mut redacted, &mut unknown_paths)?;
+        match typed_rcon(&map, bind_port, a2s_port) {
+            Some(settings) => {
+                for key in RCON_TYPED {
+                    map.remove(*key);
+                }
+                rcon_settings = Some(settings);
+                warnings.push("RCon settings were imported without a password. Store one with Set RCon password before starting.".to_string());
+            }
+            None => warnings.push("The rcon block was kept as imported values because its address, port, permission or client limit is not in a supported form.".to_string()),
+        }
+        preserved.rcon = map;
     }
     if let Some(operating) = root.get("operating") {
         preserved.operating = Some(import_object_value(
@@ -229,6 +242,7 @@ pub fn import_server_json(bytes: &[u8]) -> Result<ReforgerImportReview, String> 
         game_properties,
         preserved,
         redacted_secret_paths: redacted.clone(),
+        rcon: rcon_settings,
     };
     ServerDefinition::Reforger(Box::new(definition.clone())).validate()?;
     unknown_paths.sort();
@@ -286,8 +300,16 @@ pub fn render_server_json(settings: &ReforgerServerDefinition) -> Value {
     if let Some(game) = value.get_mut("game").and_then(Value::as_object_mut) {
         insert_preserved(game, &settings.preserved.game);
     }
-    if !settings.preserved.rcon.is_empty() {
+    if settings.rcon.is_some() || !settings.preserved.rcon.is_empty() {
         let mut rcon = Map::new();
+        if let Some(typed) = &settings.rcon {
+            rcon.insert("address".into(), typed.address.to_string().into());
+            rcon.insert("port".into(), typed.port.into());
+            rcon.insert("permission".into(), typed.permission.native().into());
+            if let Some(clients) = typed.max_clients {
+                rcon.insert("maxClients".into(), clients.into());
+            }
+        }
         insert_preserved(&mut rcon, &settings.preserved.rcon);
         value["rcon"] = Value::Object(rcon);
     }
@@ -314,6 +336,11 @@ pub fn preview_warnings(settings: &ReforgerServerDefinition) -> Vec<String> {
         warnings.push(
             "Secret values were removed during import and are not in this preview.".to_string(),
         );
+    }
+    match settings.rcon.as_ref().map(|rcon| rcon.password_ref.is_some()) {
+        Some(true) => warnings.push("The RCon password is protected. It is written only into private runtime state when the server starts.".to_string()),
+        Some(false) => warnings.push("RCon is configured without a password. Set the RCon password before this configuration can start.".to_string()),
+        None => {}
     }
     if !settings.addons.is_empty() {
         warnings.push(
@@ -850,6 +877,33 @@ fn import_properties(
     Ok((properties, preserved))
 }
 
+fn typed_rcon(
+    map: &BTreeMap<String, Value>,
+    bind_port: u16,
+    a2s_port: Option<u16>,
+) -> Option<crate::core::server::ReforgerRconSettings> {
+    let address = map.get("address")?.as_str()?.parse::<Ipv4Addr>().ok()?;
+    let port = u16::try_from(map.get("port")?.as_u64()?).ok()?;
+    let permission = match map.get("permission")?.as_str()? {
+        "admin" => crate::core::server::ReforgerRconPermission::Admin,
+        "monitor" => crate::core::server::ReforgerRconPermission::Monitor,
+        _ => return None,
+    };
+    let max_clients = match map.get("maxClients") {
+        None => None,
+        Some(value) => Some(u8::try_from(value.as_u64()?).ok()?),
+    };
+    let settings = crate::core::server::ReforgerRconSettings {
+        address,
+        port,
+        permission,
+        max_clients,
+        password_ref: None,
+    };
+    settings.validate(bind_port, a2s_port).ok()?;
+    Some(settings)
+}
+
 fn import_object_map(
     value: &Value,
     path: &str,
@@ -1211,6 +1265,59 @@ fn scenario_resource(message: &str) -> Option<(String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_rcon(rcon: &str) -> Vec<u8> {
+        format!(
+            r#"{{"bindPort":2001,"bindAddress":"127.0.0.1","a2s":{{"address":"127.0.0.1","port":17777}},"rcon":{rcon},"game":{{"name":"A","maxPlayers":8,"visible":false,"scenarioId":"{{2BBBE828037C6F4B}}Missions/22_GM_Arland.conf","mods":[]}}}}"#
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn typed_rcon_settings_are_lifted_and_the_password_is_never_kept() {
+        let review = import_server_json(&with_rcon(
+            r##"{"address":"127.0.0.1","port":19999,"password":"do-not-keep","permission":"admin","maxClients":4,"blacklist":["#kick"],"futureKey":1}"##,
+        ))
+        .unwrap();
+        let rcon = review.definition.rcon.clone().unwrap();
+        assert_eq!(rcon.port, 19999);
+        assert_eq!(
+            rcon.permission,
+            crate::core::server::ReforgerRconPermission::Admin
+        );
+        assert_eq!((rcon.max_clients, rcon.password_ref), (Some(4), None));
+        assert_eq!(
+            review.definition.preserved.rcon.keys().collect::<Vec<_>>(),
+            ["blacklist", "futureKey"]
+        );
+        assert!(
+            review
+                .redacted_secret_paths
+                .iter()
+                .any(|path| path == "rcon.password")
+        );
+        assert!(
+            review
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("without a password"))
+        );
+        let rendered = render_server_json(&review.definition);
+        assert_eq!(rendered["rcon"]["port"], 19999);
+        assert_eq!(rendered["rcon"]["permission"], "admin");
+        assert_eq!(rendered["rcon"]["blacklist"], json!(["#kick"]));
+        assert!(rendered["rcon"].get("password").is_none());
+        for untyped in [
+            r#"{"address":"rcon.example.invalid","port":19999,"permission":"admin"}"#,
+            r#"{"address":"127.0.0.1","port":2001,"permission":"admin"}"#,
+            r#"{"address":"127.0.0.1","port":19999,"permission":"owner"}"#,
+            r#"{"address":"127.0.0.1","port":19999,"permission":"admin","maxClients":40}"#,
+        ] {
+            let review = import_server_json(&with_rcon(untyped)).unwrap();
+            assert!(review.definition.rcon.is_none(), "{untyped}");
+            assert!(review.definition.preserved.rcon.contains_key("port"));
+        }
+    }
 
     #[test]
     fn import_preserves_unknown_fields_explicit_values_and_strips_secrets() {

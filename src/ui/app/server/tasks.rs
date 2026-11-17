@@ -265,6 +265,31 @@ pub(crate) enum ServerTaskAction {
         id: ServerInstanceId,
         occurrence_id: String,
     },
+    LoadRcon(ServerInstanceId),
+    ConfigureRcon {
+        id: ServerInstanceId,
+        expected_revision: u64,
+        input: Option<crate::core::server::rcon::RconSettingsInput>,
+    },
+    SetRconPassword {
+        id: ServerInstanceId,
+        expected_revision: u64,
+        password: crate::core::server::rcon::RconPassword,
+    },
+    TestRcon {
+        id: ServerInstanceId,
+        run_generation: u64,
+    },
+    SendRconCommand {
+        id: ServerInstanceId,
+        run_generation: u64,
+        text: String,
+    },
+    SendArmaAdminCommand {
+        id: ServerInstanceId,
+        run_generation: u64,
+        command: crate::core::server::rcon::arma3::ArmaAdminCommand,
+    },
 }
 
 pub(crate) enum ServerTaskOutput {
@@ -349,6 +374,11 @@ pub(crate) enum ServerTaskOutput {
         Box<super::maintenance::MaintenanceSnapshot>,
         Option<super::maintenance::MaintenanceNotice>,
     ),
+    Rcon(
+        Box<super::rcon::RconSnapshot>,
+        Option<super::rcon::RconNotice>,
+        Option<Box<crate::core::server::rcon::RconCommandRecord>>,
+    ),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,6 +407,7 @@ pub(crate) struct ServerTask {
     pub kind: Option<ServerTaskKind>,
     /// A background maintenance load, whose failure is shown in its section.
     pub maintenance_poll: bool,
+    pub rcon_poll: bool,
 }
 
 pub(crate) fn execute(
@@ -411,6 +442,10 @@ pub(crate) fn execute(
             | ServerTaskAction::LoadMaintenance(_)
             | ServerTaskAction::RunMaintenanceJob { .. }
             | ServerTaskAction::CancelMaintenanceOccurrence { .. }
+            | ServerTaskAction::LoadRcon(_)
+            | ServerTaskAction::TestRcon { .. }
+            | ServerTaskAction::SendRconCommand { .. }
+            | ServerTaskAction::SendArmaAdminCommand { .. }
     );
     let _permit = if deployment_effect {
         None
@@ -1050,6 +1085,102 @@ pub(crate) fn execute(
                 occurrence_id,
             },
         )?,
+        ServerTaskAction::LoadRcon(id) => rcon_output(&store, &id, None, None)?,
+        ServerTaskAction::ConfigureRcon {
+            id,
+            expected_revision,
+            input,
+        } => {
+            let notice = if input.is_some() {
+                super::rcon::RconNotice::SettingsSaved
+            } else {
+                super::rcon::RconNotice::Disabled
+            };
+            store
+                .configure_rcon(&id, expected_revision, input)
+                .map_err(stale_rcon)?;
+            rcon_output(&store, &id, Some(notice), None)?
+        }
+        ServerTaskAction::SetRconPassword {
+            id,
+            expected_revision,
+            password,
+        } => {
+            store
+                .set_rcon_password(&id, expected_revision, &password)
+                .map_err(stale_rcon)?;
+            drop(password);
+            rcon_output(
+                &store,
+                &id,
+                Some(super::rcon::RconNotice::PasswordStored),
+                None,
+            )?
+        }
+        ServerTaskAction::TestRcon { id, run_generation } => {
+            let owner = rcon_owner(&store)?;
+            let reply = owner
+                .rcon_test(&id, run_generation)
+                .map_err(|error| ServerStoreError::Invalid(error.to_string()))?;
+            if !reply.replied {
+                return Err(ServerStoreError::Invalid(
+                    reply.error.unwrap_or_else(|| "RCon did not answer.".into()),
+                ));
+            }
+            rcon_output(
+                &store,
+                &id,
+                Some(super::rcon::RconNotice::TestReplied {
+                    round_trip_ms: reply.round_trip_ms.unwrap_or_default(),
+                }),
+                None,
+            )?
+        }
+        ServerTaskAction::SendRconCommand {
+            id,
+            run_generation,
+            text,
+        } => {
+            let owner = rcon_owner(&store)?;
+            let reply = owner
+                .rcon_command(&id, run_generation, &text, 10_000)
+                .map_err(|error| ServerStoreError::Invalid(error.to_string()))?;
+            let record = reply
+                .command_id
+                .as_deref()
+                .and_then(|command_id| store.rcon_command(&id, command_id).ok().flatten());
+            if record.is_none()
+                && let Some(error) = reply.error
+            {
+                return Err(ServerStoreError::Invalid(error));
+            }
+            rcon_output(&store, &id, None, record)?
+        }
+        ServerTaskAction::SendArmaAdminCommand {
+            id,
+            run_generation,
+            command,
+        } => {
+            let owner = rcon_owner(&store)?;
+            if scope.owner.as_ref().is_none_or(|(id, generation)| {
+                id != &owner.scope().owner_id || *generation != owner.scope().generation
+            }) {
+                return Err(ServerStoreError::Ownership);
+            }
+            let reply = owner
+                .arma_admin_command(&id, run_generation, &command, 10_000)
+                .map_err(|error| ServerStoreError::Invalid(error.to_string()))?;
+            let record = reply
+                .command_id
+                .as_deref()
+                .and_then(|command_id| store.rcon_command(&id, command_id).ok().flatten());
+            if record.is_none()
+                && let Some(error) = reply.error
+            {
+                return Err(ServerStoreError::Invalid(error));
+            }
+            rcon_output(&store, &id, None, record)?
+        }
         ServerTaskAction::LoadScenarioDiscovery(id) => {
             ServerTaskOutput::ScenarioDiscovery(store.read_scenario_discovery(&id)?.map(Box::new))
         }
@@ -1113,6 +1244,80 @@ fn maintenance_output(
                 .collect(),
         }),
         notice,
+    ))
+}
+
+fn stale_rcon(error: ServerStoreError) -> ServerStoreError {
+    match error {
+        ServerStoreError::StaleRevision => ServerStoreError::Invalid(
+            "The draft changed elsewhere since this was opened. Review the RCon settings again."
+                .into(),
+        ),
+        error => error,
+    }
+}
+
+fn rcon_owner(
+    store: &ServerStore,
+) -> Result<crate::core::server::owner::Attachment, ServerStoreError> {
+    crate::core::server::owner::attach(store.context())
+        .map_err(|_| ServerStoreError::Ownership)?
+        .ok_or(ServerStoreError::Ownership)
+}
+
+fn rcon_output(
+    store: &ServerStore,
+    id: &ServerInstanceId,
+    notice: Option<super::rcon::RconNotice>,
+    record: Option<crate::core::server::rcon::RconCommandRecord>,
+) -> Result<ServerTaskOutput, ServerStoreError> {
+    let instance = store.show(id)?;
+    let password_available = store.rcon_password_available(id)?;
+    let history = store.rcon_history(id)?;
+    let (run_generation, session, session_note) =
+        match crate::core::server::owner::attach(store.context()) {
+            Ok(Some(owner)) => {
+                let run = owner
+                    .instance_status(id)
+                    .ok()
+                    .filter(|status| status.process_exists && status.run_generation != 0)
+                    .map(|status| status.run_generation);
+                match owner.rcon_inspect(id) {
+                    Ok(reply) => (run, reply.status, reply.error),
+                    Err(error) => (run, None, Some(error.to_string())),
+                }
+            }
+            Ok(None) => (
+                None,
+                None,
+                Some("No server owner is running for this game space.".into()),
+            ),
+            Err(_) => (
+                None,
+                None,
+                Some("The server owner could not be reached.".into()),
+            ),
+        };
+    Ok(ServerTaskOutput::Rcon(
+        Box::new(super::rcon::RconSnapshot {
+            instance_id: id.clone(),
+            draft_revision: instance.revision,
+            reforger: instance.definition.kind()
+                == crate::core::server::ServerDefinitionKind::Reforger,
+            draft: crate::core::server::rcon::draft_settings(&instance),
+            password_available,
+            run_generation,
+            session,
+            session_note,
+            recent: history
+                .records
+                .into_iter()
+                .take(super::rcon::RECENT_COMMANDS)
+                .collect(),
+            unreadable: history.unreadable,
+        }),
+        notice,
+        record.map(Box::new),
     ))
 }
 

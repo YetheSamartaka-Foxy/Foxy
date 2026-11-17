@@ -2,6 +2,42 @@ use super::ledger::{OccurrenceListing, RETAINED_TERMINAL_OCCURRENCES, occurrence
 use super::model::MaintenanceCatalog;
 use super::status::job_statuses;
 use super::*;
+
+#[test]
+fn arma_job_options_validate_real_actions_and_keep_old_policy_documents_readable() {
+    let example: MaintenanceCatalog = serde_json::from_str(include_str!(
+        "../../../../examples/json/server_backend/server_arma_maintenance_jobs.json"
+    ))
+    .unwrap();
+    example.validate(&example.instance_id).unwrap();
+    let command: crate::core::server::rcon::arma3::ArmaAdminCommand =
+        serde_json::from_str(include_str!(
+            "../../../../examples/json/server_backend/server_arma_administration_command.json"
+        ))
+        .unwrap();
+    assert_eq!(command.wire_text().unwrap(), "kick 0 Operator review");
+    let legacy: MaintenancePolicy = serde_json::from_value(serde_json::json!({"grace_minutes":10,"max_defer_minutes":30,"max_attempts":2,"retry_delay_seconds":60,"stop_timeout_seconds":60})).unwrap();
+    assert!(legacy.arma.is_none());
+    let mut definition = definition("ArmaRotation");
+    definition.action = MaintenanceAction::RotateMission;
+    assert!(definition.validate().is_err());
+    definition.policy.arma = Some(ArmaMaintenancePolicy {
+        mission_template: Some("mission_alpha.vr".into()),
+        ..Default::default()
+    });
+    assert!(definition.validate().is_ok());
+    definition.action = MaintenanceAction::Restart;
+    assert!(definition.validate().is_err());
+    let mut policy = ArmaMaintenancePolicy {
+        announcement_delay_seconds: 5,
+        ..Default::default()
+    };
+    assert!(policy.validate().is_err());
+    policy.announcement = Some("Restart in five seconds".into());
+    assert!(policy.validate().is_ok());
+    policy.announcement = Some("message\n#shutdown".into());
+    assert!(policy.validate().is_err());
+}
 use crate::core::schedule::{JobSchedule, ScheduleClock};
 use crate::core::server::ServerInstanceId;
 
@@ -118,7 +154,7 @@ fn definitions_reject_empty_schedules_names_and_out_of_range_policy() {
 }
 
 #[test]
-fn only_restart_has_an_adapter_and_only_with_a_native_lifecycle() {
+fn maintenance_adapters_require_their_native_capabilities() {
     let mut capabilities = crate::core::server::ServerCapabilities::default();
     assert!(
         MaintenanceAction::Restart
@@ -126,6 +162,17 @@ fn only_restart_has_an_adapter_and_only_with_a_native_lifecycle() {
             .is_some()
     );
     capabilities.lifecycle = true;
+    assert!(
+        MaintenanceAction::RotateMission
+            .unavailable_reason(&capabilities)
+            .is_some()
+    );
+    capabilities.arma_administration = true;
+    assert!(
+        MaintenanceAction::RotateMission
+            .unavailable_reason(&capabilities)
+            .is_none()
+    );
     assert!(
         MaintenanceAction::Restart
             .unavailable_reason(&capabilities)

@@ -16,6 +16,18 @@ use crate::core::server::{
 };
 
 pub(super) type Snapshots = Arc<Mutex<BTreeMap<String, (InstanceRuntimeStatus, Instant)>>>;
+/// Live runs whose committed runtime configures RCon, keyed by instance id.
+pub(super) type RconTargets = Arc<
+    Mutex<
+        BTreeMap<
+            String,
+            (
+                u64,
+                crate::core::server::deployment_activation::NativeRconPlan,
+            ),
+        >,
+    >,
+>;
 
 struct Command {
     operation: Operation,
@@ -26,6 +38,7 @@ struct Command {
 pub(crate) struct RuntimeOwner {
     scope: Scope,
     snapshots: Snapshots,
+    rcon_targets: RconTargets,
     commands: Option<mpsc::SyncSender<Command>>,
     results: mpsc::Receiver<Result<RuntimeOperationOutcome, String>>,
     stopped: Arc<AtomicBool>,
@@ -52,6 +65,8 @@ impl RuntimeOwner {
     }
     pub(crate) fn new(context: ServerContext, scope: Scope) -> io::Result<Self> {
         let snapshots = Arc::new(Mutex::new(BTreeMap::new()));
+        let rcon_targets: RconTargets = Arc::new(Mutex::new(BTreeMap::new()));
+        let shared_targets = rcon_targets.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let (commands, requests) = mpsc::sync_channel::<Command>(1);
         let (replies, results) = mpsc::sync_channel(1);
@@ -63,7 +78,7 @@ impl RuntimeOwner {
             .spawn(move || {
                 let store = ServerStore::new(context)
                     .map_err(|_| io::Error::other("Runtime owner store is unavailable"))?;
-                let mut runs = Runs::new(store, captured, shared);
+                let mut runs = Runs::new(store, captured, shared, shared_targets);
                 loop {
                     runs.observe_all();
                     runs.tick_headless();
@@ -89,11 +104,27 @@ impl RuntimeOwner {
         Ok(Self {
             scope,
             snapshots,
+            rcon_targets,
             commands: Some(commands),
             results,
             stopped,
             handle: Some(handle),
         })
+    }
+
+    pub(crate) fn rcon_targets(
+        &self,
+    ) -> BTreeMap<
+        String,
+        (
+            u64,
+            crate::core::server::deployment_activation::NativeRconPlan,
+        ),
+    > {
+        self.rcon_targets
+            .lock()
+            .map(|targets| targets.clone())
+            .unwrap_or_default()
     }
 
     pub(crate) fn status(&self, id: &ServerInstanceId) -> io::Result<InstanceRuntimeStatus> {

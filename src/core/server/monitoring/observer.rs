@@ -23,6 +23,13 @@ pub(in crate::core::server) struct RunObserver {
 }
 
 impl PreparedObserver {
+    pub(in crate::core::server) fn redact_values(
+        &mut self,
+        values: Vec<zeroize::Zeroizing<String>>,
+    ) {
+        self.logs.redact_values(values);
+    }
+
     pub(in crate::core::server) fn new(
         store: &super::super::ServerStore,
         status: &InstanceRuntimeStatus,

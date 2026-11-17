@@ -1,0 +1,6 @@
+{
+  "kind": "kick",
+  "player_id": 0,
+  "expected_guid": "0123456789abcdef0123456789abcdef",
+  "reason": "Operator review"
+}

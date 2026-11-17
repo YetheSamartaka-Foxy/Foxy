@@ -21,6 +21,16 @@ pub(super) struct NativeConfiguration {
     bind_port: u16,
     a2s: Option<QueryConfiguration>,
     game: GameConfiguration,
+    #[serde(default)]
+    rcon: Option<RconConfiguration>,
+}
+
+#[derive(Deserialize)]
+struct RconConfiguration {
+    address: Ipv4Addr,
+    port: u16,
+    #[serde(default)]
+    password: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,6 +86,7 @@ impl NativeConfiguration {
             game_properties: Default::default(),
             preserved: Default::default(),
             redacted_secret_paths: Vec::new(),
+            rcon: None,
         };
         crate::core::server::ServerDefinition::Reforger(Box::new(definition))
             .validate()
@@ -87,6 +98,14 @@ impl NativeConfiguration {
                 .a2s
                 .as_ref()
                 .is_some_and(|query| query.address != configuration.bind_address)
+            || configuration.rcon.as_ref().is_some_and(|rcon| {
+                rcon.port == 0
+                    || rcon.port == configuration.bind_port
+                    || configuration
+                        .a2s
+                        .as_ref()
+                        .is_some_and(|query| query.port == rcon.port)
+            })
         {
             return Err(ServerStoreError::Corrupt);
         }
@@ -97,6 +116,9 @@ impl NativeConfiguration {
         let mut ports = vec![self.bind_port];
         if let Some(query) = &self.a2s {
             ports.push(query.port);
+        }
+        if let Some(rcon) = &self.rcon {
+            ports.push(rcon.port);
         }
         ports
     }
@@ -394,9 +416,50 @@ impl ServerStore {
             std::path::PathBuf::from(path(&engine)?),
             std::path::PathBuf::from(path(&executable)?),
         );
+        let mut configuration_seeds = Vec::new();
+        let mut rcon = None;
+        let mut launch_config = config.clone();
+        if let Some(settings) = &configuration.rcon {
+            let password_reference = settings
+                .password
+                .as_deref()
+                .and_then(|value| value.strip_prefix("foxy-secret:"))
+                .filter(|value| crate::core::server::rcon::valid_secret_reference(value))
+                .ok_or_else(|| {
+                    ServerStoreError::Invalid("RCon is configured without a protected password. Set the RCon password, then commit, prepare and activate again.".into())
+                })?;
+            self.resolve_config_secret(id, password_reference)
+                .map_err(|_| super::launch::missing_rcon_password())?;
+            let entry = manifest
+                .realized_entries
+                .iter()
+                .find(|entry| entry.path == "configuration/server.json")
+                .ok_or(ServerStoreError::Corrupt)?;
+            let destination = state
+                .join("home/private-configuration")
+                .join(reference.directory_name())
+                .join("server.json");
+            super::runtime::check_native_path(&destination, manifest.installation.platform)?;
+            configuration_seeds.push(
+                crate::core::server::config_import::NativeConfigurationSeed {
+                    source: config.clone(),
+                    destination: destination.clone(),
+                    blake3: entry.blake3.clone().ok_or(ServerStoreError::Corrupt)?,
+                    bindings: Vec::new(),
+                },
+            );
+            launch_config = destination;
+            rcon = Some(super::NativeRconPlan {
+                endpoint: crate::core::server::rcon::connect_endpoint(
+                    settings.address,
+                    settings.port,
+                ),
+                password_reference: password_reference.to_owned(),
+            });
+        }
         let mut arguments = vec![
             "-config".into(),
-            path(&config)?,
+            path(&launch_config)?,
             "-gproj".into(),
             path(&project)?,
             "-profile".into(),
@@ -454,8 +517,10 @@ impl ServerStore {
             profiles: state.join("home/profiles/profile"),
             monitoring,
             profile_seed: None,
-            configuration_seeds: Vec::new(),
+            configuration_seeds,
             headless: Vec::new(),
+            rcon,
+            battleye: None,
             spawned: false,
         })
     }

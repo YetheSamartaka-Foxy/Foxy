@@ -1,9 +1,12 @@
+mod battleye;
 mod mapping;
 mod packs;
 pub(super) mod parser;
 mod review;
 mod runtime;
 mod secrets;
+pub use battleye::NativeBattlEyeSeed;
+pub(crate) use battleye::{BattlEyeRcon, battleye_names};
 pub use runtime::NativeConfigurationSeed;
 
 use super::{ServerInstance, ServerInstanceId};

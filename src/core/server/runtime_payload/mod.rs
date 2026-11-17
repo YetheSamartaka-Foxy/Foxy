@@ -17,6 +17,7 @@ const MAX_PATH_BYTES_TOTAL: usize = 32 * 1024 * 1024;
 const DIRECTORIES: &[&str] = &[
     "addons",
     "dta",
+    "battleye",
     "dll",
     "linux64",
     "keys",

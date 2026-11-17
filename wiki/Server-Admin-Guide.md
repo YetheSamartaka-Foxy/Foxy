@@ -541,6 +541,59 @@ The [job catalog example](../examples/json/server_backend/server_scheduled_jobs.
 
 Native acceptance passed on Windows and ordinary-user WSL2/Linux for the tested Arma and Reforger layouts. A one-time scheduled restart ran exactly once and replaced the run, a backup job at the same time was blocked, a repeated manual run returned the same open occurrence, and a queued occurrence was cancelled without restarting the server. Killing the owner during a restart left the occurrence `unknown` with `owner_lost`, and the replacement owner did not repeat it. A scheduled restart after an operator stop was skipped and the server stayed stopped. This is not broad platform release evidence.
 
+### Server RCon
+
+#### Arma administration and maintenance
+
+The **Arma administration** section provides player, ban and deployed-mission lists, announcements, GUID-checked moderation, lock/unlock, mission selection and mission restart. **Review command** captures the instance, owner and run; confirmation focuses **Cancel** and supports Tab/Shift+Tab/Enter with visible focus. A reply confirms transport receipt; the effect can take longer or fail independently. Unrecognized or truncated lists remain incomplete, with their raw reply available.
+
+```text
+foxy server admin players <instance-id> --game-space arma3 --json
+foxy server admin bans <instance-id> --game-space arma3 --json
+foxy server admin missions <instance-id> --game-space arma3 --json
+foxy server admin announce <instance-id> --message "Maintenance in one minute" --expected-run-generation <run> --game-space arma3 --yes --json
+foxy server admin kick <instance-id> --player-id <id> --expected-guid <guid> --reason "Operator review" --expected-run-generation <run> --game-space arma3 --yes --json
+foxy server admin add-ban <instance-id> --guid <guid> --minutes 60 --reason "Operator review" --expected-run-generation <run> --game-space arma3 --yes --json
+foxy server admin remove-ban <instance-id> --ban-id <id> --expected-guid <guid> --expected-run-generation <run> --game-space arma3 --yes --json
+foxy server admin mission <instance-id> --template mission_alpha.vr --expected-run-generation <run> --game-space arma3 --yes --json
+```
+
+`lock`, `unlock` and `restart-mission` use the same generation and confirmation options. Get the generation from `server instance status`. Timeout defaults to 10 seconds (`--timeout-ms` accepts 1000-30000). Mutations require the explicit generation and `--yes`. Dry-run validates without contacting an owner or writing records. Exit 0 means a reply arrived, 5 means an unknown outcome or list format, 4 means not sent or owner unavailable, and 2 means invalid input. Kick and ban removal re-read the native list and check the exact GUID before sending. Mission selection rechecks the deployed list and never copies files or restarts the server process.
+
+Arma maintenance jobs can select `--action rotate-mission --mission-template mission_alpha.vr` or keep `--action restart`. Optional `--announcement "text" --announcement-delay-seconds 30` sends one recorded notice before downtime. Cancel during that delay keeps the current server running; a sent notice remains in history. Require-empty policy is checked again after the delay. Rotation requires a new native mission identity and a subsequent fresh query before success. An unconfirmed effect is never repeated automatically.
+
+Arma Stop and Restart drain managed HCs before a recorded RCon `#shutdown`, then await the retained process tree. A missing acknowledgement never causes another shutdown command; a proven pre-send failure may use native graceful stop. Force remains explicit. Restart keeps operator-stopped HC intent. Key/content changes retain the existing reviewed acquisition, immutable stage, preparation, activation and physical-consumer gates. Jobs never rewrite live or adopted files. `--require-backup` blocks while the consistent-backup adapter is unavailable; unattended update and backup actions remain unavailable, and shutdown makes no save guarantee.
+
+#### Shared RCon configuration and raw commands
+
+Arma 3 and Reforger instances can enable RCon, the UDP administration protocol both engines speak (BattlEye RCon protocol version 2). Arma provides it through BattlEye, so the instance also needs BattlEye on. Reforger provides it natively through the `rcon` block of its `server.json` and does not need BattlEye.
+
+```text
+foxy server rcon configure <instance-id> --expected-revision <n> --port 2310 [--address 127.0.0.1] --game-space arma3 --json
+foxy server rcon configure <instance-id> --expected-revision <n> --port 19999 [--permission monitor|admin] [--max-clients 1-16] --game-space reforger --json
+foxy server rcon set-password <instance-id> --expected-revision <n> --game-space arma3 --json
+foxy server rcon disable <instance-id> --expected-revision <n> --game-space arma3 --yes --json
+foxy server rcon status <instance-id> --game-space arma3 --json
+foxy server rcon test <instance-id> --game-space arma3 --json
+foxy server rcon command <instance-id> --text "players" [--timeout-ms 10000] --game-space arma3 --yes --json
+foxy server rcon history <instance-id> --game-space arma3 --json
+foxy server rcon probe [<instance-id>] [--endpoint 127.0.0.1:2310] [--password-stdin] [--command "players"] [--timeout-ms 5000] --game-space arma3 --json
+```
+
+`configure`, `set-password` and `disable` change the draft, need its current revision and honor `--dry-run`; `disable` needs `--yes`. RCon settings are part of the committed configuration, so commit, prepare and activate the new revision, then restart the server, to apply a change. The address defaults to `127.0.0.1`, which keeps RCon on this computer. For Arma the port must stay outside the game port range (game port to game port + 4), and Start review refuses RCon while BattlEye is off. For Reforger, `--permission` applies to every RCon connection (it is not a per-operator account) and defaults to `monitor`.
+
+`set-password` reads one line from stdin, hidden on a terminal; a password is never accepted as an argument. It needs 3 to 64 visible ASCII characters without spaces. Foxy stores it in the instance's protected credential store (Windows DPAPI, or a private `0700`/`0600` directory on Linux) under a new reference and points the draft at that reference. Committed revisions keep the reference they were made with, so changing the password never alters a runtime that is already activated. A stored password belongs to one instance: a cloned instance or an imported pack keeps the RCon settings but needs its password set again, and Start review refuses a runtime whose protected password is missing. Previews, exports, start plans, logs and owner messages carry only the reference. At start, Foxy writes the password into private runtime state only: for Arma into the instance's own BattlEye folder (`runtime-state/home/battleye`, passed as `-bepath`), which also receives the runtime's BattlEye files and keeps the files BattlEye writes, such as bans; for Reforger into a private copy of `server.json` that `-config` points at. The Arma BattlEye configuration keeps any vendor lines and replaces only `RConPassword`, `RConPort` and `RConIP`. RCon does not encrypt its password on the wire; keep an endpoint that other computers can reach on a private network or a tunnel. On Linux, BattlEye prints its configuration entries, including the RCon password, to the server console. Foxy replaces the run's protected password, and any value that follows a key such as `RConPassword` or `passwordAdmin`, with `[redacted]` in log views, monitoring snapshots, `server instance logs` and exports. The engine's own output file in the private runtime state keeps what the engine wrote.
+
+While a server with RCon runs, the owner for its game space keeps one RCon session for it. It logs in again with a short backoff after a failed login or a lost session, sends a keepalive when the session has been idle for 25 seconds (servers drop a session after 45 silent seconds), and acknowledges every server message. `status` shows the draft settings, whether a protected password is stored, and the live session: `connecting`, `connected`, `rejected` (wrong password), `no_reply`, `unreachable`, `password_unavailable` or `lost`, with the run generation, a session generation that increases on every new login, and the most recent server messages. Server messages stay in memory only. `test` round-trips an empty keepalive.
+
+`command` sends text exactly as the server expects it, for example `players` on Arma or `#players` on Reforger. Commands that carry a password, such as BattlEye's `RConPassword`, are refused so the value never reaches records or history; change the password with `set-password`. It needs `--yes`, an existing owner and a running server with a live session. Foxy records the command under the instance's `rcon/commands/` before sending it and sends it exactly once: if no complete reply arrives before the deadline, the outcome is `unknown`, because the server may have executed it. Check the server before sending it again; Foxy never resends a command on its own. A command is `not_sent` when nothing was transmitted, for example without a live session. A replied command keeps up to 16 KiB of its reply. If the owner ends while a command is open, the next owner records it as `unknown` (or `not_sent` if it was still queued) with `owner_lost`. The 64 most recent finished commands are kept; replies such as player lists can contain player names and addresses, so the directory is private to your account. Exit codes are 0 for a reply, 5 for an unknown outcome, 4 for not sent or a missing owner, and 2 for validation errors.
+
+`probe` opens a separate short session without the owner. With an instance id it uses the active runtime's endpoint and protected password; `--endpoint` connects elsewhere, such as a tunnel or port forward, and `--password-stdin` reads a different password. It logs in, exchanges a keepalive, and with `--command` and `--yes` sends one command once. The `login` field is `accepted`, `rejected`, `no_reply`, `unreachable` or `local_socket`.
+
+Typed administration commands, such as player lists, messages, kicks, bans and scenario reload, are not part of this release yet; use `command` with text your server version documents.
+
+The desktop **RCon** section shows the draft settings and the live session. It offers **Configure RCon** (or **Edit RCon settings**), **Set RCon password** with a masked field, **Remove RCon**, **Test RCon connection**, and a command field with **Send command...**, whose confirmation focuses **Cancel**. It shows the last command's outcome, its reply, and the recent commands. The [command record example](../examples/json/server_backend/server_rcon_command.json) and [instance example](../examples/json/server_backend/arma3_rcon_instance.json) use synthetic ids.
+
 ---
 
 ## Reforger native adoption and foreground lifecycle

@@ -3,12 +3,14 @@ mod deployment;
 mod lifecycle;
 mod maintenance;
 mod permit;
+mod rcon;
 mod runtime;
 mod service;
 mod update_gate;
 mod worker;
 pub(crate) use controller::IdleGuard;
 pub(crate) use deployment::DeploymentExecution;
+pub(crate) use rcon::{RconConnection, RconSessionStatus};
 pub(crate) use update_gate::{UpdateBlocker, UpdateBlockerKind, update_blockers};
 
 pub(crate) use permit::{
@@ -320,7 +322,7 @@ fn unreachable_owner(error: io::Error) -> io::Error {
     }
 }
 
-fn context_key(context: &ServerContext) -> io::Result<String> {
+pub(in crate::core::server) fn context_key(context: &ServerContext) -> io::Result<String> {
     let root = context.data_root().canonicalize()?;
     let mut hash = blake3::Hasher::new();
     hash.update(root.as_os_str().as_encoded_bytes());

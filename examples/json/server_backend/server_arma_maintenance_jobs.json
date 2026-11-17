@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "instance_id": "server_00000000000000000000000000000001",
+  "revision": 1,
+  "jobs": [{
+    "id": "job_0000000000000001",
+    "revision": 1,
+    "revised_unix_ms": 1795000000000,
+    "definition": {
+      "name": "Mission rotation",
+      "enabled": true,
+      "action": "rotate_mission",
+      "schedule": {"Recurring": {"minutes_of_day": 270, "weekdays": 127}},
+      "clock": "local",
+      "policy": {
+        "arma": {
+          "announcement": "Mission rotation shortly",
+          "announcement_delay_seconds": 30,
+          "mission_template": "mission_alpha.vr",
+          "require_backup": false
+        },
+        "grace_minutes": 10,
+        "player_policy": "require_empty",
+        "max_defer_minutes": 30,
+        "max_attempts": 1,
+        "retry_delay_seconds": 60,
+        "stop_timeout_seconds": 60
+      }
+    }
+  }]
+}

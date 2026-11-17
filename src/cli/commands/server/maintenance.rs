@@ -231,12 +231,23 @@ fn definition(
         enabled: !args.disabled,
         action: match args.action {
             ServerMaintenanceActionArg::Restart => MaintenanceAction::Restart,
+            ServerMaintenanceActionArg::RotateMission => MaintenanceAction::RotateMission,
             ServerMaintenanceActionArg::Update => MaintenanceAction::Update,
             ServerMaintenanceActionArg::Backup => MaintenanceAction::Backup,
         },
         schedule,
         clock,
         policy: MaintenancePolicy {
+            arma: (args.announcement.is_some()
+                || args.announcement_delay_seconds > 0
+                || args.mission_template.is_some()
+                || args.require_backup)
+                .then_some(crate::core::server::jobs::ArmaMaintenancePolicy {
+                    announcement: args.announcement,
+                    announcement_delay_seconds: args.announcement_delay_seconds,
+                    mission_template: args.mission_template,
+                    require_backup: args.require_backup,
+                }),
             grace_minutes: args.grace_minutes,
             player_policy: if args.require_empty {
                 PlayerPolicy::RequireEmpty
@@ -427,6 +438,7 @@ fn job_line(status: &JobStatus) -> String {
     let job = &status.job;
     let action = match job.definition.action {
         MaintenanceAction::Restart => "restart",
+        MaintenanceAction::RotateMission => "rotate_mission",
         MaintenanceAction::Update => "update",
         MaintenanceAction::Backup => "backup",
     };

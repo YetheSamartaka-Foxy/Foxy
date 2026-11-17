@@ -1,9 +1,12 @@
+pub(crate) mod arma_admin;
 mod maintenance;
+mod rcon;
 mod state;
 mod steam_auth;
 mod tasks;
 
 pub(crate) use maintenance::{MaintenanceConfirmation, MaintenanceForm, MaintenanceNotice};
+pub(crate) use rcon::{RconConfirmation, RconForm, RconNotice, RconPasswordEntry, RconSnapshot};
 pub(crate) use state::{ServerDialog, ServerViewState};
 pub(crate) use tasks::ServerTaskAction;
 
@@ -93,7 +96,9 @@ impl Foxy {
     pub(crate) fn start_server_task(&mut self, action: ServerTaskAction) {
         let passive_poll = matches!(
             &action,
-            ServerTaskAction::PollInstanceMonitoring(_) | ServerTaskAction::LoadMaintenance(_)
+            ServerTaskAction::PollInstanceMonitoring(_)
+                | ServerTaskAction::LoadMaintenance(_)
+                | ServerTaskAction::LoadRcon(_)
         );
         if self
             .server_view
@@ -149,6 +154,10 @@ impl Foxy {
                     | ServerTaskAction::ChangeMaintenance { .. }
                     | ServerTaskAction::RunMaintenanceJob { .. }
                     | ServerTaskAction::CancelMaintenanceOccurrence { .. }
+                    | ServerTaskAction::LoadRcon(_)
+                    | ServerTaskAction::TestRcon { .. }
+                    | ServerTaskAction::SendRconCommand { .. }
+                    | ServerTaskAction::SendArmaAdminCommand { .. }
             )
         {
             self.server_view.error = Some(ServerStoreError::Invalid(
@@ -190,6 +199,7 @@ impl Foxy {
         }
         if passive_poll {
             let maintenance_poll = matches!(&action, ServerTaskAction::LoadMaintenance(_));
+            let rcon_poll = matches!(&action, ServerTaskAction::LoadRcon(_));
             let worker_scope = scope.clone();
             let selected = self.server_view.selected.clone();
             let repaint = self.repaint_ctx.clone();
@@ -215,6 +225,7 @@ impl Foxy {
                         stage_control: None,
                         kind: None,
                         maintenance_poll,
+                        rcon_poll,
                     });
                 }
                 Err(_) => self.server_view.error = Some(ServerStoreError::Io),
@@ -489,6 +500,11 @@ impl Foxy {
                 | ServerTaskAction::CancelMaintenanceOccurrence { .. } => {
                     "server-maintenance-controls"
                 }
+                ServerTaskAction::ConfigureRcon { .. }
+                | ServerTaskAction::SetRconPassword { .. }
+                | ServerTaskAction::TestRcon { .. }
+                | ServerTaskAction::SendRconCommand { .. } => "server-rcon-controls",
+                ServerTaskAction::SendArmaAdminCommand { .. } => "server-rcon-controls",
                 _ => "server-configuration-controls",
             })
         };
@@ -557,6 +573,7 @@ impl Foxy {
                     stage_control,
                     kind,
                     maintenance_poll: false,
+                    rcon_poll: false,
                 });
                 self.server_view.status = None;
                 self.server_view.error = None;
@@ -606,6 +623,20 @@ impl Foxy {
         if task.restore_focus == Some("server-maintenance-controls") {
             self.server_view.maintenance.action_error =
                 result.as_ref().err().map(ToString::to_string);
+        }
+        if task.rcon_poll
+            && let Err(error) = &result
+        {
+            self.server_view.rcon.load_error = Some(error.to_string());
+        }
+        if task.restore_focus == Some("server-rcon-controls") {
+            self.server_view.rcon.action_error = result.as_ref().err().map(ToString::to_string);
+            if result.is_err() {
+                self.server_view.rcon.confirmation = None;
+                self.server_view.arma_admin.confirmation = None;
+                self.server_view.arma_admin.action_error =
+                    result.as_ref().err().map(ToString::to_string);
+            }
         }
         let passive_status = task.passive.then_some(self.server_view.status).flatten();
         let passive_error = task.passive.then(|| self.server_view.error.clone());
