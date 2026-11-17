@@ -96,7 +96,7 @@ cargo agent-check role reviewer --brief-file <path>
 cargo agent-check role reviewer --argon --brief-file <path>
 ```
 
-`--argon` runs the role on `gemini-4-argon-high` for one hard review. The delegation contract above applies unchanged. Antigravity's built-in subagent tool is not used: a subagent file cannot name a model or a thinking level, only a coarse class that Google maps on its servers. A role started as `agy --agent <role> --model <id>` runs exactly that model and level, so the generated role files set `subagent: false`.
+`--argon` runs the role on `gemini-4-argon-high` for one hard review. `cargo agent-check models` reports whether these pins are still offered; [agent model check](../skills/foxy-agent-model-check/SKILL.md) decides, conservatively, whether one changes. The delegation contract above applies unchanged. Antigravity's built-in subagent tool is not used: a subagent file cannot name a model or a thinking level, only a coarse class that Google maps on its servers. A role started as `agy --agent <role> --model <id>` runs exactly that model and level, so the generated role files set `subagent: false`.
 
 A headless session cannot ask for permission. The launcher passes session-only rules with `toolPermission: request-review`, so an action outside them is refused even when the owner runs Antigravity without prompts:
 

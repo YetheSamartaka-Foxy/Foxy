@@ -466,7 +466,53 @@ pub(crate) fn settings_json(repo_root: &str, role: &Role, extra_allow: &[String]
     )
 }
 
-fn find_agy() -> Option<PathBuf> {
+pub(crate) struct Captured {
+    /// `None` when the process was killed at the timeout.
+    pub success: Option<bool>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Runs a command to completion with captured output, killing it after `timeout`.
+pub(crate) fn run_captured(mut command: Command, timeout: Duration) -> Result<Captured, String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot start {:?}: {error}", command.get_program()))?;
+    let mut stdout = child.stdout.take().ok_or("stdout unavailable")?;
+    let mut stderr = child.stderr.take().ok_or("stderr unavailable")?;
+    let out_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    let started = Instant::now();
+    let success = loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            break Some(status.success());
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    Ok(Captured {
+        success,
+        stdout: out_reader.join().unwrap_or_default(),
+        stderr: err_reader.join().unwrap_or_default(),
+    })
+}
+
+pub(crate) fn find_agy() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("PATH") {
         for directory in std::env::split_paths(&path) {
             for name in ["agy.exe", "agy"] {
@@ -531,49 +577,18 @@ pub fn run_role(repo: &Path, run: &RoleRun<'_>) -> Result<i32, String> {
         return Ok(0);
     }
     eprintln!("[{} on {model}]", role.name);
-    let mut child = Command::new(agy)
-        .args(args)
-        .current_dir(&root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("cannot start agy: {error}"))?;
-    let mut stdout = child.stdout.take().ok_or("agy stdout unavailable")?;
-    let mut stderr = child.stderr.take().ok_or("agy stderr unavailable")?;
-    let out_reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
-    });
-    let err_reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
-    });
-    let started = Instant::now();
-    loop {
-        if child
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            break;
-        }
-        if started.elapsed() > ROLE_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            eprintln!(
-                "{} did not finish within {} s",
-                role.name,
-                ROLE_TIMEOUT.as_secs()
-            );
-            return Ok(1);
-        }
-        std::thread::sleep(Duration::from_millis(500));
+    let mut command = Command::new(agy);
+    command.args(args).current_dir(&root);
+    let captured = run_captured(command, ROLE_TIMEOUT)?;
+    if captured.success.is_none() {
+        eprintln!(
+            "{} did not finish within {} s",
+            role.name,
+            ROLE_TIMEOUT.as_secs()
+        );
+        return Ok(1);
     }
-    let stdout = out_reader.join().unwrap_or_default();
-    let stderr = err_reader.join().unwrap_or_default();
+    let Captured { stdout, stderr, .. } = captured;
     let Some(result) = stdout
         .lines()
         .rev()

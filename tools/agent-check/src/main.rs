@@ -9,7 +9,9 @@ Usage:
       Regenerate .agents/agents/ and the generated .agents/rules/ files from the Claude Code files.
   cargo agent-check role --list
   cargo agent-check role <name> (<brief> | --brief-file <path> | -) [--argon] [--dry-run]
-      Run one role in Google Antigravity on its Gemini model and thinking level, or on Gemini 4 Argon.";
+      Run one role in Google Antigravity on its Gemini model and thinking level, or on Gemini 4 Argon.
+  cargo agent-check models [--repo <path>]
+      Report whether the pinned role models are still offered and whether newer ones appeared. Read-only.";
 
 fn fail(message: &str) -> ! {
     eprintln!("agent-check: {message}");
@@ -52,6 +54,9 @@ fn main() {
             }
         }
         Some("role") => role(&repo, &args[1..]),
+        Some("models") if args.len() == 1 => {
+            std::process::exit(agent_check::models::report(&repo));
+        }
         Some(other) => fail(&format!("unknown argument `{other}` (try --help)")),
     }
 }

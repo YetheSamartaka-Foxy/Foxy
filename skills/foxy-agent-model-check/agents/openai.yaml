@@ -1,0 +1,4 @@
+interface:
+  display_name: "Foxy Agent Model Check"
+  short_description: "Check that pinned agent role models are current"
+  default_prompt: "Use $foxy-agent-model-check to check whether Foxy's agent role model pins are still current."

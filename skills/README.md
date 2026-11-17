@@ -70,11 +70,17 @@ The five foundation skills above provide implementation, maintenance, translatio
 | [foxy-release-readiness](foxy-release-readiness/SKILL.md) | Version provenance, update digests, packaged libraries, installers, and smoke checks |
 | [foxy-contract-docs-sync](foxy-contract-docs-sync/SKILL.md) | CLI/help/JSON/example/UI-copy contracts and user/server documentation parity |
 
+## Agent setup
+
+| Skill | Use for |
+| --- | --- |
+| [foxy-agent-model-check](foxy-agent-model-check/SKILL.md) | Whether the Gemini and Cursor role model pins are still offered, and conservative changes on evidence |
+
 ## Using and maintaining skills
 
 In Codex invoke `$foxy-rust-change` or select a skill from `/skills`; in Claude Code invoke `/foxy-rust-change`. The other names work the same way. Automatic selection remains enabled. Other clients can read `skills/<name>/SKILL.md` directly. If a client does not refresh discovery during the session, restart it.
 
-Use the `explorer`, `worker`, `reviewer`, and `async-safety-reviewer` roles for bounded delegation. Their definitions and shared handoff contract are documented in [agent workflows](../conventions/AGENT_WORKFLOWS.md). Codex and Claude Code inherit the session model. Cursor uses the Grok 4.7 pins in that document.
+Use the `explorer`, `worker`, `reviewer`, and `async-safety-reviewer` roles for bounded delegation. Their definitions and shared handoff contract are documented in [agent workflows](../conventions/AGENT_WORKFLOWS.md). Codex and Claude Code inherit the session model. Cursor uses the Grok 4.7 pins in that document, and Antigravity runs each role on its own Gemini model through `cargo agent-check role`.
 
 After editing this setup, run from the repository root:
 

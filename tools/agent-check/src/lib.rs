@@ -1,6 +1,7 @@
 pub mod antigravity;
 mod imports;
 mod markdown;
+pub mod models;
 mod roles;
 mod skills;
 
