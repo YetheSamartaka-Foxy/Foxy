@@ -64,6 +64,14 @@ impl Foxy {
     ) {
         let escape_pressed = ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
         if escape_pressed {
+            if self.server_view.sessions.confirmation {
+                if !self.server_view.busy() {
+                    self.server_view.sessions.confirmation = false;
+                    self.server_view.sessions.focus_cancel = false;
+                    self.server_view.pending_focus = Some("server-session-controls");
+                }
+                return;
+            }
             if self.server_view.reforger_addon_confirmation {
                 if !self.server_view.busy() {
                     self.server_view.invalidate_reforger_addon_acquisition();

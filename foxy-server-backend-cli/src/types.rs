@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// Controls which hashing algorithm and manifest format repository generation produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum GenerationMode {
+    Foxy,
+    Swifty,
+    Hybrid,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Checksums {
     #[default]

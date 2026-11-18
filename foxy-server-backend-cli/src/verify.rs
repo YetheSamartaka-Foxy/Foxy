@@ -1,25 +1,40 @@
 use anyhow::{Context, Result, bail};
 use indicatif::ProgressBar;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::Path;
 
 use crate::cli::GenerationMode;
 use crate::types::{Chunking, ResolvedMod};
-use crate::{hash, output, srf};
+use crate::{hash, srf};
 
-pub fn verify(output_dir: &Path) -> Result<()> {
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct VerificationReport {
+    pub repositories: usize,
+    pub mods: usize,
+}
+
+pub fn verify_report(output_dir: &Path) -> Result<VerificationReport> {
+    verify_report_controlled(output_dir, &|| false)
+}
+
+pub fn verify_report_controlled(
+    output_dir: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<VerificationReport> {
     let mut repositories = 0;
     let mut mods = 0;
     if output_dir.join("repo.json").is_file() {
-        mods += verify_repo(output_dir)?;
+        check_cancelled(cancelled)?;
+        mods += verify_repo(output_dir, cancelled)?;
         repositories += 1;
     } else {
         for entry in std::fs::read_dir(output_dir)
             .with_context(|| format!("Failed to read {}", output_dir.display()))?
         {
+            check_cancelled(cancelled)?;
             let dir = entry?.path();
             if dir.join("repo.json").is_file() {
-                mods += verify_repo(&dir)?;
+                mods += verify_repo(&dir, cancelled)?;
                 repositories += 1;
             }
         }
@@ -30,12 +45,17 @@ pub fn verify(output_dir: &Path) -> Result<()> {
             output_dir.display()
         );
     }
-    println!("Verified {repositories} repositories and {mods} mods");
-    output::set_details(json!({"repositories": repositories, "mods": mods}));
+    Ok(VerificationReport { repositories, mods })
+}
+
+fn check_cancelled(cancelled: &(dyn Fn() -> bool + Sync)) -> Result<()> {
+    if cancelled() {
+        bail!("Repository verification cancelled");
+    }
     Ok(())
 }
 
-fn verify_repo(dir: &Path) -> Result<usize> {
+fn verify_repo(dir: &Path, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<usize> {
     let repo = srf::read_manifest(&dir.join("repo.json"))?;
     let foxy_path = dir.join("foxy_addons.json");
     let has_foxy = repo["foxyMode"].is_string();
@@ -67,6 +87,7 @@ fn verify_repo(dir: &Path) -> Result<usize> {
     let mut processed_mods = Vec::new();
     for list in ["requiredMods", "optionalMods"] {
         for item in listing[list].as_array().into_iter().flatten() {
+            check_cancelled(cancelled)?;
             let name = item["modName"]
                 .as_str()
                 .context("Manifest modName is missing")?;
@@ -85,13 +106,14 @@ fn verify_repo(dir: &Path) -> Result<usize> {
                 client_side: false,
                 chunking,
             };
-            let actual = hash::process_mods(
+            let actual = hash::process_mods_controlled(
                 &[resolved],
                 None,
                 &ProgressBar::hidden(),
                 mode,
                 false,
                 false,
+                cancelled,
             )?;
             let mut actual = actual.into_iter().next().context("No hashed mod")?;
             let addon: Option<Value> = if mode != GenerationMode::Swifty {

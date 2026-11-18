@@ -60,6 +60,16 @@ impl ServerContext {
         &self.data_root
     }
 
+    pub(super) fn canonicalized(&self) -> Result<Self, super::ServerStoreError> {
+        super::store::check_directory_chain(&self.data_root)?;
+        let mut context = self.clone();
+        context.data_root = self
+            .data_root
+            .canonicalize()
+            .map_err(|_| super::ServerStoreError::UnsafePath)?;
+        Ok(context)
+    }
+
     pub fn space_id(&self) -> &str {
         &self.space_id
     }

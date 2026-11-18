@@ -40,6 +40,12 @@ fn app_updates_wait_for_supervised_sessions_and_detached_owners() {
         Some(UpdateBlockerKind::Detached),
         "a detached owner outlives the app"
     );
+    snapshot.lifetime = OwnerLifetime::Foreground;
+    assert_eq!(
+        update_gate::blocks_update(&snapshot),
+        Some(UpdateBlockerKind::Foreground),
+        "a foreground service owner is independent of the app"
+    );
 
     let root = tempfile::tempdir().unwrap();
     assert!(update_gate::update_blockers(root.path()).is_empty());
@@ -63,6 +69,22 @@ fn app_updates_wait_for_supervised_sessions_and_detached_owners() {
     assert!(
         update_gate::update_blockers(root.path()).is_empty(),
         "spaces without a running owner never block"
+    );
+}
+
+#[test]
+fn app_update_refuses_an_ambiguous_server_space() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join(crate::core::game::spaces::GAMES_REGISTRY_FILE),
+        br#"{"active_game_space_id":"alpha","game_spaces":[{"id":"alpha","game_id":"arma3","display_name":"Alpha","created_at":0},{"id":"alpha","game_id":"arma3","display_name":"Other","created_at":0}]}"#,
+    ).unwrap();
+    let blockers = update_gate::update_blockers(root.path());
+    assert_eq!(blockers.len(), 2);
+    assert!(
+        blockers
+            .iter()
+            .all(|blocker| blocker.kind == UpdateBlockerKind::Unreachable)
     );
 }
 

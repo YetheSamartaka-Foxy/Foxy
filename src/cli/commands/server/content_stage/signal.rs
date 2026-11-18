@@ -15,7 +15,7 @@ pub(in crate::cli::commands::server) struct SignalGuard {
     #[cfg(windows)]
     installed: bool,
     #[cfg(unix)]
-    previous: libc::sigaction,
+    previous: [libc::sigaction; 2],
 }
 
 #[cfg(windows)]
@@ -48,11 +48,15 @@ impl SignalGuard {
         #[cfg(unix)]
         {
             let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+            let mut previous: [libc::sigaction; 2] = unsafe { std::mem::zeroed() };
             action.sa_sigaction = handler as *const () as usize;
             action.sa_flags = libc::SA_RESTART;
             unsafe { libc::sigemptyset(&mut action.sa_mask) };
-            if unsafe { libc::sigaction(libc::SIGINT, &action, &mut previous) } != 0 {
+            if unsafe { libc::sigaction(libc::SIGINT, &action, &mut previous[0]) } != 0 {
+                return Err(());
+            }
+            if unsafe { libc::sigaction(libc::SIGTERM, &action, &mut previous[1]) } != 0 {
+                unsafe { libc::sigaction(libc::SIGINT, &previous[0], std::ptr::null_mut()) };
                 return Err(());
             }
             Ok(Self { previous })
@@ -72,7 +76,8 @@ impl Drop for SignalGuard {
         }
         #[cfg(unix)]
         unsafe {
-            libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut())
+            libc::sigaction(libc::SIGTERM, &self.previous[1], std::ptr::null_mut());
+            libc::sigaction(libc::SIGINT, &self.previous[0], std::ptr::null_mut())
         };
     }
 }

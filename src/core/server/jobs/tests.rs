@@ -578,7 +578,7 @@ fn status_reports_inactive_owner_blocked_adapter_and_next_run() {
         },
         0,
     ));
-    let mut backup = job(JobSchedule::OnceAt { unix_ms: 5 }, 0);
+    let mut backup = job(JobSchedule::OnceAt { unix_ms: 5_000 }, 0);
     backup.id = "job_0000000000000002".into();
     backup.definition.name = "Backup".into();
     backup.definition.action = MaintenanceAction::Backup;
@@ -605,6 +605,36 @@ fn status_reports_inactive_owner_blocked_adapter_and_next_run() {
     let active = job_statuses(&catalog, &history, &capabilities, true, 1_000);
     assert_eq!(active.jobs[0].blocker, None);
     assert_eq!(active.catalog_revision, 4);
+
+    let with_backups = crate::core::server::ServerCapabilities {
+        server_backups: true,
+        arma_administration: true,
+        ..capabilities
+    };
+    let backup_ready = job_statuses(&catalog, &history, &with_backups, true, 1_000);
+    assert_eq!(backup_ready.jobs[1].blocker, None);
+
+    let mut rotate_with_backup = job(JobSchedule::OnceAt { unix_ms: 5_000 }, 0);
+    rotate_with_backup.id = "job_0000000000000003".into();
+    rotate_with_backup.definition.name = "Rotate".into();
+    rotate_with_backup.definition.action = MaintenanceAction::RotateMission;
+    rotate_with_backup.definition.policy.arma = Some(ArmaMaintenancePolicy {
+        mission_template: Some("mission_alpha.vr".into()),
+        require_backup: true,
+        ..Default::default()
+    });
+    catalog.jobs.push(rotate_with_backup);
+    let stopped_blocked = job_statuses(&catalog, &history, &with_backups, true, 1_000);
+    assert!(
+        stopped_blocked.jobs[2]
+            .blocker
+            .as_deref()
+            .is_some_and(|text| text.contains("live server"))
+    );
+    catalog.jobs[2].definition.policy.backup_mode =
+        crate::core::server::BackupConsistencyMode::BestEffortLive;
+    let live_unblocked = job_statuses(&catalog, &history, &with_backups, true, 1_000);
+    assert_eq!(live_unblocked.jobs[2].blocker, None);
 }
 
 #[test]

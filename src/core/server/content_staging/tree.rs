@@ -433,6 +433,14 @@ pub(in crate::core::server) fn validate_generic_entries(
     entries: &[StageEntry],
     total_bytes: u64,
 ) -> Result<(), Error> {
+    validate_entry_layout(entries, total_bytes, false)
+}
+
+fn validate_entry_layout(
+    entries: &[StageEntry],
+    total_bytes: u64,
+    allow_root_files: bool,
+) -> Result<(), Error> {
     if entries.len() > MAX_ENTRIES || entries.windows(2).any(|w| w[0].path >= w[1].path) {
         return Err(Error::Invalid("Staging tree exceeds entry limit".into()));
     }
@@ -477,7 +485,7 @@ pub(in crate::core::server) fn validate_generic_entries(
             if kinds.get(parent) != Some(&StageEntryKind::Directory) {
                 return Err(Error::Invalid("Invalid staging directory hierarchy".into()));
             }
-        } else if entry.kind != StageEntryKind::Directory {
+        } else if !allow_root_files && entry.kind != StageEntryKind::Directory {
             return Err(Error::Invalid("Invalid staging directory hierarchy".into()));
         }
     }
@@ -767,7 +775,26 @@ pub(in crate::core::server) fn verify_tree(
     root: &Path,
     control: &ContentStageControl,
 ) -> Result<(), Error> {
-    validate_generic_entries(entries, total_bytes)?;
+    verify_inventory(entries, total_bytes, root, control, false)
+}
+
+pub(in crate::core::server) fn verify_publication_tree(
+    entries: &[StageEntry],
+    total_bytes: u64,
+    root: &Path,
+    control: &ContentStageControl,
+) -> Result<(), Error> {
+    verify_inventory(entries, total_bytes, root, control, true)
+}
+
+fn verify_inventory(
+    entries: &[StageEntry],
+    total_bytes: u64,
+    root: &Path,
+    control: &ContentStageControl,
+    allow_root_files: bool,
+) -> Result<(), Error> {
+    validate_entry_layout(entries, total_bytes, allow_root_files)?;
     control.start_phase(
         ContentStagePhase::Checking,
         entries
@@ -788,7 +815,7 @@ pub(in crate::core::server) fn verify_tree(
             control,
             &mut ScanState {
                 hash_files: true,
-                exclude_manifest: true,
+                exclude_manifest: !allow_root_files,
                 path_bytes: 0,
                 entry_count: 0,
             },

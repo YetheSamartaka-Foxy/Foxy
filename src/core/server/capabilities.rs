@@ -32,10 +32,14 @@ pub struct ServerCapabilities {
     pub deployment: bool,
     pub lifecycle: bool,
     pub durable_owner: bool,
+    pub service_exports: bool,
+    pub player_publication: bool,
     pub consumer_recovery: bool,
+    pub server_backups: bool,
     pub headless_clients: bool,
     pub arma_administration: bool,
     pub reforger_administration: bool,
+    pub reforger_sessions: bool,
 }
 
 impl ServerCapabilities {
@@ -60,9 +64,17 @@ impl ServerCapabilities {
             headless_clients: native_arma,
             arma_administration: native_arma,
             reforger_administration: kind == ServerDefinitionKind::Reforger && native,
+            reforger_sessions: kind == ServerDefinitionKind::Reforger && native,
             lifecycle: native,
             durable_owner: native,
+            service_exports: native,
+            player_publication: cfg!(any(windows, target_os = "linux")),
             consumer_recovery: native,
+            server_backups: native
+                && matches!(
+                    kind,
+                    ServerDefinitionKind::Arma3 | ServerDefinitionKind::Reforger
+                ),
             configuration_preview: true,
             configuration_snapshots: true,
             configuration_rollback: true,
@@ -100,6 +112,7 @@ mod tests {
             assert_eq!(caps.deployment_preflight, caps.draft_definitions);
             assert_eq!(caps.deployment_composition, caps.content_staging);
             assert_eq!(caps.deployment_records, caps.content_staging);
+            assert_eq!(caps.player_publication, caps.deployment_records);
             assert_eq!(caps.deployment_preparation, caps.content_staging);
             assert_eq!(
                 caps.deployment_activation,
@@ -121,6 +134,7 @@ mod tests {
             assert!(!caps.installation && !caps.deployment);
             assert_eq!(caps.lifecycle, caps.deployment_activation);
             assert_eq!(caps.consumer_recovery, caps.lifecycle);
+            assert_eq!(caps.server_backups, caps.lifecycle);
             assert_eq!(
                 caps.native_installation,
                 caps.definition_kind.is_some() && caps.lifecycle
@@ -131,6 +145,7 @@ mod tests {
             );
             assert_eq!(caps.headless_clients, caps.workshop_acquisition);
             assert_eq!(caps.arma_administration, caps.headless_clients);
+            assert_eq!(caps.reforger_sessions, caps.reforger_administration);
             assert_eq!(
                 caps.native_installation_channels,
                 caps.definition_kind == Some(super::ServerDefinitionKind::Reforger)

@@ -1,7 +1,9 @@
-﻿use std::collections::BTreeMap;
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 #[path = "server_deployment_records_cli/preparation.rs"]
 mod preparation;
+#[path = "server_deployment_records_cli/publication.rs"]
+mod publication;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -66,6 +68,10 @@ struct Prepared {
     record: String,
 }
 fn prepare(root: &Path, game: &str) -> Prepared {
+    prepare_record(root, game, false)
+}
+
+fn prepare_record(root: &Path, game: &str, publication: bool) -> Prepared {
     let id = invoke(
         root,
         game,
@@ -148,11 +154,11 @@ fn prepare(root: &Path, game: &str) -> Prepared {
         0,
     );
     let bindings = root.join(format!("bindings-{game}.json"));
-    fs::write(
-        &bindings,
-        br#"[{"source_id":"RepoAlpha","role":"required","order":0}]"#,
-    )
-    .unwrap();
+    let mut rows = vec![serde_json::json!({"source_id":"RepoAlpha","role":"required","order":0})];
+    if publication && game == "arma3" {
+        publication::add_player_inputs(root, &folder, &mut rows);
+    }
+    fs::write(&bindings, serde_json::to_vec(&rows).unwrap()).unwrap();
     let plan = invoke(
         root,
         game,

@@ -88,6 +88,10 @@ pub struct RuntimeOperationOutcome {
     pub completed: bool,
     pub cancelled: bool,
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_consistency: Option<crate::core::server::BackupConsistencyMode>,
 }
 
 pub(crate) use manager::RuntimeOwner;

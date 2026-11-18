@@ -176,7 +176,9 @@ impl RuntimeService {
                 },
             }));
         }
-        if let Operation::CancelLifecycle { request_id: target } = &request.operation {
+        if let Operation::CancelLifecycle { request_id: target }
+        | Operation::CancelServerBackup { request_id: target } = &request.operation
+        {
             let response = ledger.handle(session, message.clone())?;
             if let ServerMessage::Request {
                 reply: RequestReply::Accepted { request_id },
@@ -207,7 +209,11 @@ impl RuntimeService {
             | Operation::ReloadReforgerScenario { instance_id, .. }
             | Operation::StartHeadlessClients { instance_id, .. }
             | Operation::StopHeadlessClients { instance_id, .. }
-            | Operation::RestartHeadlessClients { instance_id, .. } => instance_id,
+            | Operation::RestartHeadlessClients { instance_id, .. }
+            | Operation::CreateServerBackup { instance_id, .. }
+            | Operation::PruneServerBackups { instance_id, .. }
+            | Operation::RestoreServerBackup { instance_id, .. }
+            | Operation::RollbackServerRestore { instance_id, .. } => instance_id,
             _ => return Ok(None),
         };
         let response = ledger.handle(session, message.clone())?;
@@ -272,8 +278,17 @@ impl RuntimeService {
         if let Some(pending) = &self.pending {
             pending.control.cancel();
         }
+        let completion = loop {
+            if self.pending.is_none() {
+                break Ok(());
+            }
+            match self.finish(ledger) {
+                Ok(_) if self.pending.is_none() => break Ok(()),
+                Ok(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(error) => break Err(error),
+            }
+        };
         let stopped = self.owner.shutdown();
-        self.finish(ledger)?;
-        stopped
+        completion.and(stopped)
     }
 }

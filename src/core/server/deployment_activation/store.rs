@@ -303,6 +303,7 @@ impl ServerStore {
             .map_err(|_| ServerStoreError::Ownership)?;
         let identity = execution_identity(execution, self.context().space_id());
         let id = execution.identity().target_instance.clone();
+        self.require_no_server_restore(&id)?;
         match operation {
             Operation::ActivateDeployment {
                 instance_id,

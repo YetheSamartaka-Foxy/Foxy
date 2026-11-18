@@ -99,6 +99,7 @@ foxy-formats = { path = "foxy-formats" }
 foxy-sol = { path = "foxy-sol" }
 foxy-supervisor = { path = "foxy-supervisor" }
 foxy-steam = { path = "foxy-steam" }
+foxy-server-backend-cli = { path = "foxy-server-backend-cli" }
 zeroize = "1.8"
 
 [target.'cfg(windows)'.dependencies]

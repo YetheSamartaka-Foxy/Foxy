@@ -1,7 +1,59 @@
-#![cfg_attr(not(test), allow(dead_code))]
+mod archive;
+mod model;
+mod restore;
+mod retention;
+#[cfg(test)]
+mod tests;
 
-use std::path::Path;
+pub use model::{
+    BackupConsistencyMode, BackupPruneOutcome, BackupPrunePlan, BackupRetentionPolicy,
+    MAX_BACKUP_KEEP_LAST, ServerBackupListing, ServerBackupOutcome, ServerBackupPlan,
+    ServerBackupVerificationReport, valid_backup_id, valid_prune_receipt_id,
+};
+pub use restore::{ServerRestoreOutcome, ServerRestorePlan, ServerRestoreStatus};
 
+impl super::ServerStore {
+    pub(in crate::core::server) fn require_stopped_save_writers(
+        &self,
+        id: &super::ServerInstanceId,
+        control: &super::ContentStageControl,
+    ) -> Result<(), super::ServerStoreError> {
+        control.checkpoint()?;
+        self.require_no_server_restore(id)?;
+        self.validate_record_context()?;
+        let (catalog, _, _) = self.read()?;
+        let instance = catalog
+            .instances
+            .iter()
+            .find(|item| &item.id == id)
+            .ok_or(super::ServerStoreError::NotFound)?;
+        let installation = instance
+            .installation_id
+            .as_ref()
+            .and_then(|installation_id| {
+                catalog
+                    .installations
+                    .iter()
+                    .find(|item| &item.id == installation_id)
+            });
+        let (_, blockers) = archive::inspect_consistency_witness(
+            self,
+            id,
+            instance,
+            &catalog.instances,
+            installation,
+            BackupConsistencyMode::StoppedVerified,
+            None,
+        )?;
+        if blockers.is_empty() {
+            Ok(())
+        } else {
+            Err(super::ServerStoreError::Invalid(blockers.join(" ")))
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BackupEvidence {
     pub archive_present: bool,
@@ -11,6 +63,7 @@ pub(crate) struct BackupEvidence {
     pub provider_compatible: bool,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BackupError {
     Incompatible,
@@ -18,9 +71,10 @@ pub(crate) enum BackupError {
     Io,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn backup_owned_files(
-    source_dir: &Path,
-    backup_dir: &Path,
+    source_dir: &std::path::Path,
+    backup_dir: &std::path::Path,
     evidence: &BackupEvidence,
 ) -> Result<(), BackupError> {
     if !evidence.engine_compatible
@@ -55,40 +109,4 @@ pub(crate) fn backup_owned_files(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ready() -> BackupEvidence {
-        BackupEvidence {
-            archive_present: false,
-            engine_compatible: true,
-            config_compatible: true,
-            content_compatible: true,
-            provider_compatible: true,
-        }
-    }
-
-    #[test]
-    fn missing_compatibility_refuses_the_backup() {
-        let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("runtime");
-        let backup = root.path().join("backups");
-        std::fs::create_dir(&source).unwrap();
-        std::fs::write(source.join("server.cfg"), b"hostname = \"Main\";\n").unwrap();
-        let mut evidence = ready();
-        evidence.engine_compatible = false;
-        assert_eq!(
-            backup_owned_files(&source, &backup, &evidence),
-            Err(BackupError::Incompatible)
-        );
-        assert!(!backup.exists());
-        backup_owned_files(&source, &backup, &ready()).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(backup.join("server.cfg")).unwrap(),
-            "hostname = \"Main\";\n"
-        );
-    }
 }

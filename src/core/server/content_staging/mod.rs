@@ -17,7 +17,8 @@ pub(super) use store::read_bounded_controlled;
 pub(super) use tree::verify_stage as verify_stage_tree;
 pub(in crate::core::server) use tree::{copy_sources, inspect_sources};
 pub(super) use tree::{
-    copy_verified_file, parse_relative, validate_generic_entries, verify_subtree, verify_tree,
+    copy_verified_file, parse_relative, validate_generic_entries, verify_publication_tree,
+    verify_subtree, verify_tree,
 };
 pub(super) use validation::physical_directory;
 

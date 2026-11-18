@@ -1,16 +1,6 @@
+pub use crate::types::GenerationMode;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
-
-/// Controls which hashing algorithm and manifest format the server CLI produces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum GenerationMode {
-    /// BLAKE3 hashing, foxy_addon.json per mod, foxy_addons.json at repo root (default).
-    Foxy,
-    /// MD5 hashing, mod.srf per mod - legacy Swifty-compatible output.
-    Swifty,
-    /// Generates both FoxyMode and SwiftyMode artifacts side by side.
-    Hybrid,
-}
 
 /// How `create-space` materializes the mod folders of each repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

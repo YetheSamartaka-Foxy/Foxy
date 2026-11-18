@@ -94,9 +94,23 @@ pub fn job_statuses(
                 .arma
                 .as_ref()
                 .is_some_and(|arma| arma.require_backup)
+                && !capabilities.server_backups
             {
                 Some(
                     "This job requires a consistent backup; backup support is unavailable."
+                        .to_owned(),
+                )
+            } else if definition
+                .policy
+                .arma
+                .as_ref()
+                .is_some_and(|arma| arma.require_backup)
+                && definition.action == crate::core::server::jobs::MaintenanceAction::RotateMission
+                && definition.policy.backup_mode
+                    == crate::core::server::BackupConsistencyMode::StoppedVerified
+            {
+                Some(
+                    "Mission rotation runs on a live server and cannot take a stopped-consistent backup; use a restart job or enable best-effort live backup."
                         .to_owned(),
                 )
             } else if !owner_running {

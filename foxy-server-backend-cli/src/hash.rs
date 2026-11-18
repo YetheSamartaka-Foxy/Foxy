@@ -93,6 +93,26 @@ pub fn process_mods(
     prune_unused_optionals: bool,
     incremental: bool,
 ) -> Result<Vec<ProcessedMod>> {
+    process_mods_controlled(
+        resolved_mods,
+        output_dir,
+        progress,
+        mode,
+        prune_unused_optionals,
+        incremental,
+        &|| false,
+    )
+}
+
+pub(crate) fn process_mods_controlled(
+    resolved_mods: &[ResolvedMod],
+    output_dir: Option<&Path>,
+    progress: &ProgressBar,
+    mode: GenerationMode,
+    prune_unused_optionals: bool,
+    incremental: bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<ProcessedMod>> {
     let mut work_items: Vec<FileWorkItem> = Vec::new();
     let mut cache = (incremental && output_dir.is_some())
         .then(|| crate::incremental::HashCache::load(output_dir.unwrap()));
@@ -100,6 +120,9 @@ pub fn process_mods(
     let mut fingerprints = vec![None; resolved_mods.len()];
 
     for (mod_index, resolved) in resolved_mods.iter().enumerate() {
+        if cancelled() {
+            anyhow::bail!("Repository generation cancelled");
+        }
         let files = if prune_unused_optionals {
             crate::discover::discover_files_with_pruning(&resolved.source_path, true)?
         } else {
@@ -142,13 +165,17 @@ pub fn process_mods(
     let results: Vec<Result<(usize, usize, ModFile)>> = work_items
         .into_par_iter()
         .map(|item| {
-            let mod_file = copy_and_hash_file(
+            let mod_file = copy_and_hash_file_controlled(
                 &item.file.absolute_path,
                 item.output_path.as_deref(),
                 &item.file,
                 item.file_data_order,
                 mode,
                 resolved_mods[item.mod_index].chunking,
+                HashControl {
+                    cancelled,
+                    progress: &|_| {},
+                },
             )
             .with_context(|| format!("Failed to process {}", item.file.absolute_path.display()))?;
             progress.inc(1);
@@ -258,6 +285,7 @@ pub fn hash_file_sha1(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()).to_uppercase())
 }
 
+#[cfg(test)]
 fn copy_and_hash_file(
     source: &Path,
     dest: Option<&Path>,
@@ -266,6 +294,40 @@ fn copy_and_hash_file(
     mode: GenerationMode,
     chunking: Chunking,
 ) -> Result<ModFile> {
+    copy_and_hash_file_controlled(
+        source,
+        dest,
+        discovered,
+        data_order,
+        mode,
+        chunking,
+        HashControl {
+            cancelled: &|| false,
+            progress: &|_| {},
+        },
+    )
+}
+
+pub(crate) struct HashControl<'a> {
+    pub cancelled: &'a (dyn Fn() -> bool + Sync),
+    pub progress: &'a (dyn Fn(u64) + Sync),
+}
+
+pub(crate) fn copy_and_hash_file_controlled(
+    source: &Path,
+    dest: Option<&Path>,
+    discovered: &DiscoveredFile,
+    data_order: usize,
+    mode: GenerationMode,
+    chunking: Chunking,
+    HashControl {
+        cancelled,
+        progress,
+    }: HashControl<'_>,
+) -> Result<ModFile> {
+    if cancelled() {
+        anyhow::bail!("Repository generation cancelled");
+    }
     let use_md5 = matches!(mode, GenerationMode::Swifty | GenerationMode::Hybrid);
     let use_blake3 = matches!(mode, GenerationMode::Foxy | GenerationMode::Hybrid);
     let buf_size = buf_size_for_mode(mode);
@@ -274,19 +336,17 @@ fn copy_and_hash_file(
     let container_parts = match registry.parse_parts_for_file(source) {
         Ok(Some((_format_id, parts))) => Some(parts),
         Ok(None) => None,
-        Err(e) => {
-            log::warn!(
-                "Content format parse failed for {}, treating as single file: {}",
-                source.display(),
-                e
-            );
+        Err(_) => {
+            log::warn!("Content format parse failed, treating as single file");
             None
         }
     };
     let mut parts = match container_parts {
         Some(parts) => format_parts_to_manifest_parts(parts),
         None if chunking == Chunking::Content => {
-            return copy_and_hash_content_defined(source, dest, discovered, data_order, mode);
+            return copy_and_hash_content_defined(
+                source, dest, discovered, data_order, mode, cancelled, progress,
+            );
         }
         None => format_parts_to_manifest_parts(foxy_formats::single_file_parts(
             &discovered.relative_path,
@@ -313,7 +373,14 @@ fn copy_and_hash_file(
     for part in &mut parts {
         if file_position < part.start {
             let gap = part.start - file_position;
-            copy_bytes(&mut src_file, &mut writer, &mut buf, gap)?;
+            copy_bytes(
+                &mut src_file,
+                &mut writer,
+                &mut buf,
+                gap,
+                cancelled,
+                progress,
+            )?;
             file_position += gap;
         }
 
@@ -330,6 +397,9 @@ fn copy_and_hash_file(
 
         let mut remaining = part.length;
         while remaining > 0 {
+            if cancelled() {
+                anyhow::bail!("Repository generation cancelled");
+            }
             let to_read = (remaining as usize).min(buf_size);
             let n = src_file
                 .read(&mut buf[..to_read])
@@ -346,17 +416,22 @@ fn copy_and_hash_file(
             }
             remaining -= n as u64;
             file_position += n as u64;
+            progress(n as u64);
         }
 
         part.checksums = finalize_checksums(md5_hasher, b3_hasher, mode);
     }
 
     loop {
+        if cancelled() {
+            anyhow::bail!("Repository generation cancelled");
+        }
         let n = src_file.read(&mut buf).context("Failed to read")?;
         if n == 0 {
             break;
         }
         writer.write_all(&buf[..n]).context("Failed to write")?;
+        progress(n as u64);
     }
 
     writer.flush().context("Failed to flush output")?;
@@ -372,12 +447,35 @@ fn copy_and_hash_file(
     })
 }
 
+pub(crate) fn hash_file_blake3_controlled(
+    path: &Path,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0; BUF_SIZE_FOXY];
+    loop {
+        if cancelled() {
+            anyhow::bail!("Repository generation cancelled");
+        }
+        let read = file.read(&mut buffer).context("Failed to read file")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().to_hex().to_uppercase())
+}
+
 fn copy_and_hash_content_defined(
     source: &Path,
     dest: Option<&Path>,
     discovered: &DiscoveredFile,
     data_order: usize,
     mode: GenerationMode,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(u64) + Sync),
 ) -> Result<ModFile> {
     let use_md5 = matches!(mode, GenerationMode::Swifty | GenerationMode::Hybrid);
     let use_blake3 = matches!(mode, GenerationMode::Foxy | GenerationMode::Hybrid);
@@ -417,6 +515,9 @@ fn copy_and_hash_content_defined(
     };
 
     loop {
+        if cancelled() {
+            anyhow::bail!("Repository generation cancelled");
+        }
         let n = src_file
             .read(&mut buf)
             .context("Failed to read source file")?;
@@ -424,6 +525,7 @@ fn copy_and_hash_content_defined(
             break;
         }
         writer.write_all(&buf[..n]).context("Failed to write")?;
+        progress(n as u64);
         let mut rest = &buf[..n];
         while !rest.is_empty() {
             let take = chunker.find_boundary(rest);
@@ -532,8 +634,13 @@ fn copy_bytes(
     writer: &mut Sink,
     buf: &mut [u8],
     mut count: u64,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    progress: &(dyn Fn(u64) + Sync),
 ) -> Result<()> {
     while count > 0 {
+        if cancelled() {
+            anyhow::bail!("Repository generation cancelled");
+        }
         let to_read = (count as usize).min(buf.len());
         let n = reader.read(&mut buf[..to_read]).context("read")?;
         if n == 0 {
@@ -541,6 +648,7 @@ fn copy_bytes(
         }
         writer.write_all(&buf[..n]).context("write")?;
         count -= n as u64;
+        progress(n as u64);
     }
     Ok(())
 }

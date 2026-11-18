@@ -15,6 +15,24 @@ pub struct NativeConfigurationSeed {
     pub destination: PathBuf,
     pub blake3: String,
     pub bindings: Vec<(String, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reforger_session: Option<crate::core::server::ReforgerSessionLaunch>,
+}
+
+pub(in crate::core::server) fn private_configuration_name(
+    runtime: &str,
+    session: Option<&crate::core::server::ReforgerSessionLaunch>,
+) -> String {
+    match session
+        .filter(|session| session.intent != crate::core::server::ReforgerSessionIntent::Configured)
+    {
+        Some(session) => format!(
+            "{runtime}_session_{}_{}",
+            u8::from(session.load),
+            u8::from(session.keep)
+        ),
+        None => runtime.to_owned(),
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -49,16 +67,19 @@ impl ServerStore {
         for seed in seeds {
             control.checkpoint()?;
             let (runtime, filename) = validate_source(self, id, &record_root, &seed.source)?;
-            if runtime_name.as_deref().is_some_and(|old| old != runtime)
+            let runtime = private_configuration_name(runtime, seed.reforger_session.as_ref());
+            if runtime_name
+                .as_deref()
+                .is_some_and(|old| old != runtime.as_str())
                 || names.iter().any(|name| name == filename)
             {
                 return Err(ServerStoreError::UnsafePath);
             }
-            runtime_name = Some(runtime.to_owned());
+            runtime_name = Some(runtime.clone());
             names.push(filename.to_owned());
             let expected_destination = state_root
                 .join("home/private-configuration")
-                .join(runtime)
+                .join(&runtime)
                 .join(filename);
             if seed.destination != expected_destination {
                 return Err(ServerStoreError::UnsafePath);
@@ -79,8 +100,18 @@ impl ServerStore {
                 if !seed.bindings.is_empty() {
                     return Err(ServerStoreError::Corrupt);
                 }
-                render_json_secrets(self, id, source_text)?
+                if let Some(session) = &seed.reforger_session {
+                    let current = self.reforger_sessions(id, control)?;
+                    if current.fingerprint != session.inventory_fingerprint {
+                        return Err(ServerStoreError::StaleRevision);
+                    }
+                }
+                let rendered = render_json_secrets(self, id, source_text)?;
+                render_reforger_session(&rendered, seed.reforger_session.as_ref())?
             } else {
+                if seed.reforger_session.is_some() {
+                    return Err(ServerStoreError::Corrupt);
+                }
                 render_secret_values(self, id, source_text, &seed.bindings, control)?
             };
             prepared.push((filename.to_owned(), rendered));
@@ -181,7 +212,6 @@ fn render_secret_values(
         .map_err(|_| ServerStoreError::Corrupt)
 }
 
-/// Resolves the Reforger `rcon.password` reference; every other value is copied unchanged.
 fn render_json_secrets(
     store: &ServerStore,
     id: &ServerInstanceId,
@@ -198,6 +228,9 @@ fn replace_rcon_password(
 ) -> Result<Vec<u8>, ServerStoreError> {
     let mut value: serde_json::Value =
         serde_json::from_str(source).map_err(|_| ServerStoreError::Corrupt)?;
+    if value.get("rcon").is_none() {
+        return serde_json::to_vec_pretty(&value).map_err(|_| ServerStoreError::Corrupt);
+    }
     let password = value
         .get_mut("rcon")
         .and_then(|rcon| rcon.get_mut("password"))
@@ -218,6 +251,37 @@ fn replace_rcon_password(
         zeroize::Zeroize::zeroize(text);
     }
     Ok(bytes)
+}
+
+fn render_reforger_session(
+    bytes: &[u8],
+    session: Option<&crate::core::server::ReforgerSessionLaunch>,
+) -> Result<Vec<u8>, ServerStoreError> {
+    let Some(session) = session else {
+        return Ok(bytes.to_vec());
+    };
+    if session.intent == crate::core::server::ReforgerSessionIntent::Configured {
+        return Ok(bytes.to_vec());
+    }
+    let mut config: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| ServerStoreError::Corrupt)?;
+    let game = config
+        .get_mut("game")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or(ServerStoreError::Corrupt)?;
+    let properties = game
+        .entry("gameProperties")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or(ServerStoreError::Corrupt)?;
+    let persistence = properties
+        .entry("persistence")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or(ServerStoreError::Corrupt)?;
+    persistence.insert("loadSessionSave".into(), session.load.into());
+    persistence.insert("keepSessionSave".into(), session.keep.into());
+    serde_json::to_vec_pretty(&config).map_err(|_| ServerStoreError::Corrupt)
 }
 
 fn collect_assignments<'a>(nodes: &'a [Node], found: &mut Vec<&'a Node>) {
@@ -535,6 +599,76 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_session_intent_overrides_load_defaults_without_rewriting_source() {
+        use crate::core::server::{
+            ReforgerProviderCoverage, ReforgerSessionIntent, ReforgerSessionLaunch,
+        };
+        let source = br#"{"game":{"scenarioId":"{1111111111111111}Missions/Main.conf","gameProperties":{"persistence":{"loadSessionSave":true,"hiveId":7,"saveRetention":10},"custom":42}},"operatorField":"preserved"}"#;
+        let mut session = ReforgerSessionLaunch {
+            intent: ReforgerSessionIntent::New,
+            selected_save_id: None,
+            playthrough: None,
+            savepoint: None,
+            load: false,
+            keep: true,
+            fingerprint: "a".repeat(64),
+            inventory_fingerprint: "b".repeat(64),
+            provider: ReforgerProviderCoverage {
+                local_default: true,
+                blockers: vec![],
+            },
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&render_reforger_session(source, Some(&session)).unwrap())
+                .unwrap();
+        assert_eq!(
+            value["game"]["gameProperties"]["persistence"]["loadSessionSave"],
+            false
+        );
+        assert_eq!(
+            value["game"]["gameProperties"]["persistence"]["keepSessionSave"],
+            true
+        );
+        assert_eq!(value["game"]["gameProperties"]["persistence"]["hiveId"], 7);
+        assert_eq!(value["game"]["gameProperties"]["custom"], 42);
+        assert_eq!(value["operatorField"], "preserved");
+        assert_eq!(
+            private_configuration_name("runtime_a", Some(&session)),
+            "runtime_a_session_0_1"
+        );
+        session.intent = ReforgerSessionIntent::Configured;
+        assert_eq!(
+            private_configuration_name("runtime_a", Some(&session)),
+            "runtime_a"
+        );
+        assert_eq!(
+            render_reforger_session(source, Some(&session)).unwrap(),
+            source
+        );
+        session.intent = ReforgerSessionIntent::Latest;
+        session.load = true;
+        assert_eq!(
+            private_configuration_name("runtime_a", Some(&session)),
+            "runtime_a_session_1_1"
+        );
+        let disabled = br#"{"game":{"gameProperties":{"persistence":{"loadSessionSave":false}}}}"#;
+        let value: serde_json::Value =
+            serde_json::from_slice(&render_reforger_session(disabled, Some(&session)).unwrap())
+                .unwrap();
+        assert_eq!(
+            value["game"]["gameProperties"]["persistence"]["loadSessionSave"],
+            true
+        );
+        let no_rcon =
+            replace_rcon_password(r#"{"game":{}}"#, |_| panic!("No RCon reference exists"))
+                .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&no_rcon).unwrap(),
+            serde_json::json!({"game":{}})
+        );
     }
 
     #[test]

@@ -259,6 +259,11 @@ fn definition(
             max_attempts: args.max_attempts,
             retry_delay_seconds: args.retry_delay_seconds,
             stop_timeout_seconds: args.stop_timeout_seconds,
+            backup_mode: if args.live_backup {
+                crate::core::server::BackupConsistencyMode::BestEffortLive
+            } else {
+                crate::core::server::BackupConsistencyMode::StoppedVerified
+            },
         },
     };
     definition

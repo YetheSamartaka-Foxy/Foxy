@@ -8,33 +8,10 @@ macro_rules! println {
     };
 }
 
-mod artifacts;
-mod build_info;
-mod changelog_parser;
-mod cli;
-mod config;
-mod discover;
-mod hash;
-mod incremental;
-mod keys;
-mod mod_line;
-mod mod_line_files;
-mod operations;
-mod output;
-mod planner;
-mod published;
-mod report;
-mod space;
-mod srf;
-mod staging;
-mod types;
-mod update_manifest;
-mod verify;
-
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::GenerationMode;
-use indicatif::{ProgressBar, ProgressStyle};
+use foxy_server_backend_cli::cli::GenerationMode;
+use foxy_server_backend_cli::*;
 use std::time::Instant;
 
 fn main() -> Result<()> {
@@ -195,7 +172,7 @@ fn main() -> Result<()> {
                 space,
                 output,
             } => operations::validate(&config, space, output.as_deref()),
-            cli::Command::Verify { output } => verify::verify(&output),
+            cli::Command::Verify { output } => cmd_verify(&output),
             cli::Command::Diff { old, new } => report::diff(&old, &new),
             cli::Command::AuditKeys {
                 config,
@@ -259,12 +236,6 @@ struct CreateOptions<'a> {
     report: bool,
     yes: bool,
     keys: KeyCollectionRequest,
-}
-
-pub(crate) struct KeyCollectionRequest {
-    pub enabled: bool,
-    pub dest: Option<std::path::PathBuf>,
-    pub additional_sources: Vec<std::path::PathBuf>,
 }
 
 fn cmd_create(
@@ -525,25 +496,17 @@ fn run_create(
     })
 }
 
-pub(crate) fn configure_thread_pool(threads: usize) -> Result<()> {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build_global()
-        .context("Failed to configure thread pool")
-}
-
-pub(crate) fn progress_bar(no_progress: bool) -> ProgressBar {
-    if no_progress {
-        return ProgressBar::hidden();
-    }
-    let progress = ProgressBar::new(0);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} files ({per_sec})")
-            .unwrap_or_else(|_| ProgressStyle::default_bar())
-            .progress_chars("=> "),
+fn cmd_verify(output: &std::path::Path) -> Result<()> {
+    let report = foxy_server_backend_cli::verify_repository(output)?;
+    println!(
+        "Verified {} repositories and {} mods",
+        report.repositories, report.mods
     );
-    progress
+    output::set_details(serde_json::json!({
+        "repositories": report.repositories,
+        "mods": report.mods,
+    }));
+    Ok(())
 }
 
 fn cmd_new(output: &std::path::Path, game: types::RepoGame) -> Result<()> {
@@ -851,13 +814,13 @@ mod generation_tests {
             std::fs::read_to_string(output.join(published::SERVER_MOD_LINE_FILE)).unwrap(),
             "-mod=mods/@ace;mods/@ace_selected;\n"
         );
-        verify::verify(&output).unwrap();
+        foxy_server_backend_cli::verify_repository(&output).unwrap();
         std::fs::write(
             output.join("@ace_selected").join("selected.pbo"),
             b"changed",
         )
         .unwrap();
-        assert!(verify::verify(&output).is_err());
+        assert!(foxy_server_backend_cli::verify_repository(&output).is_err());
     }
 
     fn prune_options(yes: bool) -> CreateOptions<'static> {

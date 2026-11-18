@@ -212,8 +212,16 @@ pub fn export_reforger_config(
             entries.push(json!({"modId": id, "name": item.mod_name}));
         }
     }
-    let fragment = json!({"game": {"mods": entries}});
-    let data = serde_json::to_vec_pretty(&fragment)?;
+    let fragment_mods = entries
+        .iter()
+        .map(|entry| crate::ReforgerModReference {
+            id: entry["modId"].as_str().unwrap_or_default().to_string(),
+            name: entry["name"].as_str().map(str::to_string),
+            version: None,
+            required: None,
+        })
+        .collect::<Vec<_>>();
+    let data = crate::reforger_addon_fragment(&fragment_mods)?;
     std::fs::write(output_path, data)
         .with_context(|| format!("Failed to write {}", output_path.display()))?;
     println!(

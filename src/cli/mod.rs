@@ -186,6 +186,8 @@ pub fn run_from_env() -> CliExecution {
                     | CliCommand::Server {
                         command: args::ServerCommand::Owner(_)
                             | args::ServerCommand::Supervise(_)
+                            | args::ServerCommand::Service { .. }
+                            | args::ServerCommand::Publish { .. }
                             | args::ServerCommand::Context(_)
                             | args::ServerCommand::Capabilities(_)
                             | args::ServerCommand::Instance { .. }
@@ -230,6 +232,8 @@ pub fn run_from_env() -> CliExecution {
             Some(CliCommand::Server {
                 command: args::ServerCommand::Owner(_)
                     | args::ServerCommand::Supervise(_)
+                    | args::ServerCommand::Service { .. }
+                    | args::ServerCommand::Publish { .. }
                     | args::ServerCommand::Context(_)
                     | args::ServerCommand::Capabilities(_)
                     | args::ServerCommand::Instance { .. }
@@ -487,7 +491,12 @@ fn server_database_use(command: &args::ServerCommand) -> ServerDatabaseUse {
         | args::ServerCommand::Admin { .. }
         | args::ServerCommand::ReforgerAdmin { .. }
         | args::ServerCommand::ReforgerAddons { .. }
-        | args::ServerCommand::Deploy { .. } => ServerDatabaseUse::LocalMetadata,
+        | args::ServerCommand::Deploy { .. }
+        | args::ServerCommand::Backup { .. }
+        | args::ServerCommand::Restore { .. }
+        | args::ServerCommand::Session { .. }
+        | args::ServerCommand::Publish { .. }
+        | args::ServerCommand::Service { .. } => ServerDatabaseUse::LocalMetadata,
     }
 }
 

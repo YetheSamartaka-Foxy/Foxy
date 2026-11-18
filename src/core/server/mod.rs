@@ -50,6 +50,7 @@ mod runtime_payload;
 mod saves;
 mod scenario;
 mod scenario_end;
+mod services;
 pub(crate) mod steam_auth;
 mod store;
 mod support;
@@ -57,6 +58,12 @@ mod workshop_store;
 
 pub use addons::{ServerAddonBinding, ServerAddonRole};
 pub use arma3_config::*;
+pub use backup::{
+    BackupConsistencyMode, BackupPruneOutcome, BackupPrunePlan, BackupRetentionPolicy,
+    MAX_BACKUP_KEEP_LAST, ServerBackupListing, ServerBackupOutcome, ServerBackupPlan,
+    ServerBackupVerificationReport, ServerRestoreOutcome, ServerRestorePlan, ServerRestoreStatus,
+    valid_backup_id, valid_prune_receipt_id,
+};
 pub use capabilities::ServerCapabilities;
 pub use config_import::{
     ConfigurationImportInput, ConfigurationImportPlan, ConfigurationOwnership, ConfigurationRole,
@@ -132,6 +139,7 @@ pub use native_install::{
     NativeInstallationCheck, NativeInstallationValidation, NativeMaintenanceAction,
 };
 pub use preflight::DeploymentPreflight;
+pub use publish::{PlayerPublicationOutcome, PlayerPublicationPlan, PlayerPublicationRequest};
 pub use rcon::{Arma3RconSettings, ReforgerRconPermission, ReforgerRconSettings};
 pub use reconciliation::{DeploymentPins, ReconciliationOutcome, ReconciliationPlan};
 pub use recovery_inspection::{InstallationRecoveryInspection, RecoveryMetadataEvidence};
@@ -143,7 +151,14 @@ pub use reforger_schema::{
     preview_warnings, read_scenario_log, render_server_json, scenario_listing_note,
     write_server_json,
 };
+pub use saves::{
+    ReforgerProviderCoverage, ReforgerSessionIntent, ReforgerSessionInventory,
+    ReforgerSessionLaunch, ReforgerSessionPlan, ReforgerSessionSummary,
+};
 pub use scenario_end::ReforgerScenarioEnd;
+pub use services::{
+    ServiceExportFormat, ServiceExportPlan, plan_service_export, write_service_export,
+};
 pub use store::read_bounded;
 pub use store::{DraftChange, ServerCatalog, ServerStore, ServerStoreError};
 pub use support::{RuntimePrerequisites, support_report};

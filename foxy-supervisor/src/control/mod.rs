@@ -11,7 +11,7 @@ pub use session::{ClientSession, ServerSession};
 use serde::{Deserialize, Serialize};
 use std::{fmt, io};
 
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 14;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 1024;
 
@@ -181,6 +181,31 @@ pub enum Operation {
     },
     CancelLifecycle {
         request_id: u64,
+    },
+    CreateServerBackup {
+        instance_id: String,
+        mode: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_plan_fingerprint: Option<String>,
+        apply_retention: bool,
+    },
+    PruneServerBackups {
+        instance_id: String,
+        expected_plan_fingerprint: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep_last_override: Option<u16>,
+    },
+    CancelServerBackup {
+        request_id: u64,
+    },
+    RestoreServerBackup {
+        instance_id: String,
+        backup_id: String,
+        expected_plan_fingerprint: String,
+    },
+    RollbackServerRestore {
+        instance_id: String,
+        expected_journal_fingerprint: String,
     },
 }
 

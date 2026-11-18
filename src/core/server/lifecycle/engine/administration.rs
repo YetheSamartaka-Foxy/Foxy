@@ -14,7 +14,9 @@ impl Runs {
         let Some((occurrence, policy)) = &execution.arma_maintenance else {
             return Ok(());
         };
-        if !self.store.capabilities().arma_administration || policy.require_backup {
+        if !self.store.capabilities().arma_administration
+            || (policy.require_backup && !self.store.capabilities().server_backups)
+        {
             return Err(ServerStoreError::Invalid(
                 "The required Arma maintenance adapter is unavailable.".into(),
             ));
@@ -153,6 +155,26 @@ impl Runs {
         }
         self.announce_maintenance(id, expected, execution, control)?;
         control.checkpoint()?;
+        let mut created_backup = None;
+        if execution.require_backup {
+            if execution.maintenance_backup_mode
+                != Some(crate::core::server::BackupConsistencyMode::BestEffortLive)
+            {
+                return Err(ServerStoreError::Invalid(
+                    "Mission rotation runs on a live server and requires explicit best-effort live backup mode when backup is required."
+                        .into(),
+                ));
+            }
+            let backup = self.store.create_server_backup(
+                id,
+                crate::core::server::BackupConsistencyMode::BestEffortLive,
+                None,
+                true,
+                Some(&status),
+                control,
+            )?;
+            created_backup = Some((backup.manifest.backup_id, backup.manifest.consistency.mode));
+        }
         let before = self
             .store
             .read_monitoring_snapshot(&status)?
@@ -226,6 +248,8 @@ impl Runs {
             } else {
                 "Mission rotation was sent at most once. Its completed effect is unconfirmed; review the server and RCon history before another action.".into()
             }),
+            backup_id: created_backup.as_ref().map(|(id, _)| id.clone()),
+            backup_consistency: created_backup.map(|(_, mode)| mode),
         })
     }
 }

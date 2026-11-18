@@ -2883,6 +2883,13 @@ impl Foxy {
         value["reforger_addon_acquisition_plan"] = json!(self.server_view.reforger_addon_plan);
         value["reforger_addon_lock"] = json!(self.server_view.reforger_addon_lock);
         value["reforger_addon_confirmation"] = json!(self.server_view.reforger_addon_confirmation);
+        value["sessions"] = json!({
+            "confirmation": self.server_view.sessions.confirmation,
+            "mode": self.server_view.sessions.mode,
+            "generation": self.server_view.sessions.inventory.as_ref().map(|inventory| inventory.generation),
+            "plan_fingerprint": self.server_view.sessions.plan.as_ref().map(|plan| &plan.fingerprint),
+            "selected_save_id": self.server_view.sessions.plan.as_ref().and_then(|plan| plan.selected_save_id.as_ref()),
+        });
         value
     }
 
@@ -3838,6 +3845,10 @@ impl Foxy {
         push(
             self.server_view.reforger_addon_confirmation,
             "server-reforger-addon-confirmation",
+        );
+        push(
+            self.server_view.sessions.confirmation,
+            "server-session-confirmation",
         );
         push(self.show_add_repository_modal, "add-repository");
         push(

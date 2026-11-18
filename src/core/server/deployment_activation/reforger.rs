@@ -412,6 +412,7 @@ impl ServerStore {
         )?;
         validate_configuration(&bytes, manifest)?;
         let configuration = NativeConfiguration::parse(&bytes)?;
+        let session = self.reforger_session_launch(id, &bytes, manifest, control)?;
         let state = self.record_root(id).join("runtime-state");
         validate_mutable_roots(&state, control)?;
         let path = super::launch::argument_path;
@@ -425,9 +426,31 @@ impl ServerStore {
             std::path::PathBuf::from(path(&engine)?),
             std::path::PathBuf::from(path(&executable)?),
         );
-        let mut configuration_seeds = Vec::new();
         let mut rcon = None;
-        let mut launch_config = config.clone();
+        let entry = manifest
+            .realized_entries
+            .iter()
+            .find(|entry| entry.path == "configuration/server.json")
+            .ok_or(ServerStoreError::Corrupt)?;
+        let launch_config = state
+            .join("home/private-configuration")
+            .join(
+                crate::core::server::config_import::private_configuration_name(
+                    &reference.directory_name(),
+                    Some(&session),
+                ),
+            )
+            .join("server.json");
+        super::runtime::check_native_path(&launch_config, manifest.installation.platform)?;
+        let configuration_seeds = vec![
+            crate::core::server::config_import::NativeConfigurationSeed {
+                source: config.clone(),
+                destination: launch_config.clone(),
+                blake3: entry.blake3.clone().ok_or(ServerStoreError::Corrupt)?,
+                bindings: Vec::new(),
+                reforger_session: Some(session.clone()),
+            },
+        ];
         if let Some(settings) = &configuration.rcon {
             let password_reference = settings
                 .password
@@ -439,25 +462,6 @@ impl ServerStore {
                 })?;
             self.resolve_config_secret(id, password_reference)
                 .map_err(|_| super::launch::missing_rcon_password())?;
-            let entry = manifest
-                .realized_entries
-                .iter()
-                .find(|entry| entry.path == "configuration/server.json")
-                .ok_or(ServerStoreError::Corrupt)?;
-            let destination = state
-                .join("home/private-configuration")
-                .join(reference.directory_name())
-                .join("server.json");
-            super::runtime::check_native_path(&destination, manifest.installation.platform)?;
-            configuration_seeds.push(
-                crate::core::server::config_import::NativeConfigurationSeed {
-                    source: config.clone(),
-                    destination: destination.clone(),
-                    blake3: entry.blake3.clone().ok_or(ServerStoreError::Corrupt)?,
-                    bindings: Vec::new(),
-                },
-            );
-            launch_config = destination;
             rcon = Some(super::NativeRconPlan {
                 endpoint: crate::core::server::rcon::connect_endpoint(
                     settings.address,
@@ -492,6 +496,13 @@ impl ServerStore {
             "-maxFPS".into(),
             "30".into(),
         ];
+        if let Some(save_id) = &session.selected_save_id {
+            arguments.extend(["-loadSessionSave".into(), save_id.clone()]);
+        }
+        if session.keep && session.intent != crate::core::server::ReforgerSessionIntent::Configured
+        {
+            arguments.push("-keepSessionSave".into());
+        }
         arguments.extend(
             manifest
                 .reforger_scenario_end

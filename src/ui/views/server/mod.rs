@@ -1,4 +1,5 @@
 mod arma_admin;
+mod backups;
 mod configuration;
 mod consumer_recovery;
 mod content;
@@ -19,11 +20,14 @@ mod maintenance;
 mod missions;
 mod monitoring;
 mod native_install;
+mod publication;
 mod rcon;
 mod reconciliation;
 mod recovery;
 mod reforger_addons;
 mod reforger_admin;
+mod services;
+mod sessions;
 mod steam_auth;
 mod workshop;
 
@@ -35,21 +39,23 @@ use eframe::egui::{self, RichText, Ui};
 
 impl Foxy {
     pub(crate) fn render_server_overview(&mut self, ui: &mut Ui) {
-        let page_delta =
-            if self.server_view.dialog.is_none() && !self.server_view.reforger_addon_confirmation {
-                ui.input_mut(|input| {
-                    if input.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
-                        -1.0
-                    } else if input.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                }) * ui.clip_rect().height()
-                    * 0.75
-            } else {
-                0.0
-            };
+        let page_delta = if self.server_view.dialog.is_none()
+            && !self.server_view.reforger_addon_confirmation
+            && !self.server_view.sessions.confirmation
+        {
+            ui.input_mut(|input| {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                    -1.0
+                } else if input.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }) * ui.clip_rect().height()
+                * 0.75
+        } else {
+            0.0
+        };
         let space = spaces::active_game_space();
         let new_name_id = self.server_draft_focus_id("server-new-name").unwrap();
         let supported = self.server_drafts_supported();
@@ -80,6 +86,7 @@ impl Foxy {
             });
             if !supported { return; }
             self.render_server_steam_auth(ui);
+            self.render_server_service_export(ui);
             ui.separator();
             if self.server_view.task.as_ref().is_some_and(|task| !task.passive && task.kind.is_none()) {
                 ui.horizontal(|ui| {
@@ -145,7 +152,7 @@ impl Foxy {
             }
             if let Some(id) = selected { self.server_view.select(&id); }
             ui.separator();
-            let (configuration_anchor, content_anchor, stage_anchor, acquisition_anchor, composition_anchor, records_anchor, reconciliation_anchor, preparation_anchor, activation_anchor, lifecycle_anchor, native_install_anchor, workshop_anchor, reforger_addon_anchor, maintenance_anchor, rcon_anchor) = ui.add_enabled_ui(!busy, |ui| {
+            let (configuration_anchor, content_anchor, stage_anchor, acquisition_anchor, composition_anchor, records_anchor, publication_anchor, reconciliation_anchor, backups_anchor, sessions_anchor, preparation_anchor, activation_anchor, lifecycle_anchor, native_install_anchor, workshop_anchor, reforger_addon_anchor, maintenance_anchor, rcon_anchor) = ui.add_enabled_ui(!busy, |ui| {
                 self.render_server_editor(ui);
                 self.render_server_installation(ui);
                 let native_install = self.render_server_native_install(ui);
@@ -160,7 +167,10 @@ impl Foxy {
                 self.render_server_keys(ui);
                 let composition = self.render_server_deployment_composition(ui);
                 let records = self.render_server_deployment_records(ui);
+                let publication = self.render_server_player_publication(ui);
                 let reconciliation = self.render_server_reconciliation(ui);
+                let backups = self.render_server_backups(ui);
+                let sessions = self.render_server_sessions(ui);
                 let preparation = self.render_server_deployment_preparation(ui);
                 let activation = self.render_server_deployment_activation(ui);
                 let lifecycle = self.render_server_lifecycle(ui);
@@ -169,9 +179,9 @@ impl Foxy {
                 self.render_arma_administration(ui);
                 self.render_reforger_administration(ui);
                 self.render_consumer_recovery(ui);
-                (configuration, content, stage, acquisition, composition, records, reconciliation, preparation, activation, lifecycle, native_install, workshop, reforger_addons, maintenance, rcon)
+                (configuration, content, stage, acquisition, composition, records, publication, reconciliation, backups, sessions, preparation, activation, lifecycle, native_install, workshop, reforger_addons, maintenance, rcon)
             }).inner;
-            if !self.server_view.busy() && self.server_view.dialog.is_none() && !self.server_view.reforger_addon_confirmation && let Some(target) = self.server_view.pending_focus && target != consumer_recovery::CONFIRM_CANCEL_FOCUS {
+            if !self.server_view.busy() && self.server_view.dialog.is_none() && !self.server_view.reforger_addon_confirmation && !self.server_view.sessions.confirmation && let Some(target) = self.server_view.pending_focus && target != consumer_recovery::CONFIRM_CANCEL_FOCUS {
                 let response = if target == "server-configuration-controls" { configuration_anchor }
                     else if target == "server-content-controls" { content_anchor }
                     else if target == "server-content-stage-controls" { stage_anchor }
@@ -179,7 +189,10 @@ impl Foxy {
                     else if target == "server-reforger-addon-controls" { reforger_addon_anchor }
                     else if target == "server-deployment-composition-controls" { composition_anchor }
                     else if target == "server-deployment-record-controls" { records_anchor }
+                    else if target == "server-player-publication-controls" { publication_anchor }
                     else if target == "server-reconciliation-controls" { reconciliation_anchor }
+                    else if target == "server-backup-controls" { backups_anchor }
+                    else if target == "server-session-controls" { sessions_anchor }
                     else if target == "server-deployment-preparation-controls" { preparation_anchor }
                     else if target == "server-deployment-activation-controls" { activation_anchor }
                     else if target == "server-lifecycle-controls" { lifecycle_anchor }
@@ -199,6 +212,7 @@ impl Foxy {
             if page_delta != 0.0 { ui.scroll_with_delta(egui::vec2(0.0, page_delta)); }
             });
         });
+        self.render_server_session_confirmation(ui.ctx());
     }
 
     pub(crate) fn open_server_draft_dialog(&mut self, dialog: ServerDialog) {

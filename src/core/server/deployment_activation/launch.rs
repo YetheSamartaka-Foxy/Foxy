@@ -528,6 +528,7 @@ impl ServerStore {
                         destination,
                         blake3: entry.blake3.clone().ok_or(ServerStoreError::Corrupt)?,
                         bindings,
+                        reforger_session: None,
                     },
                 );
             }

@@ -2175,8 +2175,22 @@ pub enum ServerCommand {
         receipt: u64,
         ready: u64,
     },
-    /// Host one foreground metadata owner for a captured game space until Ctrl+C.
+    /// Host one foreground owner until a shutdown signal or authenticated idle shutdown.
     Supervise(ServerSuperviseArgs),
+    /// Export a user service definition without registering or starting it.
+    Service {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerServiceCommand,
+    },
+    /// Review, publish or verify player content from the selected committed deployment.
+    Publish {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerPublishCommand,
+    },
     /// Authenticate and inspect the current foreground owner without opening Turso.
     Owner(ServerOwnerArgs),
     /// Inspect a captured game-space context without creating files or opening its database.
@@ -2203,6 +2217,27 @@ pub enum ServerCommand {
         context: ServerContextArgs,
         #[command(subcommand)]
         command: ServerMaintenanceCommand,
+    },
+    /// Plan, create, verify, pin and safely prune bounded server backups.
+    Backup {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerBackupCommand,
+    },
+    /// Review and transactionally restore compatible local server saves.
+    Restore {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerRestoreCommand,
+    },
+    /// Inspect Reforger saves and review the next launch's session selection.
+    Session {
+        #[command(flatten)]
+        context: ServerContextArgs,
+        #[command(subcommand)]
+        command: ServerSessionCommand,
     },
     /// Manage protected RCon credentials, check the owner's RCon session and send commands.
     Rcon {
@@ -2476,9 +2511,15 @@ pub struct ServerMaintenanceDefinitionArgs {
     /// Arma only: mission template to load after rotating.
     #[arg(long)]
     pub mission_template: Option<String>,
-    /// Require a successful backup before rotating missions.
+    /// Require a successful backup before rotating missions or restarting.
     #[arg(long)]
     pub require_backup: bool,
+    /// Allow best-effort live backup while the server is running (default requires stopped consistency).
+    #[arg(long, conflicts_with = "stopped_backup")]
+    pub live_backup: bool,
+    /// Require witnessed stopped consistency for backups.
+    #[arg(long, conflicts_with = "live_backup")]
+    pub stopped_backup: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2521,6 +2562,162 @@ pub struct ServerMaintenanceRunArgs {
 pub struct ServerMaintenanceCancelArgs {
     pub id: String,
     pub occurrence_id: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerBackupCommand {
+    /// Preview backup sets, consistency witness, secret exclusions and plan fingerprint.
+    Plan(ServerBackupPlanArgs),
+    /// Create a bounded verified backup archive (stopped consistency by default).
+    Create(ServerBackupCreateArgs),
+    /// List existing server backups, retention policy and corrupt/unknown counts.
+    List(ServerInstanceSelector),
+    /// Stream and verify every file checksum inside a backup archive.
+    Verify(ServerBackupVerifyArgs),
+    /// Pin an existing verified backup so automatic or manual pruning retains it.
+    Pin(ServerBackupPinArgs),
+    /// Unpin a backup under its expected retention generation.
+    Unpin(ServerBackupPinArgs),
+    /// Update per-instance backup retention limits under an expected generation.
+    Retention(ServerBackupRetentionArgs),
+    /// Preview which old backups would be pruned while keeping pinned and latest stopped snapshots.
+    PrunePlan(ServerBackupPrunePlanArgs),
+    /// Remove unpinned excess backups matching an exact reviewed prune plan. Requires --yes.
+    Prune(ServerBackupPruneArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerRestoreCommand {
+    /// Verify the full archive, compatibility, current saves and disk budget without writes.
+    Plan(ServerRestorePlanArgs),
+    /// Restore a reviewed compatible backup. Requires --yes.
+    Apply(ServerRestoreApplyArgs),
+    /// Inspect a pending restore and its exact rollback fingerprint.
+    Status(ServerInstanceSelector),
+    /// Restore preserved pre-restore bytes after an interrupted operation. Requires --yes.
+    Rollback(ServerRestoreRollbackArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerSessionCommand {
+    /// Inspect native save metadata and compatibility without changing files.
+    List(ServerInstanceSelector),
+    /// Review configured, latest, selected UUID or new session intent.
+    Plan(ServerSessionPlanArgs),
+    /// Save a reviewed next-launch intent while all writers are stopped. Requires --yes.
+    Apply(ServerSessionApplyArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ServerSessionPlanArgs {
+    pub id: String,
+    #[arg(long, value_parser = ["configured", "latest", "selected", "new"])]
+    pub mode: String,
+    #[arg(long)]
+    pub save_id: Option<String>,
+    #[arg(long)]
+    pub expected_generation: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerSessionApplyArgs {
+    pub id: String,
+    #[arg(long, value_parser = ["configured", "latest", "selected", "new"])]
+    pub mode: String,
+    #[arg(long)]
+    pub save_id: Option<String>,
+    #[arg(long)]
+    pub expected_generation: u64,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerRestorePlanArgs {
+    pub id: String,
+    #[arg(long)]
+    pub backup_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerRestoreApplyArgs {
+    pub id: String,
+    #[arg(long)]
+    pub backup_id: String,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerRestoreRollbackArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_journal_fingerprint: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerBackupPlanArgs {
+    pub id: String,
+    /// Plan an explicitly labeled best-effort live backup while the server runs.
+    #[arg(long)]
+    pub live: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerBackupCreateArgs {
+    pub id: String,
+    /// Create an explicitly labeled best-effort live backup while the server runs.
+    #[arg(long)]
+    pub live: bool,
+    /// Require the current backup plan fingerprint to match this reviewed value.
+    #[arg(long)]
+    pub expected_plan_fingerprint: Option<String>,
+    /// Skip automatic retention pruning after the new backup is verified.
+    #[arg(long)]
+    pub no_retention: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerBackupVerifyArgs {
+    pub id: String,
+    pub backup_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerBackupPinArgs {
+    pub id: String,
+    pub backup_id: String,
+    #[arg(long)]
+    pub expected_generation: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerBackupRetentionArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_generation: u64,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=128))]
+    pub keep_last: Option<u16>,
+    #[arg(long, conflicts_with = "clear_max_total_bytes")]
+    pub max_total_bytes: Option<u64>,
+    #[arg(long)]
+    pub clear_max_total_bytes: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerBackupPrunePlanArgs {
+    pub id: String,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=128))]
+    pub keep_last: Option<u16>,
+}
+
+#[derive(Args, Debug)]
+pub struct ServerBackupPruneArgs {
+    pub id: String,
+    #[arg(long)]
+    pub expected_plan_fingerprint: String,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=128))]
+    pub keep_last: Option<u16>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2755,6 +2952,60 @@ pub struct ServerOwnerArgs {
     /// Replay bounded events after this owner-generation sequence.
     #[arg(long)]
     pub events_after: Option<u64>,
+    /// Inspect the app-update barrier for all server owners in this config root.
+    #[arg(long)]
+    pub app_update_check: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerServiceCommand {
+    /// Review or save a new native-host definition; registration remains separate.
+    Export {
+        #[arg(long, value_parser = ["systemd-user", "windows-user-task"])]
+        format: Option<String>,
+        #[arg(long)]
+        executable: Option<PathBuf>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ServerPublishCommand {
+    /// Review selected player content and the output folder without writing.
+    Plan(ServerPublishArgs),
+    /// Stage and verify the reviewed output in a new folder. Requires --yes.
+    Apply {
+        #[command(flatten)]
+        inputs: ServerPublishArgs,
+        #[arg(long)]
+        expected_plan_fingerprint: String,
+    },
+    /// Check existing output against the selected deployment and options.
+    Verify {
+        #[command(flatten)]
+        inputs: ServerPublishArgs,
+        #[arg(long)]
+        expected_plan_fingerprint: Option<String>,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct ServerPublishArgs {
+    /// Server instance with a selected committed deployment record.
+    pub id: String,
+    /// Absolute destination folder outside Foxy data, installations and sources.
+    #[arg(long)]
+    pub output: PathBuf,
+    /// Name written to the Arma 3 player repository.
+    #[arg(long, default_value = "Player content")]
+    pub repository_name: String,
+    /// Explicitly include an optional Arma player profile. Repeat for more profiles.
+    #[arg(long = "recommend")]
+    pub recommendations: Vec<String>,
+    /// Include public addon keys in the selected Arma payload.
+    #[arg(long)]
+    pub include_public_keys: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2763,6 +3014,9 @@ pub struct ServerSuperviseArgs {
     pub context: ServerContextArgs,
     #[arg(long, hide = true)]
     pub parent_bound: bool,
+    /// Run the foreground Windows owner without opening a console window.
+    #[arg(long, conflicts_with_all = ["parent_bound", "detach", "shutdown", "launch_id"])]
+    pub background: bool,
     /// Keep one authenticated background owner running after this command exits (requires --yes).
     #[arg(long, conflicts_with_all = ["parent_bound", "shutdown", "launch_id"])]
     pub detach: bool,

@@ -1,7 +1,11 @@
 pub(crate) mod arma_admin;
+mod backups;
 mod maintenance;
+mod publication;
 mod rcon;
 pub(crate) mod reforger_admin;
+mod services;
+mod sessions;
 mod state;
 mod steam_auth;
 mod tasks;
@@ -22,6 +26,9 @@ impl Foxy {
         let space = spaces::active_game_space().space_id;
         match target {
             "server-new-name" => Some(egui::Id::unique(("server.new-name", space))),
+            "server-session-controls" => self.server_view.sessions.controls_focus,
+            "server-service-controls" => self.server_view.services.controls_focus,
+            "server-service-path" => Some(egui::Id::unique(("server.service-export-path", space))),
             "server-mission-import-path" => {
                 Some(egui::Id::unique(("server.mission-import-path", space)))
             }
@@ -322,6 +329,11 @@ impl Foxy {
             | ServerTaskAction::VerifyDeploymentRecord { .. }
             | ServerTaskAction::PlanDeploymentRecordSelection { .. }
             | ServerTaskAction::SelectDeploymentRecord(_) => Some(ServerTaskKind::DeploymentRecord),
+            ServerTaskAction::PlanPlayerPublication(_)
+            | ServerTaskAction::ApplyPlayerPublication(_)
+            | ServerTaskAction::VerifyPlayerPublication(_) => {
+                Some(ServerTaskKind::PlayerPublication)
+            }
             ServerTaskAction::PlanDeploymentPreparation { .. }
             | ServerTaskAction::BuildDeploymentPreparation(_)
             | ServerTaskAction::ListDeploymentPreparations(_)
@@ -331,6 +343,18 @@ impl Foxy {
             ServerTaskAction::PlanReconciliation(_) | ServerTaskAction::ApplyReconciliation(_) => {
                 Some(ServerTaskKind::Reconciliation)
             }
+            ServerTaskAction::PlanServerBackup { .. }
+            | ServerTaskAction::CreateServerBackup { .. }
+            | ServerTaskAction::VerifyServerBackup { .. }
+            | ServerTaskAction::PlanServerBackupPrune { .. }
+            | ServerTaskAction::ApplyServerBackupPrune { .. }
+            | ServerTaskAction::PlanServerRestore { .. }
+            | ServerTaskAction::LoadServerRestoreStatus(_)
+            | ServerTaskAction::ApplyServerRestore { .. }
+            | ServerTaskAction::RollbackServerRestore { .. } => Some(ServerTaskKind::Backup),
+            ServerTaskAction::LoadServerSessions(_)
+            | ServerTaskAction::PlanServerSession { .. }
+            | ServerTaskAction::ApplyServerSession { .. } => Some(ServerTaskKind::Session),
             ServerTaskAction::PlanConsumerRecovery(_)
             | ServerTaskAction::ApplyConsumerRecovery { .. } => {
                 Some(ServerTaskKind::ConsumerRecovery)
@@ -347,6 +371,16 @@ impl Foxy {
         };
         let stage_control = kind.map(|_| ContentStageControl::default());
         let selected = self.server_view.selected.clone();
+        if matches!(
+            &action,
+            ServerTaskAction::ApplyServerRestore { .. }
+                | ServerTaskAction::RollbackServerRestore { .. }
+                | ServerTaskAction::LoadServerRestoreStatus(_)
+        ) {
+            self.server_view.backups.restore_plan = None;
+            self.server_view.backups.restore_status = None;
+            self.server_view.backups.restore_outcome = None;
+        }
         if !matches!(&action, ServerTaskAction::AcquireContent(_)) {
             self.server_view.invalidate_content_acquisition_plan();
         }
@@ -428,6 +462,8 @@ impl Foxy {
             None
         } else {
             Some(match &action {
+                ServerTaskAction::PlanServiceExport
+                | ServerTaskAction::WriteServiceExport { .. } => "server-service-controls",
                 ServerTaskAction::ReviewServerKeys { .. }
                 | ServerTaskAction::ApplyServerKeys { .. } => "server-key-controls",
                 ServerTaskAction::LoadMissionLibrary
@@ -481,6 +517,11 @@ impl Foxy {
                 | ServerTaskAction::SelectDeploymentRecord(_) => {
                     "server-deployment-record-controls"
                 }
+                ServerTaskAction::PlanPlayerPublication(_)
+                | ServerTaskAction::ApplyPlayerPublication(_)
+                | ServerTaskAction::VerifyPlayerPublication(_) => {
+                    "server-player-publication-controls"
+                }
                 ServerTaskAction::PlanDeploymentPreparation { .. }
                 | ServerTaskAction::BuildDeploymentPreparation(_)
                 | ServerTaskAction::ListDeploymentPreparations(_)
@@ -492,6 +533,21 @@ impl Foxy {
                 | ServerTaskAction::SetDeploymentPin { .. }
                 | ServerTaskAction::PlanReconciliation(_)
                 | ServerTaskAction::ApplyReconciliation(_) => "server-reconciliation-controls",
+                ServerTaskAction::PlanServerBackup { .. }
+                | ServerTaskAction::CreateServerBackup { .. }
+                | ServerTaskAction::LoadServerBackups(_)
+                | ServerTaskAction::VerifyServerBackup { .. }
+                | ServerTaskAction::SetServerBackupPin { .. }
+                | ServerTaskAction::SetServerBackupRetention { .. }
+                | ServerTaskAction::PlanServerBackupPrune { .. }
+                | ServerTaskAction::ApplyServerBackupPrune { .. }
+                | ServerTaskAction::PlanServerRestore { .. }
+                | ServerTaskAction::LoadServerRestoreStatus(_)
+                | ServerTaskAction::ApplyServerRestore { .. }
+                | ServerTaskAction::RollbackServerRestore { .. } => "server-backup-controls",
+                ServerTaskAction::LoadServerSessions(_)
+                | ServerTaskAction::PlanServerSession { .. }
+                | ServerTaskAction::ApplyServerSession { .. } => "server-session-controls",
                 ServerTaskAction::PlanNativeInstall(_)
                 | ServerTaskAction::CheckNativeInstallation { .. }
                 | ServerTaskAction::ValidateNativeInstallation(_)
@@ -557,8 +613,11 @@ impl Foxy {
                         ServerTaskKind::ContentStage => "server-content-stage-cancel",
                         ServerTaskKind::Composition => "server-deployment-composition-cancel",
                         ServerTaskKind::DeploymentRecord => "server-deployment-record-cancel",
+                        ServerTaskKind::PlayerPublication => "server-player-publication-cancel",
                         ServerTaskKind::Preparation => "server-deployment-preparation-cancel",
                         ServerTaskKind::Reconciliation => "server-reconciliation-cancel",
+                        ServerTaskKind::Backup => "server-backup-cancel",
+                        ServerTaskKind::Session => "server-session-cancel",
                         ServerTaskKind::ConsumerRecovery => "server-consumer-recovery-cancel",
                         ServerTaskKind::NativeInstall => "server-native-install-cancel",
                         ServerTaskKind::Workshop => "server-workshop-cancel",
@@ -876,6 +935,8 @@ impl Foxy {
                     | ServerTaskKind::Mission
                     | ServerTaskKind::Keys
                     | ServerTaskKind::Reconciliation
+                    | ServerTaskKind::Backup
+                    | ServerTaskKind::Session
             ) {
                 ui.label(self.t_fmt(
                     "Files: {done} of {total}; bytes: {bytes} of {total_bytes}",
@@ -896,8 +957,11 @@ impl Foxy {
                     ServerTaskKind::ContentStage => "Cancel local content stage",
                     ServerTaskKind::Composition => "Cancel deployment review",
                     ServerTaskKind::DeploymentRecord => "Cancel deployment record operation",
+                    ServerTaskKind::PlayerPublication => "Cancel player publication operation",
                     ServerTaskKind::Preparation => "Cancel deployment preparation",
                     ServerTaskKind::Reconciliation => "Cancel deployment storage review",
+                    ServerTaskKind::Backup => "Cancel backup operation",
+                    ServerTaskKind::Session => "Cancel session operation",
                     ServerTaskKind::ConsumerRecovery => "Cancel consumer recovery",
                     ServerTaskKind::NativeInstall => "Cancel native installation",
                     ServerTaskKind::Workshop => "Cancel Workshop operation",
@@ -918,8 +982,11 @@ impl Foxy {
             ServerTaskKind::ContentStage => "server-content-stage-cancel",
             ServerTaskKind::Composition => "server-deployment-composition-cancel",
             ServerTaskKind::DeploymentRecord => "server-deployment-record-cancel",
+            ServerTaskKind::PlayerPublication => "server-player-publication-cancel",
             ServerTaskKind::Preparation => "server-deployment-preparation-cancel",
             ServerTaskKind::Reconciliation => "server-reconciliation-cancel",
+            ServerTaskKind::Backup => "server-backup-cancel",
+            ServerTaskKind::Session => "server-session-cancel",
             ServerTaskKind::ConsumerRecovery => "server-consumer-recovery-cancel",
             ServerTaskKind::NativeInstall => "server-native-install-cancel",
             ServerTaskKind::Workshop => "server-workshop-cancel",

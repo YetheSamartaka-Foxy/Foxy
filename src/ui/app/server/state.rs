@@ -64,6 +64,9 @@ pub(crate) enum ServerDialog {
     RollbackConfiguration,
     SelectDeploymentRecord,
     ReclaimDeploymentStorage,
+    PruneServerBackups,
+    RestoreServerBackup,
+    RollbackServerRestore,
     NativeInstall,
     AcquireWorkshop,
     Rename,
@@ -181,6 +184,10 @@ pub(crate) struct ServerViewState {
     pub deployment_pins: Option<(DeploymentPins, Vec<String>)>,
     pub reconciliation_plan: Option<Box<ReconciliationPlan>>,
     pub reconciliation_outcome: Option<ReconciliationOutcome>,
+    pub backups: super::backups::ServerBackupViewState,
+    pub sessions: super::sessions::ServerSessionsViewState,
+    pub services: super::services::ServerServiceExportViewState,
+    pub publication: super::publication::PlayerPublicationViewState,
     pub native_install_directory: String,
     pub native_install_branch: String,
     pub native_install_channel: crate::core::server::ContentChannel,
@@ -365,6 +372,9 @@ impl ServerViewState {
         self.deployment_record_commit = None;
         self.invalidate_deployment_preparation();
         self.invalidate_reconciliation();
+        self.backups.reset_for_instance();
+        self.sessions.reset_for_instance();
+        self.publication.reset();
         self.consumer_recovery_plan = None;
         self.consumer_recovery_outcome = None;
         self.consumer_recovery_confirmation = false;
@@ -473,6 +483,9 @@ impl ServerViewState {
             let target = match &result.output {
                 ServerTaskOutput::ConfigurationImportPlan(plan) => Some(&plan.report.instance_id),
                 ServerTaskOutput::InstanceStartPlan(plan) => Some(&plan.instance_id),
+                ServerTaskOutput::SessionInventory(inventory)
+                | ServerTaskOutput::SessionApplied(inventory) => Some(&inventory.instance_id),
+                ServerTaskOutput::SessionPlan(plan) => Some(&plan.instance_id),
                 ServerTaskOutput::ConsumerRecoveryPlan(plan) => Some(&plan.instance_id),
                 ServerTaskOutput::ConsumerRecoveryOutcome(outcome) => Some(&outcome.instance_id),
                 ServerTaskOutput::Maintenance(snapshot, _) => Some(&snapshot.instance_id),
@@ -674,6 +687,26 @@ impl ServerViewState {
                 self.status = Some(
                     "Redacted instance pack exported. Installation, credentials and saves were excluded.",
                 );
+                self.error = None;
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServiceExportPlan(plan),
+                ..
+            }) => {
+                self.services.ensure_space(&plan.game_space_id);
+                self.services.plan = Some(*plan);
+                self.services.exported = false;
+                self.status =
+                    Some("Service export review is ready; no definition was saved or registered.");
+                self.error = None;
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServiceExportWritten,
+                ..
+            }) => {
+                self.services.exported = true;
+                self.status =
+                    Some("Definition saved. Registration is separate; no server was started.");
                 self.error = None;
             }
             Ok(ServerTaskResult {
@@ -929,6 +962,14 @@ impl ServerViewState {
                 output: ServerTaskOutput::DeploymentRecordCommit(commit),
                 ..
             }) => {
+                if self
+                    .deployment_record_state
+                    .as_ref()
+                    .is_some_and(|state| state.selected != commit.state.selected)
+                {
+                    self.publication.plan = None;
+                    self.publication.outcome = None;
+                }
                 self.deployment_record_state = Some(commit.state.clone());
                 self.deployment_record_inspection_selection = Some(commit.record.record_id.clone());
                 self.deployment_record_verification = Some(commit.record.clone());
@@ -942,6 +983,14 @@ impl ServerViewState {
                 output: ServerTaskOutput::DeploymentRecordState(state),
                 ..
             }) => {
+                if self
+                    .deployment_record_state
+                    .as_ref()
+                    .is_some_and(|previous| previous.selected != state.selected)
+                {
+                    self.publication.plan = None;
+                    self.publication.outcome = None;
+                }
                 self.deployment_record_inspection_selection = None;
                 self.deployment_record_state = Some(state);
                 self.deployment_record_plan = None;
@@ -959,6 +1008,24 @@ impl ServerViewState {
                 self.deployment_record_plan = None;
                 self.error = None;
                 self.status = Some("Deployment record verification completed.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::PlayerPublicationPlan(plan),
+                ..
+            }) => {
+                self.publication.plan = Some(*plan);
+                self.publication.outcome = None;
+                self.publication.arma_permission = false;
+                self.error = None;
+                self.status = Some("Player publication plan is ready for review.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::PlayerPublicationOutcome(outcome),
+                ..
+            }) => {
+                self.publication.outcome = Some(outcome);
+                self.error = None;
+                self.status = Some("Player publication operation completed.");
             }
             Ok(ServerTaskResult {
                 output: ServerTaskOutput::DeploymentPreparationPlan(plan),
@@ -1358,6 +1425,151 @@ impl ServerViewState {
                 self.error = None;
                 self.status =
                     Some("Scenario listing updated. The selected scenario was not changed.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServerRestorePlan(plan),
+                ..
+            }) => {
+                self.backups.restore_plan = Some(plan);
+                self.backups.restore_outcome = None;
+                self.error = None;
+                self.status = Some("Server restore review is ready; no files were written.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::SessionInventory(inventory),
+                ..
+            })
+            | Ok(ServerTaskResult {
+                output: ServerTaskOutput::SessionApplied(inventory),
+                ..
+            }) => {
+                use crate::core::server::ReforgerSessionIntent;
+                self.sessions.mode = match &inventory.intent {
+                    ReforgerSessionIntent::Configured => "configured",
+                    ReforgerSessionIntent::Latest => "latest",
+                    ReforgerSessionIntent::Selected { .. } => "selected",
+                    ReforgerSessionIntent::New => "new",
+                }
+                .into();
+                self.sessions.save_id = match &inventory.intent {
+                    ReforgerSessionIntent::Selected { save_id } => save_id.clone(),
+                    _ => String::new(),
+                };
+                self.sessions.inventory = Some(inventory);
+                self.sessions.plan = None;
+                self.sessions.confirmation = false;
+                self.lifecycle_plan = None;
+                self.error = None;
+                self.status = Some("Session inventory and next-launch intent loaded.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::SessionPlan(plan),
+                ..
+            }) => {
+                self.sessions.plan = Some(plan);
+                self.sessions.confirmation = false;
+                self.error = None;
+                self.status = Some("Session intent review is ready; no files were written.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServerRestoreStatus(status),
+                ..
+            }) => {
+                self.backups.restore_status = Some(status);
+                self.error = None;
+                self.status = Some("Server restore recovery status loaded.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServerRestoreOutcome(outcome, listing, status),
+                ..
+            }) => {
+                self.status = Some(if outcome.rolled_back {
+                    "Interrupted server restore rolled back."
+                } else {
+                    "Server backup restored and verified."
+                });
+                self.backups.restore_outcome = Some(outcome);
+                self.backups.restore_status = Some(status);
+                self.backups.restore_plan = None;
+                self.backups.plan = None;
+                self.backups.prune_plan = None;
+                self.backups.listing = Some(listing);
+                self.error = None;
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServerBackupPlan(plan),
+                ..
+            }) => {
+                self.backups.plan = Some(plan);
+                self.backups.outcome = None;
+                self.error = None;
+                self.status = Some("Server backup review is ready; no files were written.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServerBackupOutcome(outcome, listing),
+                ..
+            }) => {
+                self.backups.selection = Some(outcome.manifest.backup_id.clone());
+                self.backups.outcome = Some(outcome);
+                self.backups.plan = None;
+                self.backups.prune_plan = None;
+                self.backups.prune_outcome = None;
+                self.backups.listing = Some(listing);
+                self.error = None;
+                self.status = Some("Verified server backup created.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServerBackupListing(listing),
+                ..
+            }) => {
+                self.backups.sync_retention_inputs(&listing);
+                if self.backups.selection.as_deref().is_some_and(|selected| {
+                    !listing
+                        .backups
+                        .iter()
+                        .any(|item| item.backup_id == selected)
+                }) {
+                    self.backups.selection = None;
+                }
+                self.backups.listing = Some(listing);
+                self.error = None;
+                self.status = Some("Server backup inventory and retention loaded.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServerBackupVerification(report),
+                ..
+            }) => {
+                self.backups.verification = Some(report);
+                self.error = None;
+                self.status = Some("Server backup verification passed.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServerBackupPrunePlan(plan),
+                ..
+            }) => {
+                self.backups.prune_plan = Some(plan);
+                self.backups.prune_outcome = None;
+                self.error = None;
+                self.status = Some("Server backup prune review is ready; nothing was deleted.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ServerBackupPruneOutcome(outcome, listing),
+                ..
+            }) => {
+                self.backups.sync_retention_inputs(&listing);
+                if self.backups.selection.as_deref().is_some_and(|selected| {
+                    !listing
+                        .backups
+                        .iter()
+                        .any(|item| item.backup_id == selected)
+                }) {
+                    self.backups.selection = None;
+                }
+                self.backups.prune_outcome = Some(outcome);
+                self.backups.prune_plan = None;
+                self.backups.listing = Some(listing);
+                self.error = None;
+                self.status = Some("Reviewed server backups were pruned.");
             }
             Err(error) => self.error = Some(error),
         }

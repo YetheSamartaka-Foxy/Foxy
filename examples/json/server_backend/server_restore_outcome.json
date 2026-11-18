@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "game_space_id": "arma3",
+  "game_id": "arma3",
+  "restore_id": "restore_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "instance_id": "server_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "backup_id": "backup_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "plan_fingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "restored_files": 2,
+  "restored_bytes": 512,
+  "rolled_back": false,
+  "writes_performed": true
+}

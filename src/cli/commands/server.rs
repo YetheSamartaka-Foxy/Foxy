@@ -1,5 +1,6 @@
 use super::{CommandError, CommandSuccess};
 mod arma_admin;
+mod backup;
 mod configuration_transfer;
 mod configurations;
 mod consumer_recovery;
@@ -20,11 +21,15 @@ mod maintenance;
 mod missions;
 mod native_install;
 mod owner_control;
+mod publish;
 mod rcon;
 mod reconciliation;
 mod reforger_addons;
 mod reforger_admin;
 mod reforger_configuration;
+mod restore;
+mod services;
+mod sessions;
 mod steam_auth;
 mod workshop;
 
@@ -51,6 +56,8 @@ pub fn run_server_command(
             "Cleanup witnessing requires explicitly inherited native authority",
         )),
         ServerCommand::Supervise(args) => owner_control::supervise(cli, args),
+        ServerCommand::Service { context, command } => services::run(cli, context, command),
+        ServerCommand::Publish { context, command } => publish::run(cli, context, command),
         ServerCommand::Owner(args) => {
             let context = instances::capture(args.context, "server.owner")?;
             let owner = crate::core::server::owner::attach(&context)
@@ -72,7 +79,10 @@ pub fn run_server_command(
             Ok(CommandSuccess {
                 action: "server.owner".into(),
                 message: "Authenticated owner; Turso was not opened by this client.".into(),
-                data: json!({"owner":snapshot,"events":replay,"database_opened":false}),
+                data: json!({
+                    "owner":snapshot,"events":replay,"database_opened":false,
+                    "app_update_blocked": args.app_update_check.then(|| !crate::core::server::owner::update_blockers(context.data_root()).is_empty()),
+                }),
                 exit_code: exit_codes::SUCCESS,
             })
         }
@@ -106,6 +116,9 @@ pub fn run_server_command(
         ServerCommand::Workshop { context, command } => workshop::run(cli, context, command),
         ServerCommand::Headless { context, command } => headless::run(cli, context, command),
         ServerCommand::Maintenance { context, command } => maintenance::run(cli, context, command),
+        ServerCommand::Backup { context, command } => backup::run(cli, context, command),
+        ServerCommand::Restore { context, command } => restore::run(cli, context, command),
+        ServerCommand::Session { context, command } => sessions::run(cli, context, command),
         ServerCommand::Rcon { context, command } => rcon::run(cli, context, command),
         ServerCommand::Admin { context, command } => arma_admin::run(cli, context, command),
         ServerCommand::ReforgerAdmin { context, command } => {

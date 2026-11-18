@@ -503,6 +503,40 @@ Native acceptance passed on Windows and ordinary-user WSL2/Linux for the tested 
 
 Managed lifecycle acceptance passed on Windows and ordinary-user WSL2/Linux with the same layout. Before the server answered its query port, both HCs waited with no process. Each then started automatically, the second after its 5-second delay, and both joined. Stopping one HC left it stopped for 15 seconds, without a restart, while the other stayed joined and only its registration remained. An explicit start and an individual restart each rejoined with a new process. After unexpected engine exits, an HC restarted after about 5 and then 10 seconds. A third exit within the window suspended it, and nothing started for the next 30 seconds. A server restart brought both HCs back once each with fresh budgets. A graceful stop then left no registration and no process.
 
+### Player content publication
+
+Select a saved instance and a committed deployment record. **Player content publication** reviews that record's exact configuration and content archives. The record ID identifies the source of the export, even when the running activation or current draft differs. Choose an absolute output folder with an existing parent, outside Foxy data, installations and recorded content sources. Publishing accepts a new folder. Verification can inspect an existing folder.
+
+For Arma 3, Required bindings become Shared player addons. Select any Optional profile you want to recommend, then plan again. Recommendations are disabled by default in the generated Foxy manifest. Server-only bindings stay excluded, including when a headless client uses them. The copy includes PBO files and signature files at the addon root or in its `addons` directory. Public addon keys at the addon root or in its `keys` directory require an explicit option. Configuration, additional folders such as `userconfig` and `optionals`, private signing keys, mission archives and save state stay outside the publication. Confirm permission to redistribute the selected addon payloads before publishing. The generated `server_mod_line.txt` describes the Shared set.
+
+For Reforger, the review reports the committed scenario, its provider when available, the realized version of each addon and dependency, and omitted optional IDs. The output is `reforger_addons.json`, a `game.mods` fragment with pinned references for the realized set. Workshop and local content are represented by references. Players need access to their respective providers. Full instance JSON uses the separate configuration export, and the standalone publisher's `export-reforger-config` still produces its existing repository-derived fragment. [Pinned addon fragment example](../examples/json/server_backend/reforger_player_addons.json)
+
+```text
+foxy server publish plan <instance> --game-space <space> --output <absolute-folder> --json
+foxy server publish apply <instance> --game-space <space> --output <absolute-folder> --expected-plan-fingerprint <fingerprint> --yes
+foxy server publish verify <instance> --game-space <space> --output <absolute-folder>
+```
+
+Use the same options during apply and verification. For Arma 3 use `--recommend <profile>` once per optional profile, `--include-public-keys` if needed, and `--repository-name` to change the name. On apply, `--yes` confirms distribution permission for the reviewed bytes. Apply with `--dry-run` shows the current plan without creating any files. Verification accepts an optional `--expected-plan-fingerprint` to require the same selection. The publisher generates into a sibling staging folder, checks the exact file set and payloads, then promotes the verified output in one operation. An existing destination is preserved. Operations are local and do not upload or start a server.
+
+### Unattended owner exports
+
+Open **Unattended owner export** in Server mode, choose **Preview export**, and save the definition to a new file. The export pins the executable, config root and game space. Register the definition separately under the account that owns that config root and its prepared credentials. Starting the owner makes the usual authenticated Start, Stop, reconnect and maintenance operations available. Start each reviewed server instance explicitly.
+
+```text
+foxy --config-dir <root> server service export --game-space <space>
+foxy --config-dir <root> server service export --game-space <space> --output <new-file>
+foxy --config-dir <root> server owner --game-space <space> --app-update-check --json
+```
+
+Omit `--output` or use `--dry-run` to review without writing. Use `--json` for the complete definition, fingerprint and arguments. `--executable` points to an existing Foxy binary if the service should use a different installation. The format defaults to the host, or select `--format systemd-user` on Linux or `--format windows-user-task` on Windows. Exporting leaves existing destinations intact.
+
+On Linux, place the reviewed unit in the service account's `~/.config/systemd/user/` directory under a distinct `.service` name, then reload and start it with `systemctl --user`. Enable the unit and configure lingering for that account if it should start before login. The unit runs the foreground owner without display or desktop session bus variables. Use `journalctl --user -u <unit>` for owner output and Foxy's monitoring view or `server instance logs` for game logs. `systemctl --user stop <unit>` sends SIGTERM to the owner first. Foxy waits for each server's headless clients before stopping that server. The owner allows up to five seconds for graceful game exits before force cleanup. The unit allows up to 15 minutes for the full drain, including in-flight metadata work. A forced exit leaves save durability uncertain. [systemd stop policy](https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html)
+
+On Windows, import the XML into Task Scheduler under the intended logged-in user and run the task on demand. It runs at least privilege and uses `server supervise --background` to suppress the console window. Stop instances through Foxy first, then run `server supervise --shutdown --yes` for that game space and wait for release. Use Foxy's normal logs and per-instance monitoring for diagnostics. Windows Task Scheduler requires an interactive logon for this definition. [Task Scheduler security contexts](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks)
+
+Prepare Steam and RCon credentials for the exact account and config scope before unattended use. Foxy keeps credential values in protected storage and resolves them at use. On Windows the account must have access to its DPAPI records. On Linux those records are persistent files with owner-only permissions. Wait for all foreground service owners and detached owners to release their game spaces before installing a Foxy update, even when their servers are stopped. Use the service manager to stop a systemd owner and the authenticated idle shutdown command to stop a Windows background owner.
+
 ### Scheduled server maintenance
 
 Arma 3 and Reforger instances can carry up to16 maintenance jobs. A job has a name, an action, a one-time or weekly schedule in local time or UTC, and a policy. Jobs run only inside the server owner for the game space, the same owner that runs lifecycle commands. Foxy never installs an OS service or task. Without a running owner nothing runs, and a scheduled time missed by more than the grace window is recorded as skipped instead of running late.
@@ -529,9 +563,9 @@ foxy server maintenance history <instance-id> --game-space arma3 --json
 | `--retry-delay-seconds N` | 60 | Wait between attempts, 10-3600 |
 | `--stop-timeout-seconds N` | 60 | Graceful stop timeout of each restart, 5-120 |
 
-`restart` runs through the reviewed start plan and never starts a stopped server. On Reforger, `reload-scenario` uses the native same-process scenario reload operation; it does not stop and relaunch the process. Arma alone supports `rotate-mission`. `update` and `backup` can be saved, but every occurrence is `blocked` with `adapter_unavailable` until those adapters exist; update an installation explicitly.
+`restart` runs through the reviewed start plan and never starts a stopped server. On Reforger, `reload-scenario` uses the native same-process scenario reload operation; it does not stop and relaunch the process. Arma alone supports `rotate-mission`. `backup` creates bounded verified backups (defaulting to witnessed stopped consistency when offline, automatically taking a stopped backup between stop and start on `restart --require-backup`, or running live only when `--live-backup` is configured). Unattended `update` jobs remain `blocked` with `adapter_unavailable`; update installations explicitly.
 
-Each occurrence is a durable record under the instance's `maintenance/occurrences/`, claimed exactly once from a deterministic id, so a second owner or a repeated tick cannot run the same scheduled time twice. Its state is `claimed`, `deferred`, `running`, `retry_wait`, `succeeded`, `failed`, `skipped`, `blocked`, `cancelled` or `unknown`, with a reason and the run generations before and after. The record is written as `running` before the restart starts. If the owner ends during an occurrence, the next owner records it as `unknown` with `owner_lost` and never repeats it: the server may or may not have restarted. Review the server status and, after a crash, the consumer recovery below. A scheduled time that comes while another occurrence of the same job is still open is recorded as `skipped` with `overlapping_occurrence`, so a manual run just before the schedule does not restart twice. An occurrence that waits behind another one longer than its grace and deferral allowance is skipped as missed. The 64 most recent finished occurrences are kept, plus each job's latest scheduled record, so a pruned record can never let a scheduled time run again. `history` lists records newest first and counts unreadable records without touching them.
+Each occurrence is a durable record under the instance's `maintenance/occurrences/`, claimed exactly once from a deterministic id, so a second owner or a repeated tick cannot run the same scheduled time twice. Its state is `claimed`, `deferred`, `running`, `retry_wait`, `succeeded`, `failed`, `skipped`, `blocked`, `cancelled` or `unknown`, with a reason, run generations before/after, and `backup_id`/`backup_consistency` when a backup was created. The record is written as `running` before execution starts. If the owner ends during an occurrence, the next owner records it as `unknown` with `owner_lost` and never repeats it: the server may or may not have restarted. Review the server status and, after a crash, the consumer recovery below. A scheduled time that comes while another occurrence of the same job is still open is recorded as `skipped` with `overlapping_occurrence`, so a manual run just before the schedule does not restart twice. An occurrence that waits behind another one longer than its grace and deferral allowance is skipped as missed. The 64 most recent finished occurrences are kept, plus each job's latest scheduled record, so a pruned record can never let a scheduled time run again. `history` lists records newest first and counts unreadable records without touching them.
 
 `run` records a manual occurrence for the job's current policy revision; a stale revision is refused. While the job already has an open occurrence, `run` returns that occurrence instead of recording a second one (`created: false`). `cancel` cancels a waiting occurrence, or an active restart at its next cancellation point; a restart that already stopped the server can leave it stopped. Both need `--yes` and an existing owner; their dry runs contact no owner. Validation errors use exit code 2; a missing owner or a refused request uses 4.
 
@@ -539,7 +573,54 @@ The desktop **Scheduled maintenance** section lists each job with its schedule, 
 
 The [job catalog example](../examples/json/server_backend/server_scheduled_jobs.json) and [occurrence example](../examples/json/server_backend/server_scheduled_occurrence.json) use synthetic ids.
 
-Native acceptance passed on Windows and ordinary-user WSL2/Linux for the tested Arma and Reforger layouts. A one-time scheduled restart ran exactly once and replaced the run, a backup job at the same time was blocked, a repeated manual run returned the same open occurrence, and a queued occurrence was cancelled without restarting the server. Killing the owner during a restart left the occurrence `unknown` with `owner_lost`, and the replacement owner did not repeat it. A scheduled restart after an operator stop was skipped and the server stayed stopped. This is not broad platform release evidence.
+Native acceptance passed on Windows and ordinary-user WSL2/Linux for the tested Arma and Reforger layouts. A one-time scheduled restart ran exactly once and replaced the run, a scheduled `backup` job verified stopped consistency and recorded a verifiable `backup_id`, a repeated manual run returned the same open occurrence, and a queued occurrence was cancelled without restarting the server. Killing the owner during a restart left the occurrence `unknown` with `owner_lost`, and the replacement owner did not repeat it. A scheduled restart after an operator stop was skipped and the server stayed stopped. This is not broad platform release evidence.
+
+### Consistent server backups and retention
+
+Arma 3 and Reforger instances support bounded, self-verifying ZIP backups under `games/<space_id>/server/instances/<id>/backups/<backup_id>/` (`manifest.json`, `archive.zip`) with retention state in `retention.json` and prune receipts in `prune-receipts/prune_<hash>.json`. Each backup records explicit consistency (`stopped_verified` by default, witnessing an inactive owner, zero active consumers, clear `cleanup_verified` and no pending activation journal, or explicit `best_effort_live` with `--live` / `--live-backup`) alongside five mapped coverage sets: owned engine references, redacted configuration metadata plus canonical secret-reference count, deployment/content metadata, persistence provider coverage (`covered_providers` / `uncovered_providers`), and save/profile files (`deployments/runtime-state/home/profiles/**`, `home/config/**`, `headless/*/home/**`). Plaintext secrets and credentials (`home/private-configuration/**`, `home/battleye/**`, `beserver*.cfg`, `ownerToken.bin`, `headless/*/join.par`) and transient caches/downloads (`home/data/**`, `home/cache/**`, `home/runtime/**`, `monitoring/**`, `run_*.log`) are excluded before planning or zipping. Limits bound archives to 4096 files, 64 MiB per file, 256 MiB uncompressed total and 256 stored backups per instance.
+
+```text
+foxy server backup plan <instance-id> [--live] --game-space arma3 --json
+foxy server backup create <instance-id> [--live] [--expected-plan-fingerprint <hex>] [--no-retention] --game-space arma3 --json
+foxy server backup list <instance-id> --game-space arma3 --json
+foxy server backup verify <instance-id> <backup-id> --game-space arma3 --json
+foxy server backup pin <instance-id> <backup-id> --expected-generation <n> --game-space arma3 --json
+foxy server backup unpin <instance-id> <backup-id> --expected-generation <n> --game-space arma3 --json
+foxy server backup retention <instance-id> --expected-generation <n> [--keep-last <n>] [--max-total-bytes <bytes> | --clear-max-total-bytes] --game-space arma3 --json
+foxy server backup prune-plan <instance-id> [--keep-last <n>] --game-space arma3 --json
+foxy server backup prune <instance-id> --expected-plan-fingerprint <hex> [--keep-last <n>] --game-space arma3 --yes --json
+```
+
+`retention.json` defaults to keeping the newest 5 unpinned backups, and retention/pruning always protect pinned backups, the newest verified `stopped_verified` backup, corrupt entries and unrecognized entries. See the synthetic [server backup manifest example](../examples/json/server_backend/server_backup_manifest.json). None of these commands opens Turso (`database_opened: false`); when an owner is running, writes execute through supervisor protocol 14 (`CreateServerBackup`/`PruneServerBackups`/`RestoreServerBackup`).
+
+### Verified local save restore
+
+Restore is limited to backed-up local save/profile files. It verifies and stages the complete bounded archive before changing any destination, then requires the selected game space and instance plus retained engine/build/channel, deployment receipt, configuration, content and provider identities to match. Referenced engine payloads must already exist. Managed-installation backups record optional `engine_set.channel` and `engine_set.installation_receipt_digest`; older archives missing those proofs remain inspectable but cannot restore onto a managed target. Adopted installations have no vendor channel claim; their exact executable and runtime fingerprints bind identity. A matching historical runtime may be reselected before review. Catalog revision/name and selection generations may differ, but the actual instance definition, immutable configuration/content and runtime identity must match. Restore does not download engine files, convert save formats, restore session selection, plaintext secrets or ownership state, or touch unrecognized files. Best-effort live backups are not eligible for verified restore; use a stopped-verified backup. External providers remain outside this restore coverage.
+
+Reforger backups made before local save collection was included may not contain the hidden `.save` files. Archives without `provider_set.reforger_save_tree_version=1` remain inspectable, but verified restore is blocked; create a new stopped-verified backup to include the recognized local save tree.
+
+### Reforger session save inventory and next-launch intent
+
+For supported Reforger instances, the **Sessions** section inventories recognized local save points and their UUID, scenario, game version, playthrough/save-point numbers, timestamp, size and compatibility diagnostics. Refresh reads the configured profile save roots; it does not parse or rewrite save payloads. Inventory generation and fingerprint bind a review to the observed save set.
+
+Choose one next-launch intent: **configured** follows the server configuration, **latest** selects the latest metadata-compatible save, **selected** names one compatible save UUID, or **new** requests a fresh session while retaining saved history. Plan against the current inventory generation, inspect blockers and fingerprint, then confirm the intent. This only records what a later Start should request; it does not start, stop or save the running server. It does not convert game save formats, guarantee the engine accepts a save, restore session selection, or recover custom/external provider state. Shared or unrecognized provider configurations block automatic selection and verified backups. Configured leaves custom-provider configuration unchanged and permits its ordinary launch without claiming provider coverage. A save's metadata compatibility is not proof of successful native loading.
+
+```text
+foxy server session list <instance-id> --game-space reforger --json
+foxy server session plan <instance-id> --mode configured|latest|selected|new --expected-generation <n> [--save-id <uuid>] --game-space reforger --json
+foxy server session apply <instance-id> --mode configured|latest|selected|new --expected-generation <n> --expected-plan-fingerprint <hex> [--save-id <uuid>] --game-space reforger --yes --json
+```
+
+Apply requires the exact generation and plan fingerprint plus `--yes`. `--dry-run` validates the same review without changing intent or creating an owner. These commands do not open Turso.
+
+```text
+foxy server restore plan <instance-id> --backup-id <backup-id> --game-space arma3 --json
+foxy server restore apply <instance-id> --backup-id <backup-id> --expected-plan-fingerprint <hex> --game-space arma3 --yes --json
+foxy server restore status <instance-id> --game-space arma3 --json
+foxy server restore rollback <instance-id> --expected-journal-fingerprint <hex> --game-space arma3 --yes --json
+```
+
+Plan is write-free. Apply requires the plan fingerprint and `--yes`; `--dry-run` needs no `--yes`, creates no owner claim, and writes nothing. The journal is `deployments/restore/journal.json`; its transaction data is under `deployments/restore/restore_<hash>/{archive.zip,manifest.json,validated/,before/}`, with completion receipts under `deployments/restore/receipts/restore_<hash>.json`. Each strict schema-v1 receipt is scoped to its game space, game and instance. Recovery and cleanup remove only exact transaction-owned files and preserve unknown entries. While recovery is pending, status exposes the journal and activation, Start and new backups are blocked. Rollback requires its current journal fingerprint, and refuses to overwrite destinations changed by an unknown writer. These commands report `database_opened: false`. Restore does not convert game save formats, restore session selection, or recover external-provider persistence.
 
 ### Server RCon
 
@@ -562,7 +643,7 @@ foxy server admin mission <instance-id> --template mission_alpha.vr --expected-r
 
 Arma maintenance jobs can select `--action rotate-mission --mission-template mission_alpha.vr` or keep `--action restart`. Optional `--announcement "text" --announcement-delay-seconds 30` sends one recorded notice before downtime. Cancel during that delay keeps the current server running; a sent notice remains in history. Require-empty policy is checked again after the delay. Rotation requires a new native mission identity and a subsequent fresh query before success. An unconfirmed effect is never repeated automatically.
 
-Arma Stop and Restart drain managed HCs before a recorded RCon `#shutdown`, then await the retained process tree. A missing acknowledgement never causes another shutdown command; a proven pre-send failure may use native graceful stop. Force remains explicit. Restart keeps operator-stopped HC intent. Key/content changes retain the existing reviewed acquisition, immutable stage, preparation, activation and physical-consumer gates. Jobs never rewrite live or adopted files. `--require-backup` blocks while the consistent-backup adapter is unavailable; unattended update and backup actions remain unavailable, and shutdown makes no save guarantee.
+Arma Stop and Restart drain managed HCs before a recorded RCon `#shutdown`, then await the retained process tree. A missing acknowledgement never causes another shutdown command; a proven pre-send failure may use native graceful stop. Force remains explicit. Restart keeps operator-stopped HC intent. Key/content changes retain the existing reviewed acquisition, immutable stage, preparation, activation and physical-consumer gates. Jobs never rewrite live or adopted files. `--require-backup` runs a verified stopped-consistent backup between stop and start on `restart`, or a live backup on `rotate-mission` when `--live-backup` is enabled (omitting `--live-backup` on `rotate-mission --require-backup` blocks explicitly). Unattended `update` jobs remain unavailable.
 
 #### Shared RCon configuration and raw commands
 

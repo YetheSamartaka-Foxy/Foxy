@@ -1,5 +1,9 @@
 # Examples conventions
 
+`examples/json/server_backend/reforger_player_addons.json` represents the player-facing `game.mods` fragment with realized versions. It is distinct from full instance configuration and includes no provider paths, desired omissions or runtime settings.
+
+- `reforger_session_metadata.json` is sanitized native 1.9.0.37 savepoint metadata. `m_Id` supplies session identity; directories and WorldState blob names do not. Empty addon metadata is the validated initial format. Unknown or incompatible formats stay opaque. Reforger backup provider metadata optionally carries `reforger_save_tree_version=1` to identify complete hidden profile save-tree collection; its absence blocks verified Reforger restore without invalidating historical archive inspection.
+
 - `server_arma_administration_command.json` illustrates a strict typed Arma command with synthetic target identity. `server_arma_maintenance_jobs.json` adds optional Arma announcement/rotation/backup policy to schema-v1 jobs; older jobs without `policy.arma` remain valid. These examples authorize no live operation.
 
 - `examples/json/server_backend/server_consumer_cleanup_receipt.json` is a strict v1 cleanup receipt containing a context-bound v2 consumer with a valid canonical synthetic hash. `server_consumer_recovery_plan.json` illustrates reviewed eligible and retained legacy records. All identities and plan fingerprints are synthetic and grant no recovery authority. The existing v1 consumer example remains legacy-readable.
@@ -14,6 +18,8 @@
   - `examples/json/server_backend/arma3_headless_clients.json` (typed Arma draft with enabled, explicit-selection and disabled headless clients and their lifecycle policies, plus the frozen `headless_clients` entries a committed native runtime manifest carries; ids, sources and mods are placeholders)
   - `examples/json/server_backend/reforger_scenario_end.json` (tagged Reforger scenario-end policy values; reference only)
   - `examples/json/server_backend/server_reforger_maintenance_jobs.json` (synthetic disabled recurring Reforger scenario reload job)
+  - `examples/json/server_backend/server_backup_manifest.json` (synthetic schema-v1 consistent server backup manifest illustrating the 5 coverage sets, redacted secret references, excluded secret paths and verified entry hashes; reference only)
+  - `examples/json/server_backend/server_restore_outcome.json` (synthetic server restore outcome with placeholder identities/fingerprint; reference only)
   - `examples/json/server_backend/arma3_headless_status.json` (owner-observed per-HC status as carried in `MonitoringSnapshot.headless` and printed by `server headless status` in `data.clients`: running and joined, restart-suspended after exhausting its budget, and a manual-start client; ids and times are placeholders)
   - `examples/json/appdata/` (`app_settings.json`, `games.json`, `window_state.json`)
   - `examples/json/appdata/games/arma3/` (`game_settings.json`, `repositories.json`, `repository_spaces.json`, `repository_visual_folders.json`, `extra_files.json`, `workshop.json`)

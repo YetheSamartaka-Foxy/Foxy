@@ -15,6 +15,7 @@ use crate::core::server::{
     DeploymentRecordVerification, DeploymentResolutionReview, DraftChange,
     InstallationBuildObservation, NativeInstallOutcome, NativeInstallPlan, NativeInstallRequest,
     NativeInstallationCheck, NativeInstallationValidation, NativeMaintenanceAction,
+    PlayerPublicationOutcome, PlayerPublicationPlan, PlayerPublicationRequest,
     ReconciliationOutcome, ReconciliationPlan, ServerCatalog, ServerContext, ServerInstallation,
     ServerInstanceId, ServerStore, ServerStoreError, WorkshopOutcome, WorkshopPlan,
     WorkshopRequest, WorkshopSnapshot, WorkshopVerification,
@@ -57,6 +58,11 @@ pub(crate) struct ServerTaskResult {
 }
 
 pub(crate) enum ServerTaskAction {
+    PlanServiceExport,
+    WriteServiceExport {
+        plan: crate::core::server::ServiceExportPlan,
+        path: PathBuf,
+    },
     ReviewServerKeys {
         id: ServerInstanceId,
         stage_id: Option<String>,
@@ -200,6 +206,9 @@ pub(crate) enum ServerTaskAction {
         expected_generation: u64,
     },
     SelectDeploymentRecord(Box<DeploymentRecordSelectionPlan>),
+    PlanPlayerPublication(PlayerPublicationRequest),
+    ApplyPlayerPublication(Box<PlayerPublicationPlan>),
+    VerifyPlayerPublication(Box<PlayerPublicationPlan>),
     PlanDeploymentPreparation {
         id: ServerInstanceId,
         expected_generation: u64,
@@ -296,9 +305,68 @@ pub(crate) enum ServerTaskAction {
         command: crate::core::server::rcon::reforger::ReforgerAdminCommand,
         timeout_ms: u32,
     },
+    PlanServerBackup {
+        id: ServerInstanceId,
+        mode: crate::core::server::BackupConsistencyMode,
+    },
+    CreateServerBackup {
+        id: ServerInstanceId,
+        mode: crate::core::server::BackupConsistencyMode,
+        expected_plan_fingerprint: String,
+    },
+    LoadServerBackups(ServerInstanceId),
+    VerifyServerBackup {
+        id: ServerInstanceId,
+        backup_id: String,
+    },
+    SetServerBackupPin {
+        id: ServerInstanceId,
+        backup_id: String,
+        pinned: bool,
+        expected_generation: u64,
+    },
+    SetServerBackupRetention {
+        id: ServerInstanceId,
+        policy: crate::core::server::BackupRetentionPolicy,
+        expected_generation: u64,
+    },
+    PlanServerBackupPrune {
+        id: ServerInstanceId,
+        keep_last_override: Option<u16>,
+    },
+    ApplyServerBackupPrune {
+        id: ServerInstanceId,
+        expected_plan_fingerprint: String,
+        keep_last_override: Option<u16>,
+    },
+    PlanServerRestore {
+        id: ServerInstanceId,
+        backup_id: String,
+    },
+    LoadServerRestoreStatus(ServerInstanceId),
+    ApplyServerRestore {
+        id: ServerInstanceId,
+        backup_id: String,
+        expected_plan_fingerprint: String,
+    },
+    RollbackServerRestore {
+        id: ServerInstanceId,
+        expected_journal_fingerprint: String,
+    },
+    LoadServerSessions(ServerInstanceId),
+    PlanServerSession {
+        id: ServerInstanceId,
+        intent: crate::core::server::ReforgerSessionIntent,
+        expected_generation: u64,
+    },
+    ApplyServerSession {
+        plan: Box<crate::core::server::ReforgerSessionPlan>,
+    },
 }
 
 pub(crate) enum ServerTaskOutput {
+    ServiceExportPlan(Box<crate::core::server::ServiceExportPlan>),
+    ServiceExportWritten,
     ServerKeys(Box<crate::core::server::ServerKeyReview>),
     MissionLibrary(Box<crate::core::server::MissionLibrarySnapshot>),
     MissionImportPlan(Box<crate::core::server::MissionImportPlan>),
@@ -356,6 +424,8 @@ pub(crate) enum ServerTaskOutput {
     DeploymentRecordState(DeploymentRecordState),
     DeploymentRecordVerification(DeploymentRecordVerification),
     DeploymentRecordSelectionPlan(Box<DeploymentRecordSelectionPlan>),
+    PlayerPublicationPlan(Box<PlayerPublicationPlan>),
+    PlayerPublicationOutcome(PlayerPublicationOutcome),
     DeploymentPreparationPlan(Box<DeploymentPreparationPlan>),
     DeploymentPreparationList(DeploymentPreparationList),
     DeploymentPreparationReport(DeploymentPreparationReport),
@@ -385,6 +455,28 @@ pub(crate) enum ServerTaskOutput {
         Option<super::rcon::RconNotice>,
         Option<Box<crate::core::server::rcon::RconCommandRecord>>,
     ),
+    ServerBackupPlan(Box<crate::core::server::ServerBackupPlan>),
+    SessionInventory(Box<crate::core::server::ReforgerSessionInventory>),
+    SessionPlan(Box<crate::core::server::ReforgerSessionPlan>),
+    SessionApplied(Box<crate::core::server::ReforgerSessionInventory>),
+    ServerBackupOutcome(
+        Box<crate::core::server::ServerBackupOutcome>,
+        Box<crate::core::server::ServerBackupListing>,
+    ),
+    ServerBackupListing(Box<crate::core::server::ServerBackupListing>),
+    ServerBackupVerification(Box<crate::core::server::ServerBackupVerificationReport>),
+    ServerBackupPrunePlan(Box<crate::core::server::BackupPrunePlan>),
+    ServerBackupPruneOutcome(
+        Box<crate::core::server::BackupPruneOutcome>,
+        Box<crate::core::server::ServerBackupListing>,
+    ),
+    ServerRestorePlan(Box<crate::core::server::ServerRestorePlan>),
+    ServerRestoreStatus(crate::core::server::ServerRestoreStatus),
+    ServerRestoreOutcome(
+        Box<crate::core::server::ServerRestoreOutcome>,
+        Box<crate::core::server::ServerBackupListing>,
+        crate::core::server::ServerRestoreStatus,
+    ),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -397,8 +489,11 @@ pub(crate) enum ServerTaskKind {
     Acquisition,
     Composition,
     DeploymentRecord,
+    PlayerPublication,
     Preparation,
     Reconciliation,
+    Backup,
+    Session,
     ConsumerRecovery,
     NativeInstall,
     Workshop,
@@ -439,6 +534,8 @@ pub(crate) fn execute(
             | ServerTaskAction::PollInstanceMonitoring(_)
             | ServerTaskAction::OpenInstanceRuntimeLogs(_)
             | ServerTaskAction::ExportMonitoringSnapshot { .. }
+            | ServerTaskAction::PlanServiceExport
+            | ServerTaskAction::WriteServiceExport { .. }
             | ServerTaskAction::StartInstance(_)
             | ServerTaskAction::StopInstance { .. }
             | ServerTaskAction::RestartInstance { .. }
@@ -453,6 +550,13 @@ pub(crate) fn execute(
             | ServerTaskAction::SendRconCommand { .. }
             | ServerTaskAction::SendArmaAdminCommand { .. }
             | ServerTaskAction::SendReforgerAdminCommand { .. }
+            | ServerTaskAction::CreateServerBackup { .. }
+            | ServerTaskAction::ApplyServerBackupPrune { .. }
+            | ServerTaskAction::ApplyServerRestore { .. }
+            | ServerTaskAction::RollbackServerRestore { .. }
+            | ServerTaskAction::PlanPlayerPublication(_)
+            | ServerTaskAction::ApplyPlayerPublication(_)
+            | ServerTaskAction::VerifyPlayerPublication(_)
     );
     let _permit = if deployment_effect {
         None
@@ -471,7 +575,13 @@ pub(crate) fn execute(
     if scope.owner.is_some() && _permit.is_none() && !deployment_effect {
         return Err(ServerStoreError::Ownership);
     }
-    if let Some((owner_id, generation)) = &scope.owner {
+    let player_publication = matches!(
+        &action,
+        ServerTaskAction::PlanPlayerPublication(_)
+            | ServerTaskAction::ApplyPlayerPublication(_)
+            | ServerTaskAction::VerifyPlayerPublication(_)
+    );
+    if !player_publication && let Some((owner_id, generation)) = &scope.owner {
         let attachment = crate::core::server::owner::attach(store.context())
             .map_err(|_| ServerStoreError::Ownership)?
             .ok_or(ServerStoreError::Ownership)?;
@@ -540,6 +650,29 @@ pub(crate) fn execute(
                 saved: true,
                 migration_pending: false,
             }
+        }
+        ServerTaskAction::PlanServiceExport => {
+            let executable = std::env::current_exe().map_err(|_| ServerStoreError::Io)?;
+            ServerTaskOutput::ServiceExportPlan(Box::new(crate::core::server::plan_service_export(
+                store.context(),
+                &executable,
+                crate::ui::app::Foxy::server_service_export_format(),
+            )?))
+        }
+        ServerTaskAction::WriteServiceExport { plan, path } => {
+            let executable = std::env::current_exe().map_err(|_| ServerStoreError::Io)?;
+            let current = crate::core::server::plan_service_export(
+                store.context(),
+                &executable,
+                plan.format,
+            )?;
+            if current.fingerprint != plan.fingerprint {
+                return Err(ServerStoreError::Invalid(
+                    "Service export review changed. Preview it again before saving.".into(),
+                ));
+            }
+            crate::core::server::write_service_export(&plan, &path)?;
+            ServerTaskOutput::ServiceExportWritten
         }
         ServerTaskAction::ExportInstancePack {
             id,
@@ -926,6 +1059,21 @@ pub(crate) fn execute(
         ServerTaskAction::SelectDeploymentRecord(plan) => ServerTaskOutput::DeploymentRecordCommit(
             store.apply_deployment_record_selection(*plan, &stage_control)?,
         ),
+        ServerTaskAction::PlanPlayerPublication(request) => {
+            ServerTaskOutput::PlayerPublicationPlan(Box::new(
+                store.plan_player_publication(&request, &stage_control)?,
+            ))
+        }
+        ServerTaskAction::ApplyPlayerPublication(plan) => {
+            ServerTaskOutput::PlayerPublicationOutcome(
+                store.apply_player_publication(&plan, &stage_control)?,
+            )
+        }
+        ServerTaskAction::VerifyPlayerPublication(plan) => {
+            ServerTaskOutput::PlayerPublicationOutcome(
+                store.verify_player_publication(&plan, &stage_control)?,
+            )
+        }
         ServerTaskAction::PlanDeploymentPreparation {
             id,
             expected_generation,
@@ -1231,6 +1379,132 @@ pub(crate) fn execute(
         }
         ServerTaskAction::LoadScenarioDiscovery(id) => {
             ServerTaskOutput::ScenarioDiscovery(store.read_scenario_discovery(&id)?.map(Box::new))
+        }
+        ServerTaskAction::LoadServerSessions(id) => ServerTaskOutput::SessionInventory(Box::new(
+            store.reforger_sessions(&id, &stage_control)?,
+        )),
+        ServerTaskAction::PlanServerSession {
+            id,
+            intent,
+            expected_generation,
+        } => ServerTaskOutput::SessionPlan(Box::new(store.plan_reforger_session(
+            &id,
+            intent,
+            expected_generation,
+            &stage_control,
+        )?)),
+        ServerTaskAction::ApplyServerSession { plan } => ServerTaskOutput::SessionApplied(
+            Box::new(store.apply_reforger_session(*plan, &stage_control)?),
+        ),
+        ServerTaskAction::PlanServerBackup { id, mode } => ServerTaskOutput::ServerBackupPlan(
+            Box::new(store.plan_server_backup(&id, mode, None, &stage_control)?),
+        ),
+        ServerTaskAction::CreateServerBackup {
+            id,
+            mode,
+            expected_plan_fingerprint,
+        } => {
+            let outcome = crate::core::server::owner::create_server_backup(
+                &store,
+                &id,
+                mode,
+                Some(&expected_plan_fingerprint),
+                true,
+                &stage_control,
+            )?;
+            let listing = store.list_server_backups(&id)?;
+            ServerTaskOutput::ServerBackupOutcome(Box::new(outcome), Box::new(listing))
+        }
+        ServerTaskAction::LoadServerBackups(id) => {
+            ServerTaskOutput::ServerBackupListing(Box::new(store.list_server_backups(&id)?))
+        }
+        ServerTaskAction::VerifyServerBackup { id, backup_id } => {
+            ServerTaskOutput::ServerBackupVerification(Box::new(store.verify_server_backup(
+                &id,
+                &backup_id,
+                &stage_control,
+            )?))
+        }
+        ServerTaskAction::SetServerBackupPin {
+            id,
+            backup_id,
+            pinned,
+            expected_generation,
+        } => {
+            store.set_backup_pin(&id, &backup_id, pinned, expected_generation)?;
+            ServerTaskOutput::ServerBackupListing(Box::new(store.list_server_backups(&id)?))
+        }
+        ServerTaskAction::SetServerBackupRetention {
+            id,
+            policy,
+            expected_generation,
+        } => {
+            store.set_backup_retention_policy(&id, policy, expected_generation)?;
+            ServerTaskOutput::ServerBackupListing(Box::new(store.list_server_backups(&id)?))
+        }
+        ServerTaskAction::PlanServerBackupPrune {
+            id,
+            keep_last_override,
+        } => ServerTaskOutput::ServerBackupPrunePlan(Box::new(store.plan_backup_prune(
+            &id,
+            keep_last_override,
+            &stage_control,
+        )?)),
+        ServerTaskAction::ApplyServerBackupPrune {
+            id,
+            expected_plan_fingerprint,
+            keep_last_override,
+        } => {
+            let outcome = crate::core::server::owner::prune_server_backups(
+                &store,
+                &id,
+                &expected_plan_fingerprint,
+                keep_last_override,
+                &stage_control,
+            )?;
+            let listing = store.list_server_backups(&id)?;
+            ServerTaskOutput::ServerBackupPruneOutcome(Box::new(outcome), Box::new(listing))
+        }
+        ServerTaskAction::PlanServerRestore { id, backup_id } => {
+            ServerTaskOutput::ServerRestorePlan(Box::new(store.plan_server_restore(
+                &id,
+                &backup_id,
+                None,
+                &stage_control,
+            )?))
+        }
+        ServerTaskAction::LoadServerRestoreStatus(id) => {
+            ServerTaskOutput::ServerRestoreStatus(store.server_restore_status(&id)?)
+        }
+        ServerTaskAction::ApplyServerRestore {
+            id,
+            backup_id,
+            expected_plan_fingerprint,
+        } => {
+            let outcome = crate::core::server::owner::restore_server_backup(
+                &store,
+                &id,
+                &backup_id,
+                &expected_plan_fingerprint,
+                &stage_control,
+            )?;
+            let listing = store.list_server_backups(&id)?;
+            let status = store.server_restore_status(&id)?;
+            ServerTaskOutput::ServerRestoreOutcome(Box::new(outcome), Box::new(listing), status)
+        }
+        ServerTaskAction::RollbackServerRestore {
+            id,
+            expected_journal_fingerprint,
+        } => {
+            let outcome = crate::core::server::owner::rollback_server_restore(
+                &store,
+                &id,
+                &expected_journal_fingerprint,
+                &stage_control,
+            )?;
+            let listing = store.list_server_backups(&id)?;
+            let status = store.server_restore_status(&id)?;
+            ServerTaskOutput::ServerRestoreOutcome(Box::new(outcome), Box::new(listing), status)
         }
         ServerTaskAction::Catalog(Some(change)) => {
             let plan = store.plan(change)?;

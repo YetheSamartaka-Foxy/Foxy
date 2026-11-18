@@ -14,6 +14,7 @@ impl ServerStore {
         if !self.capabilities().lifecycle {
             return Err(ServerStoreError::UnsupportedGame);
         }
+        self.require_no_server_restore(id)?;
         let installation = self.native_installation(id)?;
         if installation.platform != ServerPlatform::current()? {
             return Err(ServerStoreError::UnsupportedGame);
@@ -45,7 +46,8 @@ impl ServerStore {
         {
             return Err(ServerStoreError::StaleRevision);
         }
-        let launch = self.native_runtime_launch_plan(id, control)?;
+        let launch = ServerStore::new(self.context().canonicalized()?)?
+            .native_runtime_launch_plan(id, control)?;
         if state
             .deployment
             .runtime

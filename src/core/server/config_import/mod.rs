@@ -8,6 +8,7 @@ mod secrets;
 pub use battleye::NativeBattlEyeSeed;
 pub(crate) use battleye::{BattlEyeRcon, battleye_names};
 pub use runtime::NativeConfigurationSeed;
+pub(in crate::core::server) use runtime::private_configuration_name;
 
 use super::{ServerInstance, ServerInstanceId};
 use serde::{Deserialize, Serialize};

@@ -373,7 +373,9 @@ fn main() {
                 .get(1)
                 .map(|arg| !arg.eq_ignore_ascii_case("ui"))
                 .unwrap_or(true);
-        let hidden_owner = raw_args.iter().any(|arg| arg == "--parent-bound")
+        let hidden_owner = raw_args
+            .iter()
+            .any(|arg| arg == "--parent-bound" || arg == "--background")
             && raw_args
                 .windows(2)
                 .any(|args| args == ["server", "supervise"]);

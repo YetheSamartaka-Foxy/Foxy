@@ -6,6 +6,7 @@ use crate::core::server::ServerContext;
 pub(crate) enum UpdateBlockerKind {
     Sessions(u32),
     Detached,
+    Foreground,
     /// An owner record exists but the owner could not be inspected, so sessions are unknown.
     Unreachable,
     /// The game space list could not be read, so owners could not be checked at all.
@@ -22,6 +23,8 @@ pub(crate) struct UpdateBlocker {
 pub(crate) fn blocks_update(snapshot: &OwnerSnapshot) -> Option<UpdateBlockerKind> {
     if snapshot.lifetime == OwnerLifetime::Detached {
         Some(UpdateBlockerKind::Detached)
+    } else if snapshot.lifetime == OwnerLifetime::Foreground {
+        Some(UpdateBlockerKind::Foreground)
     } else if snapshot.active_sessions > 0 {
         Some(UpdateBlockerKind::Sessions(snapshot.active_sessions))
     } else {
@@ -59,7 +62,15 @@ pub(crate) fn update_blockers(root: &std::path::Path) -> Vec<UpdateBlocker> {
                 .is_some_and(|game| game.server_capabilities().lifecycle)
         })
         .filter_map(|space| {
-            let context = ServerContext::capture(root, Some(&space.id)).ok()?;
+            let context = match ServerContext::capture(root, Some(&space.id)) {
+                Ok(context) => context,
+                Err(_) => {
+                    return Some(UpdateBlocker {
+                        space_name: space.display_name.clone(),
+                        kind: UpdateBlockerKind::Unreachable,
+                    });
+                }
+            };
             let kind = match attach(&context) {
                 Ok(None) => None,
                 Err(error) if owner_absent(&error) => None,

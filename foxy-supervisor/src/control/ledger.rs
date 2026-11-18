@@ -558,6 +558,50 @@ pub(super) fn validate_client(message: &ClientMessage) -> io::Result<()> {
                 super::Operation::CancelLifecycle { request_id: 0 } => {
                     return Err(invalid("invalid lifecycle cancellation request"));
                 }
+                super::Operation::CreateServerBackup {
+                    instance_id,
+                    mode,
+                    expected_plan_fingerprint,
+                    ..
+                } if !super::valid_server_instance_id(instance_id)
+                    || !matches!(mode.as_str(), "stopped_verified" | "best_effort_live")
+                    || expected_plan_fingerprint
+                        .as_deref()
+                        .is_some_and(|fingerprint| !super::valid_lower_hex(fingerprint, 64)) =>
+                {
+                    return Err(invalid("invalid server backup request"));
+                }
+                super::Operation::PruneServerBackups {
+                    instance_id,
+                    expected_plan_fingerprint,
+                    keep_last_override,
+                } if !super::valid_server_instance_id(instance_id)
+                    || !super::valid_lower_hex(expected_plan_fingerprint, 64)
+                    || keep_last_override.is_some_and(|keep| !(1..=128).contains(&keep)) =>
+                {
+                    return Err(invalid("invalid server backup prune request"));
+                }
+                super::Operation::CancelServerBackup { request_id: 0 } => {
+                    return Err(invalid("invalid server backup cancellation request"));
+                }
+                super::Operation::RestoreServerBackup {
+                    instance_id,
+                    backup_id,
+                    expected_plan_fingerprint,
+                } if !super::valid_server_instance_id(instance_id)
+                    || !super::valid_prefixed_hex(backup_id, "backup_", 64)
+                    || !super::valid_lower_hex(expected_plan_fingerprint, 64) =>
+                {
+                    return Err(invalid("invalid server restore request"));
+                }
+                super::Operation::RollbackServerRestore {
+                    instance_id,
+                    expected_journal_fingerprint,
+                } if !super::valid_server_instance_id(instance_id)
+                    || !super::valid_lower_hex(expected_journal_fingerprint, 64) =>
+                {
+                    return Err(invalid("invalid server restore rollback request"));
+                }
                 _ => {}
             }
         }

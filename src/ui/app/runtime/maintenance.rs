@@ -127,6 +127,10 @@ impl Foxy {
                             "{space}: a detached server owner is running. Stop its servers and shut it down with server supervise --shutdown before the update installs.",
                             &[space],
                         ),
+                        UpdateBlockerKind::Foreground => self.t_fmt(
+                            "{space}: a foreground server owner is running. Stop its servers and shut it down before the update installs.",
+                            &[space],
+                        ),
                         UpdateBlockerKind::Sessions(count) => self.t_fmt(
                             "{space}: {count} supervised server sessions are running. Stop them before the update installs.",
                             &[space, ("count", count.to_string())],

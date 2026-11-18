@@ -17,6 +17,12 @@ pub(super) fn supervise(
     args: ServerSuperviseArgs,
 ) -> Result<CommandSuccess, CommandError> {
     const ACTION: &str = "server.supervise";
+    if args.background && !cfg!(windows) {
+        return Err(CommandError::validation(
+            ACTION,
+            "--background is available only on Windows. Use foreground supervision for a Linux service.",
+        ));
+    }
     let context = instances::capture(args.context, ACTION)?;
     if args.detach || args.shutdown {
         if cli.dry_run {

@@ -105,6 +105,7 @@ pub(crate) struct MaintenanceForm {
     pub announcement_delay_seconds: u16,
     pub mission_template: String,
     pub require_backup: bool,
+    pub live_backup: bool,
     pub grace_minutes: u16,
     pub max_defer_minutes: u16,
     pub max_attempts: u8,
@@ -137,6 +138,7 @@ impl MaintenanceForm {
             announcement_delay_seconds: 0,
             mission_template: String::new(),
             require_backup: false,
+            live_backup: false,
             grace_minutes: policy.grace_minutes,
             max_defer_minutes: policy.max_defer_minutes,
             max_attempts: policy.max_attempts,
@@ -189,6 +191,8 @@ impl MaintenanceForm {
         }
         let policy = &definition.policy;
         form.require_empty = policy.player_policy == PlayerPolicy::RequireEmpty;
+        form.live_backup =
+            policy.backup_mode == crate::core::server::BackupConsistencyMode::BestEffortLive;
         form.grace_minutes = policy.grace_minutes;
         form.max_defer_minutes = policy.max_defer_minutes;
         form.max_attempts = policy.max_attempts;
@@ -308,6 +312,11 @@ impl MaintenanceForm {
                         mission_template,
                         require_backup: self.require_backup && !reload_scenario,
                     }),
+                backup_mode: if self.live_backup {
+                    crate::core::server::BackupConsistencyMode::BestEffortLive
+                } else {
+                    crate::core::server::BackupConsistencyMode::StoppedVerified
+                },
             },
         };
         definition.validate()?;

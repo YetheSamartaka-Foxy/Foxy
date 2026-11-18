@@ -108,6 +108,8 @@ impl Runs {
             } else {
                 "Scenario reload was sent at most once. Its completed effect is unconfirmed; it will not be repeated automatically. Review the current run and RCon history.".into()
             }),
+            backup_id: None,
+            backup_consistency: None,
         })
     }
 }

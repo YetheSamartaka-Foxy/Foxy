@@ -107,7 +107,11 @@ impl Attachment {
             | Operation::ReloadReforgerScenario { instance_id, .. }
             | Operation::StartHeadlessClients { instance_id, .. }
             | Operation::StopHeadlessClients { instance_id, .. }
-            | Operation::RestartHeadlessClients { instance_id, .. } => {
+            | Operation::RestartHeadlessClients { instance_id, .. }
+            | Operation::CreateServerBackup { instance_id, .. }
+            | Operation::PruneServerBackups { instance_id, .. }
+            | Operation::RestoreServerBackup { instance_id, .. }
+            | Operation::RollbackServerRestore { instance_id, .. } => {
                 ServerInstanceId::try_from(instance_id.clone())
                     .map_err(|_| invalid("Invalid lifecycle instance id"))?
             }
@@ -130,6 +134,17 @@ impl Attachment {
         let mut submitted = false;
         let mut cancellation_sent = false;
         let mut unknown_deadline = Instant::now() + UNKNOWN_OPERATION_GRACE;
+        let cancel_operation = if matches!(
+            operation,
+            Operation::CreateServerBackup { .. }
+                | Operation::PruneServerBackups { .. }
+                | Operation::RestoreServerBackup { .. }
+                | Operation::RollbackServerRestore { .. }
+        ) {
+            Operation::CancelServerBackup { request_id }
+        } else {
+            Operation::CancelLifecycle { request_id }
+        };
         let result = loop {
             if submitted && control.snapshot().cancel_requested {
                 cancellation_sent = true;
@@ -140,7 +155,7 @@ impl Attachment {
                 let _ = self.deployment_request(
                     &client_id,
                     cancel_id,
-                    Operation::CancelLifecycle { request_id },
+                    cancel_operation.clone(),
                     budget,
                 );
             }
@@ -281,7 +296,11 @@ fn validate_lifecycle_outcome(
         | Operation::StopInstance { .. }
         | Operation::StartHeadlessClients { .. }
         | Operation::StopHeadlessClients { .. }
-        | Operation::RestartHeadlessClients { .. } => Ok(()),
+        | Operation::RestartHeadlessClients { .. }
+        | Operation::CreateServerBackup { .. }
+        | Operation::PruneServerBackups { .. }
+        | Operation::RestoreServerBackup { .. }
+        | Operation::RollbackServerRestore { .. } => Ok(()),
         Operation::RotateArmaMission { .. } | Operation::ReloadReforgerScenario { .. } => Ok(()),
         _ => Err(invalid("Invalid lifecycle operation")),
     }
@@ -359,6 +378,8 @@ mod tests {
             completed: true,
             cancelled: false,
             message: None,
+            backup_id: None,
+            backup_consistency: None,
         };
         let payload = serde_json::to_vec(&LifecycleReply {
             outcome: Some(outcome.clone()),
@@ -366,6 +387,23 @@ mod tests {
         })
         .unwrap();
         assert!(payload.len() <= MAX_PAYLOAD_BYTES);
+        let mut with_backup = outcome.clone();
+        with_backup.backup_id = Some(format!("backup_{}", "f".repeat(64)));
+        with_backup.backup_consistency =
+            Some(crate::core::server::BackupConsistencyMode::StoppedVerified);
+        with_backup.status.runtime_id = Some(format!("runtime_{}", "a".repeat(64)));
+        with_backup.status.owner_id = format!("owner_{}", "b".repeat(32));
+        with_backup.message = Some("The same owned server read the selected mission and answered a fresh query. Its process was not restarted.".into());
+        let backup_payload = serde_json::to_vec(&LifecycleReply {
+            outcome: Some(with_backup),
+            error: None,
+        })
+        .unwrap();
+        assert!(
+            backup_payload.len() <= MAX_PAYLOAD_BYTES,
+            "{}",
+            backup_payload.len()
+        );
         let mut headless = outcome.clone();
         headless.status.headless_running =
             u32::try_from(crate::core::server::MAX_HEADLESS_CLIENTS).unwrap();

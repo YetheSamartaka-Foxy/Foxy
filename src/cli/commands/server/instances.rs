@@ -405,7 +405,7 @@ fn launch_command(
     ))
 }
 
-fn parse_id(id: String, action: &str) -> Result<ServerInstanceId, CommandError> {
+pub(super) fn parse_id(id: String, action: &str) -> Result<ServerInstanceId, CommandError> {
     ServerInstanceId::try_from(id).map_err(|message| CommandError::validation(action, message))
 }
 

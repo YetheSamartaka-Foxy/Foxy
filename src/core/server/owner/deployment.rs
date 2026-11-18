@@ -23,6 +23,8 @@ pub(crate) struct SessionIdentity {
 pub(crate) struct DeploymentExecution {
     pub(crate) arma_maintenance: Option<(String, crate::core::server::jobs::ArmaMaintenancePolicy)>,
     pub(crate) maintenance_player_policy: Option<crate::core::server::jobs::PlayerPolicy>,
+    pub(crate) require_backup: bool,
+    pub(crate) maintenance_backup_mode: Option<crate::core::server::BackupConsistencyMode>,
     context: ServerContext,
     scope: Scope,
     identity: SessionIdentity,
@@ -59,6 +61,8 @@ impl DeploymentExecution {
         Ok(Self {
             arma_maintenance: None,
             maintenance_player_policy: None,
+            require_backup: false,
+            maintenance_backup_mode: None,
             context: context.clone(),
             scope: scope.clone(),
             identity: SessionIdentity {

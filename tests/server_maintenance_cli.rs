@@ -247,8 +247,9 @@ fn jobs_round_trip_with_policy_revisions_and_explicit_confirmation() {
         statuses[1]["blocker"]
             .as_str()
             .unwrap()
-            .contains("not available")
+            .contains("inactive")
     );
+    assert!(statuses[1]["next_run_unix_ms"].is_u64());
 
     maintenance(
         root.path(),

@@ -29,6 +29,7 @@ struct Active {
     root: PathBuf,
     occurrence: Occurrence,
     policy: MaintenancePolicy,
+    was_restart_attempt: bool,
     cancel_requested: bool,
 }
 
@@ -490,16 +491,26 @@ impl MaintenanceService {
                 Some(reason.into()),
             );
         }
-        if policy.arma.as_ref().is_some_and(|arma| arma.require_backup) {
+        let require_backup = policy.arma.as_ref().is_some_and(|arma| arma.require_backup);
+        if require_backup && !store.capabilities().server_backups {
             return Self::finish(&root, occurrence, OccurrenceState::Blocked,
                 Some(OccurrenceReason::AdapterUnavailable),
-                Some("The job requires a consistent backup; the backup adapter is unavailable. No administration command was sent.".into()));
+                Some("The job requires a consistent backup; server backups are unavailable for this game.".into()));
+        }
+        if require_backup
+            && occurrence.action == MaintenanceAction::RotateMission
+            && policy.backup_mode == crate::core::server::BackupConsistencyMode::StoppedVerified
+        {
+            return Self::finish(&root, occurrence, OccurrenceState::Blocked,
+                Some(OccurrenceReason::AdapterUnavailable),
+                Some("Mission rotation runs on a live server and cannot take a stopped-consistent backup; use a restart job or enable best-effort live backup.".into()));
         }
         if !matches!(
             occurrence.action,
             MaintenanceAction::Restart
                 | MaintenanceAction::RotateMission
                 | MaintenanceAction::ReloadScenario
+                | MaintenanceAction::Backup
         ) {
             return;
         }
@@ -531,90 +542,159 @@ impl MaintenanceService {
             .ok()
             .filter(|file| file.try_lock().is_ok());
         let operation_busy = runtime.busy() || deployment_busy || lock.is_none();
-        let step = jobs::restart_step(
-            RestartInputs {
-                server_running,
-                server_settled: settled,
-                stop_completed_by_occurrence: occurrence.stop_completed,
-                started_since_stop,
-                players,
-                operation_busy,
-            },
-            &policy,
-            occurrence.deferred_since_unix_ms,
-            now,
-        );
-        let start_only = match step {
-            RestartStep::Defer(reason) => {
-                if occurrence.state != OccurrenceState::Deferred
-                    || occurrence.reason != Some(reason)
-                {
-                    occurrence.state = OccurrenceState::Deferred;
-                    occurrence.reason = Some(reason);
-                    occurrence.deferred_since_unix_ms.get_or_insert(now);
-                    occurrence.updated_unix_ms = now;
-                    occurrence.set_message(reason.describe());
-                    let _ = jobs::update(&root, &occurrence);
-                }
-                return;
-            }
-            RestartStep::Skip(reason) => {
-                return Self::finish(
-                    &root,
-                    occurrence,
-                    OccurrenceState::Skipped,
-                    Some(reason),
-                    Some(reason.describe().into()),
+
+        let (start_only, offline_backup_only, live_backup_only) = if occurrence.action
+            == MaintenanceAction::Backup
+            && !server_running
+            && !occurrence.stop_completed
+        {
+            if operation_busy {
+                let step = jobs::restart_step(
+                    RestartInputs {
+                        server_running: true,
+                        server_settled: false,
+                        stop_completed_by_occurrence: false,
+                        started_since_stop: false,
+                        players: PlayerEvidence::Empty,
+                        operation_busy: true,
+                    },
+                    &policy,
+                    occurrence.deferred_since_unix_ms,
+                    now,
                 );
+                match step {
+                    RestartStep::Defer(reason) => {
+                        if occurrence.state != OccurrenceState::Deferred
+                            || occurrence.reason != Some(reason)
+                        {
+                            occurrence.state = OccurrenceState::Deferred;
+                            occurrence.reason = Some(reason);
+                            occurrence.deferred_since_unix_ms.get_or_insert(now);
+                            occurrence.updated_unix_ms = now;
+                            occurrence.set_message(reason.describe());
+                            let _ = jobs::update(&root, &occurrence);
+                        }
+                        return;
+                    }
+                    RestartStep::Skip(reason) => {
+                        return Self::finish(
+                            &root,
+                            occurrence,
+                            OccurrenceState::Skipped,
+                            Some(reason),
+                            Some(reason.describe().into()),
+                        );
+                    }
+                    RestartStep::Restart | RestartStep::StartOnly => {}
+                }
             }
-            RestartStep::Restart => false,
-            RestartStep::StartOnly => true,
+            (false, true, false)
+        } else {
+            let step = jobs::restart_step(
+                RestartInputs {
+                    server_running,
+                    server_settled: settled,
+                    stop_completed_by_occurrence: occurrence.stop_completed,
+                    started_since_stop,
+                    players,
+                    operation_busy,
+                },
+                &policy,
+                occurrence.deferred_since_unix_ms,
+                now,
+            );
+            let start_only = match step {
+                RestartStep::Defer(reason) => {
+                    if occurrence.state != OccurrenceState::Deferred
+                        || occurrence.reason != Some(reason)
+                    {
+                        occurrence.state = OccurrenceState::Deferred;
+                        occurrence.reason = Some(reason);
+                        occurrence.deferred_since_unix_ms.get_or_insert(now);
+                        occurrence.updated_unix_ms = now;
+                        occurrence.set_message(reason.describe());
+                        let _ = jobs::update(&root, &occurrence);
+                    }
+                    return;
+                }
+                RestartStep::Skip(reason) => {
+                    return Self::finish(
+                        &root,
+                        occurrence,
+                        OccurrenceState::Skipped,
+                        Some(reason),
+                        Some(reason.describe().into()),
+                    );
+                }
+                RestartStep::Restart => false,
+                RestartStep::StartOnly => true,
+            };
+            let live_only = occurrence.action == MaintenanceAction::Backup
+                && !start_only
+                && policy.backup_mode == crate::core::server::BackupConsistencyMode::BestEffortLive;
+            (start_only, false, live_only)
         };
         let Some(lock) = lock else {
             return;
         };
         let control = ContentStageControl::default();
-        let plan = match store.plan_instance_start(&id, &control) {
-            Ok(plan) => plan,
-            Err(error) => {
-                occurrence.attempts = occurrence.attempts.saturating_add(1);
-                return self.record_attempt(
-                    &root,
-                    occurrence,
-                    &policy,
-                    AttemptResult {
-                        completed: false,
-                        cancelled: false,
-                        stop_completed: false,
-                    },
-                    Some(format!(
-                        "{} {error}",
-                        OccurrenceReason::StartPlanUnavailable.describe()
-                    )),
-                );
-            }
-        };
-        occurrence.attempts = occurrence.attempts.saturating_add(1);
-        if (matches!(
+        let mut plan = None;
+        let will_stop_restart = occurrence.action == MaintenanceAction::Restart
+            || (occurrence.action == MaintenanceAction::Backup
+                && !offline_backup_only
+                && !live_backup_only);
+        let needs_start_plan = matches!(
             occurrence.action,
             MaintenanceAction::RotateMission | MaintenanceAction::ReloadScenario
-        ) || policy
-            .arma
-            .as_ref()
-            .is_some_and(|arma| arma.announcement.is_some()))
-            && plan.launch.rcon.is_none()
-        {
-            return Self::finish(&root, occurrence, OccurrenceState::Blocked,
-                Some(OccurrenceReason::AdapterUnavailable),
-                Some("This Arma maintenance action requires RCon in the committed runtime. Nothing was sent.".into()));
+        ) || will_stop_restart;
+        if needs_start_plan {
+            let built_plan = match store.plan_instance_start(&id, &control) {
+                Ok(built) => built,
+                Err(error) => {
+                    occurrence.attempts = occurrence.attempts.saturating_add(1);
+                    return self.record_attempt(
+                        &root,
+                        occurrence,
+                        &policy,
+                        AttemptResult {
+                            completed: false,
+                            cancelled: false,
+                            stop_completed: false,
+                        },
+                        Some(format!(
+                            "{} {error}",
+                            OccurrenceReason::StartPlanUnavailable.describe()
+                        )),
+                    );
+                }
+            };
+            if (matches!(
+                occurrence.action,
+                MaintenanceAction::RotateMission | MaintenanceAction::ReloadScenario
+            ) || (will_stop_restart
+                && policy
+                    .arma
+                    .as_ref()
+                    .is_some_and(|arma| arma.announcement.is_some())))
+                && built_plan.launch.rcon.is_none()
+            {
+                return Self::finish(&root, occurrence, OccurrenceState::Blocked,
+                    Some(OccurrenceReason::AdapterUnavailable),
+                    Some("This Arma maintenance action requires RCon in the committed runtime. Nothing was sent.".into()));
+            }
+            plan = Some(built_plan);
         }
+        occurrence.attempts = occurrence.attempts.saturating_add(1);
+        let was_restart_attempt;
         let operation = if occurrence.action == MaintenanceAction::ReloadScenario {
+            was_restart_attempt = false;
             Operation::ReloadReforgerScenario {
                 instance_id: id.as_str().into(),
                 expected_run_generation: status.as_ref().map_or(0, |status| status.run_generation),
                 timeout_ms: u32::from(policy.stop_timeout_seconds) * 1000,
             }
         } else if occurrence.action == MaintenanceAction::RotateMission {
+            was_restart_attempt = false;
             Operation::RotateArmaMission {
                 instance_id: id.as_str().into(),
                 expected_run_generation: status.as_ref().map_or(0, |status| status.run_generation),
@@ -625,13 +705,37 @@ impl MaintenanceService {
                     .unwrap_or_default(),
                 timeout_ms: u32::from(policy.stop_timeout_seconds) * 1000,
             }
+        } else if offline_backup_only {
+            was_restart_attempt = false;
+            Operation::CreateServerBackup {
+                instance_id: id.as_str().into(),
+                mode: "stopped_verified".into(),
+                expected_plan_fingerprint: None,
+                apply_retention: true,
+            }
+        } else if live_backup_only {
+            was_restart_attempt = false;
+            let run_generation = status.as_ref().map_or(0, |status| status.run_generation);
+            occurrence
+                .run_generation_before
+                .get_or_insert(run_generation);
+            Operation::CreateServerBackup {
+                instance_id: id.as_str().into(),
+                mode: "best_effort_live".into(),
+                expected_plan_fingerprint: None,
+                apply_retention: true,
+            }
         } else if start_only {
+            was_restart_attempt = false;
+            let plan = plan.as_ref().expect("start plan prepared");
             Operation::StartInstance {
                 instance_id: id.as_str().into(),
                 expected_activation_generation: plan.activation_generation,
                 review_fingerprint: plan.fingerprint.clone(),
             }
         } else {
+            was_restart_attempt = true;
+            let plan = plan.as_ref().expect("start plan prepared");
             let run_generation = status.as_ref().map_or(0, |status| status.run_generation);
             occurrence
                 .run_generation_before
@@ -673,6 +777,10 @@ impl MaintenanceService {
             .clone()
             .map(|arma| (occurrence.occurrence_id.clone(), arma));
         execution.maintenance_player_policy = Some(policy.player_policy);
+        execution.require_backup = (require_backup
+            || occurrence.action == MaintenanceAction::Backup)
+            && occurrence.backup_id.is_none();
+        execution.maintenance_backup_mode = Some(policy.backup_mode);
         occurrence.state = OccurrenceState::Running;
         occurrence.reason = None;
         occurrence.deferred_since_unix_ms = None;
@@ -693,6 +801,7 @@ impl MaintenanceService {
                     root,
                     occurrence,
                     policy,
+                    was_restart_attempt,
                     cancel_requested: false,
                 });
             }
@@ -756,31 +865,48 @@ impl MaintenanceService {
             root,
             mut occurrence,
             policy,
+            was_restart_attempt,
             cancel_requested,
         } = active;
         let after = runtime.instance_status(&occurrence.instance_id);
-        // The attempt held the operation lock, so no other operation started or stopped the run;
-        // a failed spawn advances the generation, so only process absence counts here.
-        let stopped_by_us = after.as_ref().is_some_and(|status| !status.process_exists);
-        let (completed, cancelled, message) = match completion.result {
-            Ok(outcome) => (outcome.completed, outcome.cancelled, outcome.message),
-            Err(error) => (false, false, Some(error)),
+        // Only a stop-restart attempt may mark `stop_completed` when the server process exited.
+        let stopped_by_us =
+            was_restart_attempt && after.as_ref().is_some_and(|status| !status.process_exists);
+        let (completed, cancelled, message, backup_id, backup_consistency) = match completion.result
+        {
+            Ok(outcome) => (
+                outcome.completed,
+                outcome.cancelled,
+                outcome.message,
+                outcome.backup_id,
+                outcome.backup_consistency,
+            ),
+            Err(error) => (false, false, Some(error), None, None),
         };
+        if let Some(backup_id) = backup_id {
+            occurrence.backup_id = Some(backup_id);
+            occurrence.backup_consistency = backup_consistency;
+        }
         let cancelled = cancelled || cancel_requested;
         if !completed
             && !cancelled
             && (matches!(
                 occurrence.action,
                 MaintenanceAction::RotateMission | MaintenanceAction::ReloadScenario
-            ) || policy
-                .arma
-                .as_ref()
-                .is_some_and(|arma| arma.announcement.is_some()))
+            ) || (was_restart_attempt
+                && policy
+                    .arma
+                    .as_ref()
+                    .is_some_and(|arma| arma.announcement.is_some())))
         {
             return Self::finish(&root, occurrence, OccurrenceState::Unknown,
                 Some(OccurrenceReason::AttemptFailed), message.or_else(|| Some("The administration effect is unconfirmed; it will not be repeated automatically.".into())));
         }
-        occurrence.run_generation_after = after.as_ref().map(|status| status.run_generation);
+        if occurrence.action != MaintenanceAction::Backup || was_restart_attempt {
+            occurrence.run_generation_after = after.as_ref().map(|status| status.run_generation);
+        } else if let Some(after) = after.as_ref().filter(|status| status.process_exists) {
+            occurrence.run_generation_after = Some(after.run_generation);
+        }
         self.record_attempt(
             &root,
             occurrence,

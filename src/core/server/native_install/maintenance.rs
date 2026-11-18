@@ -156,6 +156,16 @@ pub(super) fn provider_review(
 }
 
 impl ServerStore {
+    pub(in crate::core::server) fn backup_installation_channel(
+        &self,
+        installation: &ServerInstallation,
+    ) -> Result<Option<(ContentChannel, String)>, ServerStoreError> {
+        if installation.ownership != InstallationOwnership::Managed {
+            return Ok(None);
+        }
+        let (receipt, fingerprint) = manifest(installation)?;
+        Ok(Some((receipt.channel, fingerprint)))
+    }
     fn managed_for(&self, id: &ServerInstanceId) -> Result<ServerInstallation, ServerStoreError> {
         if !self.capabilities().native_installation {
             return Err(ServerStoreError::UnsupportedGame);

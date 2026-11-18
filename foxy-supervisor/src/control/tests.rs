@@ -176,6 +176,18 @@ fn lifecycle_operations_round_trip_and_validate_boundaries() {
             timeout_ms: 60_000,
         },
         Operation::CancelLifecycle { request_id: 1 },
+        Operation::CreateServerBackup {
+            instance_id: instance_id.clone(),
+            mode: "stopped_verified".into(),
+            expected_plan_fingerprint: Some("d".repeat(64)),
+            apply_retention: true,
+        },
+        Operation::PruneServerBackups {
+            instance_id: instance_id.clone(),
+            expected_plan_fingerprint: "e".repeat(64),
+            keep_last_override: Some(3),
+        },
+        Operation::CancelServerBackup { request_id: 1 },
     ];
     for (index, operation) in operations.into_iter().enumerate() {
         let message = ClientMessage::Submit {
@@ -321,6 +333,33 @@ b"
             timeout_ms: 999,
         },
         Operation::CancelLifecycle { request_id: 0 },
+        Operation::CreateServerBackup {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            mode: "invalid_mode".into(),
+            expected_plan_fingerprint: None,
+            apply_retention: false,
+        },
+        Operation::CreateServerBackup {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            mode: "stopped_verified".into(),
+            expected_plan_fingerprint: Some("bad".into()),
+            apply_retention: true,
+        },
+        Operation::PruneServerBackups {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            expected_plan_fingerprint: "e".repeat(64),
+            keep_last_override: Some(0),
+        },
+        Operation::CancelServerBackup { request_id: 0 },
+        Operation::RestoreServerBackup {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            backup_id: "../backup".into(),
+            expected_plan_fingerprint: "e".repeat(64),
+        },
+        Operation::RollbackServerRestore {
+            instance_id: "server_0123456789abcdef0123456789abcdef".into(),
+            expected_journal_fingerprint: "invalid".into(),
+        },
     ];
     for operation in invalid_operations {
         assert!(

@@ -312,6 +312,22 @@ impl Foxy {
                         if let Some(detail) = occurrence_detail(occurrence) {
                             ui.label(detail);
                         }
+                        if let Some(backup_id) = &occurrence.backup_id {
+                            ui.label(tr_fmt(
+                                "Verified backup: {id} ({mode})",
+                                &[
+                                    ("id", backup_id.clone()),
+                                    (
+                                        "mode",
+                                        occurrence
+                                            .backup_consistency
+                                            .unwrap_or_default()
+                                            .as_str()
+                                            .to_owned(),
+                                    ),
+                                ],
+                            ));
+                        }
                         ui.label(
                             RichText::new(occurrence.occurrence_id.as_str())
                                 .color(self.color_text_dim()),
@@ -382,9 +398,14 @@ impl Foxy {
                         )]));
                     }
                     if arma.require_backup {
-                        ui.label(tr(
-                            "This job requires a backup and will be blocked until backup support is implemented.",
-                        ));
+                        ui.label(tr(match policy.backup_mode {
+                            crate::core::server::BackupConsistencyMode::StoppedVerified => {
+                                "Requires a witnessed stopped-consistent backup before running."
+                            }
+                            crate::core::server::BackupConsistencyMode::BestEffortLive => {
+                                "Requires a best-effort live backup before running."
+                            }
+                        }));
                     }
                 }
                 ui.label(tr_fmt(
@@ -790,13 +811,27 @@ impl Foxy {
                 }
                 ui.checkbox(
                     &mut form.require_backup,
-                    tr("Require a backup before this job can run"),
+                    tr("Require a verified backup before running"),
                 );
                 if form.require_backup {
-                    ui.label(tr(
-                        "This job will be blocked until backup support is implemented.",
-                    ));
+                    if form.action == MaintenanceAction::RotateMission {
+                        ui.label(tr(
+                            "Mission rotation runs on a live server and requires enabling best-effort live backup mode below.",
+                        ));
+                    } else {
+                        ui.label(tr(
+                            "A stopped-consistent backup will be created after stopping the server before starting it again.",
+                        ));
+                    }
                 }
+            }
+            if form.action == MaintenanceAction::Backup
+                || (capabilities.arma_administration && form.require_backup)
+            {
+                ui.checkbox(
+                    &mut form.live_backup,
+                    tr("Allow best-effort live backup when the server is running"),
+                );
             }
             if let Some(error) = &form.error {
                 ui.colored_label(self.color_text_error(), tr(error));

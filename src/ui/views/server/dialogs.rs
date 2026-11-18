@@ -13,6 +13,9 @@ impl Foxy {
             ServerDialog::RollbackConfiguration => "Select this previous configuration revision?",
             ServerDialog::SelectDeploymentRecord => "Select this offline deployment record?",
             ServerDialog::ReclaimDeploymentStorage => "Reclaim the reviewed deployment artifacts?",
+            ServerDialog::PruneServerBackups => "Prune excess server backups?",
+            ServerDialog::RestoreServerBackup => "Restore the reviewed server backup?",
+            ServerDialog::RollbackServerRestore => "Roll back the interrupted server restore?",
             ServerDialog::NativeInstall
                 if self
                     .server_view
@@ -68,6 +71,9 @@ impl Foxy {
                 ServerDialog::RollbackConfiguration => "Only the saved configuration selection changes. The current draft, game installation, runtime and saves are kept.",
                 ServerDialog::SelectDeploymentRecord => "This changes only the offline selected record. It does not activate a deployment, alter the server, or start a process.",
                 ServerDialog::ReclaimDeploymentStorage => "Only the listed unreferenced stages, preparations, runtime copies and interrupted leftovers are removed. Content sources, deployment records, configuration archives, runtime state and other instances are kept.",
+                ServerDialog::PruneServerBackups => "Only unpinned excess backups matching the reviewed prune plan are removed. Pinned backups, the newest verified stopped-consistent backup, corrupt backups and unknown entries are kept.",
+                ServerDialog::RestoreServerBackup => "Foxy rechecks the exact saved engine, configuration, content and provider compatibility before restoring. Only backed-up save and profile files are replaced; unknown files remain untouched and previous bytes are retained for rollback.",
+                ServerDialog::RollbackServerRestore => "Foxy uses the retained restore journal to restore the prior save and profile bytes. Review status first and keep this server stopped until recovery is complete.",
                 ServerDialog::NativeInstall if self.server_view.native_install_plan.as_ref().is_some_and(|plan| plan.maintenance.is_some()) => "Foxy downloads the reviewed build into a fresh folder, verifies every file, then binds the new installation to this instance only. The old installation root, unknown files and other instances are retained. Foxy does not restart the server automatically.",
                 ServerDialog::NativeInstall => "Foxy downloads the reviewed depots into a new staging folder, verifies every file, then publishes the folder and binds it to this instance. Existing folders and installations are never changed.",
                 ServerDialog::AcquireWorkshop => "Each item downloads into a new verified revision. Only fully verified items are pinned and update their content profile; earlier revisions are kept and failed items change nothing.",
@@ -127,6 +133,59 @@ impl Foxy {
                 ui.label(self.t_fmt("Review fingerprint: {fingerprint}", &[("fingerprint", plan.fingerprint.clone())]));
                 ui.label(self.t("Foxy re-reviews storage before removing anything and refuses while this instance has a running or unresolved engine consumer."));
             }
+            if dialog == ServerDialog::PruneServerBackups
+                && let Some(plan) = &self.server_view.backups.prune_plan
+            {
+                ui.label(self.t_fmt(
+                    "Backups to prune: {count}; bytes: {bytes}; retained: {retained}",
+                    &[
+                        ("count", plan.candidates.len().to_string()),
+                        ("bytes", plan.reclaimable_bytes.to_string()),
+                        ("retained", plan.retained.len().to_string()),
+                    ],
+                ));
+                ui.label(self.t_fmt(
+                    "Review fingerprint: {fingerprint}",
+                    &[("fingerprint", plan.fingerprint.clone())],
+                ));
+            }
+            if dialog == ServerDialog::RestoreServerBackup
+                && let Some(plan) = &self.server_view.backups.restore_plan
+            {
+                ui.label(self.t_fmt(
+                    "Backup {backup}; restore files: {files}; restore bytes: {bytes}; rollback bytes: {rollback}",
+                    &[
+                        ("backup", plan.backup_id.clone()),
+                        ("files", plan.restore_files.to_string()),
+                        ("bytes", plan.restore_bytes.to_string()),
+                        ("rollback", plan.rollback_bytes.to_string()),
+                    ],
+                ));
+                ui.label(self.t_fmt(
+                    "Review fingerprint: {fingerprint}",
+                    &[("fingerprint", plan.fingerprint.clone())],
+                ));
+            }
+            if dialog == ServerDialog::RollbackServerRestore
+                && let Some(pending) = self
+                    .server_view
+                    .backups
+                    .restore_status
+                    .as_ref()
+                    .and_then(|status| status.pending.as_ref())
+            {
+                ui.label(self.t_fmt(
+                    "Backup {backup}; restore {restore}",
+                    &[
+                        ("backup", pending.backup_id.clone()),
+                        ("restore", pending.restore_id.clone()),
+                    ],
+                ));
+                ui.label(self.t_fmt(
+                    "Recovery fingerprint: {fingerprint}",
+                    &[("fingerprint", pending.fingerprint.clone())],
+                ));
+            }
             if dialog == ServerDialog::NativeInstall
                 && let Some(plan) = &self.server_view.native_install_plan
             {
@@ -173,11 +232,31 @@ impl Foxy {
                 ui.label(self.t_fmt("Repository profiles to acquire: {count}",&[("count",plan.profiles.len().to_string())]));
             }
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!busy, egui::Button::new(self.t("Cancel"))).clicked() { cancel = true; }
+                let cancel_button = ui.add_enabled(!busy, egui::Button::new(self.t("Cancel")));
+                if matches!(dialog, ServerDialog::PruneServerBackups | ServerDialog::RestoreServerBackup | ServerDialog::RollbackServerRestore)
+                    && self.server_view.backups.focus_prune_cancel
+                {
+                    cancel_button.request_focus();
+                    self.server_view.backups.focus_prune_cancel = false;
+                }
+                if cancel_button.has_focus() {
+                    ui.painter().rect_stroke(
+                        cancel_button.rect,
+                        2.0,
+                        egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if cancel_button.clicked() {
+                    cancel = true;
+                }
                 if ui.add_enabled(!busy, egui::Button::new(self.t(match dialog {
                     ServerDialog::DiscardAndClose => "Discard and close",
                     ServerDialog::SelectDeploymentRecord => "Select offline record",
                     ServerDialog::ReclaimDeploymentStorage => "Reclaim reviewed artifacts",
+                    ServerDialog::PruneServerBackups => "Prune excess backups",
+                    ServerDialog::RestoreServerBackup => "Restore reviewed backup",
+                    ServerDialog::RollbackServerRestore => "Roll back restore",
                     ServerDialog::NativeInstall if self.server_view.native_install_plan.as_ref().and_then(|plan| plan.maintenance.as_ref()).is_some_and(|review| matches!(&review.action, crate::core::server::NativeMaintenanceAction::Update)) => "Apply reviewed update",
                     ServerDialog::NativeInstall if self.server_view.native_install_plan.as_ref().and_then(|plan| plan.maintenance.as_ref()).is_some_and(|review| matches!(&review.action, crate::core::server::NativeMaintenanceAction::Repair)) => "Apply reviewed repair",
                     ServerDialog::NativeInstall => "Install reviewed build",
@@ -195,6 +274,17 @@ impl Foxy {
             }
             if dialog == ServerDialog::ReclaimDeploymentStorage {
                 self.server_view.reconciliation_plan = None;
+            }
+            if dialog == ServerDialog::PruneServerBackups {
+                self.server_view.backups.focus_prune_cancel = false;
+                self.server_view.pending_focus = Some("server-backup-controls");
+            }
+            if matches!(
+                dialog,
+                ServerDialog::RestoreServerBackup | ServerDialog::RollbackServerRestore
+            ) {
+                self.server_view.backups.focus_prune_cancel = false;
+                self.server_view.pending_focus = Some("server-backup-controls");
             }
             if dialog == ServerDialog::NativeInstall {
                 self.server_view.native_install_plan = None;
@@ -262,6 +352,59 @@ impl Foxy {
                 }
                 return;
             }
+            if dialog == ServerDialog::PruneServerBackups {
+                if let Some(plan) = self.server_view.backups.prune_plan.as_ref() {
+                    let id = plan.instance_id.clone();
+                    let expected_plan_fingerprint = plan.fingerprint.clone();
+                    self.server_view.dialog = None;
+                    self.start_server_task(
+                        crate::ui::app::server::ServerTaskAction::ApplyServerBackupPrune {
+                            id,
+                            expected_plan_fingerprint,
+                            keep_last_override: None,
+                        },
+                    );
+                }
+                return;
+            }
+            if dialog == ServerDialog::RestoreServerBackup {
+                if let Some(plan) = self.server_view.backups.restore_plan.as_ref() {
+                    let id = plan.instance_id.clone();
+                    let backup_id = plan.backup_id.clone();
+                    let expected_plan_fingerprint = plan.fingerprint.clone();
+                    self.server_view.dialog = None;
+                    self.start_server_task(
+                        crate::ui::app::server::ServerTaskAction::ApplyServerRestore {
+                            id,
+                            backup_id,
+                            expected_plan_fingerprint,
+                        },
+                    );
+                }
+                return;
+            }
+            if dialog == ServerDialog::RollbackServerRestore {
+                if let Some((id, expected_journal_fingerprint)) = self
+                    .server_view
+                    .backups
+                    .restore_status
+                    .as_ref()
+                    .and_then(|status| {
+                        status.pending.as_ref().map(|pending| {
+                            (status.instance_id.clone(), pending.fingerprint.clone())
+                        })
+                    })
+                {
+                    self.server_view.dialog = None;
+                    self.start_server_task(
+                        crate::ui::app::server::ServerTaskAction::RollbackServerRestore {
+                            id,
+                            expected_journal_fingerprint,
+                        },
+                    );
+                }
+                return;
+            }
             if dialog == ServerDialog::DiscardAndClose {
                 self.server_view.discard();
                 self.server_view.dialog = None;
@@ -291,6 +434,9 @@ impl Foxy {
                     | ServerDialog::RollbackConfiguration
                     | ServerDialog::SelectDeploymentRecord
                     | ServerDialog::ReclaimDeploymentStorage
+                    | ServerDialog::PruneServerBackups
+                    | ServerDialog::RestoreServerBackup
+                    | ServerDialog::RollbackServerRestore
                     | ServerDialog::NativeInstall
                     | ServerDialog::AcquireWorkshop
                     | ServerDialog::AcquireRepositoryContent => {

@@ -94,6 +94,10 @@ pub struct Occurrence {
     pub run_generation_after: Option<u64>,
     pub deferred_since_unix_ms: Option<u64>,
     pub next_attempt_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_consistency: Option<crate::core::server::BackupConsistencyMode>,
     pub message: Option<String>,
     pub created_unix_ms: u64,
     pub updated_unix_ms: u64,
@@ -129,6 +133,8 @@ impl Occurrence {
             run_generation_after: None,
             deferred_since_unix_ms: None,
             next_attempt_unix_ms: None,
+            backup_id: None,
+            backup_consistency: None,
             message: None,
             created_unix_ms: now_unix_ms,
             updated_unix_ms: now_unix_ms,
@@ -158,6 +164,10 @@ impl Occurrence {
                 )
             && super::model::valid_job_id(&self.job_id)
             && self.policy_revision > 0
+            && self
+                .backup_id
+                .as_deref()
+                .is_none_or(crate::core::server::valid_backup_id)
             && self
                 .message
                 .as_ref()

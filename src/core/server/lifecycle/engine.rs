@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -188,14 +188,69 @@ impl Runs {
                 instance_id,
                 expected_activation_generation,
                 review_fingerprint,
-            } if instance_id == id.as_str() => self.start(
-                &id,
-                expected_activation_generation,
-                &review_fingerprint,
-                execution,
-                control,
-                None,
-            ),
+            } if instance_id == id.as_str() => {
+                let created_backup = if execution.require_backup {
+                    let status = self
+                        .runs
+                        .get(id.as_str())
+                        .map(|run| run.status.clone())
+                        .unwrap_or_else(|| {
+                            InstanceRuntimeStatus::not_owned(id.clone(), &self.scope)
+                        });
+                    let outcome = self.store.create_server_backup(
+                        &id,
+                        crate::core::server::BackupConsistencyMode::StoppedVerified,
+                        None,
+                        true,
+                        Some(&status),
+                        control,
+                    )?;
+                    Some((
+                        outcome.manifest.backup_id,
+                        outcome.manifest.consistency.mode,
+                    ))
+                } else {
+                    None
+                };
+                match self.start(
+                    &id,
+                    expected_activation_generation,
+                    &review_fingerprint,
+                    execution,
+                    control,
+                    None,
+                ) {
+                    Ok(mut outcome) => {
+                        if let Some((backup_id, backup_consistency)) = created_backup {
+                            outcome.backup_id = Some(backup_id);
+                            outcome.backup_consistency = Some(backup_consistency);
+                        }
+                        Ok(outcome)
+                    }
+                    Err(error) => {
+                        if let Some((backup_id, backup_consistency)) = created_backup {
+                            let status = self
+                                .runs
+                                .get(id.as_str())
+                                .map(|run| run.status.clone())
+                                .unwrap_or_else(|| {
+                                    InstanceRuntimeStatus::not_owned(id.clone(), &self.scope)
+                                });
+                            Ok(RuntimeOperationOutcome {
+                                status,
+                                completed: false,
+                                cancelled: control.snapshot().cancel_requested
+                                    || error == ServerStoreError::Cancelled,
+                                message: Some(error.to_string()),
+                                backup_id: Some(backup_id),
+                                backup_consistency: Some(backup_consistency),
+                            })
+                        } else {
+                            Err(error)
+                        }
+                    }
+                }
+            }
             Operation::StopInstance {
                 instance_id,
                 expected_run_generation,
@@ -222,14 +277,65 @@ impl Runs {
                 if !stopped.completed || cancelled {
                     return Ok(interrupted_restart(stopped, cancelled));
                 }
-                self.start(
+                let created_backup = if execution.require_backup {
+                    match self.store.create_server_backup(
+                        &id,
+                        crate::core::server::BackupConsistencyMode::StoppedVerified,
+                        None,
+                        true,
+                        Some(&stopped.status),
+                        control,
+                    ) {
+                        Ok(outcome) => Some((
+                            outcome.manifest.backup_id,
+                            outcome.manifest.consistency.mode,
+                        )),
+                        Err(error) => {
+                            let cancelled = control.snapshot().cancel_requested
+                                || error == ServerStoreError::Cancelled;
+                            let mut interrupted = interrupted_restart(stopped, cancelled);
+                            if !cancelled {
+                                interrupted.message = Some(format!(
+                                    "Server stopped, but required backup failed before start: {error}"
+                                ));
+                            }
+                            return Ok(interrupted);
+                        }
+                    }
+                } else {
+                    None
+                };
+                match self.start(
                     &id,
                     expected_activation_generation,
                     &review_fingerprint,
                     execution,
                     control,
                     carried.as_ref(),
-                )
+                ) {
+                    Ok(mut outcome) => {
+                        if let Some((backup_id, backup_consistency)) = created_backup {
+                            outcome.backup_id = Some(backup_id);
+                            outcome.backup_consistency = Some(backup_consistency);
+                        }
+                        Ok(outcome)
+                    }
+                    Err(error) => {
+                        if let Some((backup_id, backup_consistency)) = created_backup {
+                            Ok(RuntimeOperationOutcome {
+                                status: stopped.status,
+                                completed: false,
+                                cancelled: control.snapshot().cancel_requested
+                                    || error == ServerStoreError::Cancelled,
+                                message: Some(error.to_string()),
+                                backup_id: Some(backup_id),
+                                backup_consistency: Some(backup_consistency),
+                            })
+                        } else {
+                            Err(error)
+                        }
+                    }
+                }
             }
             Operation::RotateArmaMission {
                 instance_id,
@@ -293,6 +399,131 @@ impl Runs {
                 execution,
                 control,
             ),
+            Operation::CreateServerBackup {
+                instance_id,
+                mode,
+                expected_plan_fingerprint,
+                apply_retention,
+            } if instance_id == id.as_str() => {
+                let consistency_mode = match mode.as_str() {
+                    "stopped_verified" => {
+                        crate::core::server::BackupConsistencyMode::StoppedVerified
+                    }
+                    "best_effort_live" => {
+                        crate::core::server::BackupConsistencyMode::BestEffortLive
+                    }
+                    _ => {
+                        return Err(ServerStoreError::Invalid(
+                            "Invalid backup consistency mode.".into(),
+                        ));
+                    }
+                };
+                if execution.arma_maintenance.is_some() {
+                    let expected_run = self
+                        .runs
+                        .get(id.as_str())
+                        .map_or(0, |run| run.status.run_generation);
+                    if expected_run > 0 {
+                        let _ = self.announce_maintenance(&id, expected_run, execution, control);
+                    }
+                }
+                let status = self
+                    .runs
+                    .get(id.as_str())
+                    .map(|run| run.status.clone())
+                    .unwrap_or_else(|| InstanceRuntimeStatus::not_owned(id.clone(), &self.scope));
+                let outcome = self.store.create_server_backup(
+                    &id,
+                    consistency_mode,
+                    expected_plan_fingerprint.as_deref(),
+                    apply_retention,
+                    Some(&status),
+                    control,
+                )?;
+                Ok(RuntimeOperationOutcome {
+                    status,
+                    completed: true,
+                    cancelled: false,
+                    message: outcome.retention_receipt_id,
+                    backup_id: Some(outcome.manifest.backup_id),
+                    backup_consistency: Some(outcome.manifest.consistency.mode),
+                })
+            }
+            Operation::RestoreServerBackup {
+                instance_id,
+                backup_id,
+                expected_plan_fingerprint,
+            } if instance_id == id.as_str() => {
+                let status = self
+                    .runs
+                    .get(id.as_str())
+                    .map(|run| run.status.clone())
+                    .unwrap_or_else(|| InstanceRuntimeStatus::not_owned(id.clone(), &self.scope));
+                let outcome = self.store.restore_server_backup(
+                    &id,
+                    &backup_id,
+                    &expected_plan_fingerprint,
+                    Some(&status),
+                    control,
+                )?;
+                Ok(RuntimeOperationOutcome {
+                    status,
+                    completed: true,
+                    cancelled: false,
+                    message: Some(outcome.restore_id),
+                    backup_id: None,
+                    backup_consistency: None,
+                })
+            }
+            Operation::RollbackServerRestore {
+                instance_id,
+                expected_journal_fingerprint,
+            } if instance_id == id.as_str() => {
+                let status = self
+                    .runs
+                    .get(id.as_str())
+                    .map(|run| run.status.clone())
+                    .unwrap_or_else(|| InstanceRuntimeStatus::not_owned(id.clone(), &self.scope));
+                let outcome = self.store.rollback_server_restore(
+                    &id,
+                    &expected_journal_fingerprint,
+                    Some(&status),
+                    control,
+                )?;
+                Ok(RuntimeOperationOutcome {
+                    status,
+                    completed: true,
+                    cancelled: false,
+                    message: Some(outcome.restore_id),
+                    backup_id: None,
+                    backup_consistency: None,
+                })
+            }
+            Operation::PruneServerBackups {
+                instance_id,
+                expected_plan_fingerprint,
+                keep_last_override,
+            } if instance_id == id.as_str() => {
+                let status = self
+                    .runs
+                    .get(id.as_str())
+                    .map(|run| run.status.clone())
+                    .unwrap_or_else(|| InstanceRuntimeStatus::not_owned(id.clone(), &self.scope));
+                let outcome = self.store.apply_backup_prune(
+                    &id,
+                    &expected_plan_fingerprint,
+                    keep_last_override,
+                    control,
+                )?;
+                Ok(RuntimeOperationOutcome {
+                    status,
+                    completed: true,
+                    cancelled: false,
+                    message: Some(outcome.receipt_id),
+                    backup_id: None,
+                    backup_consistency: None,
+                })
+            }
             _ => Err(ServerStoreError::Invalid(
                 "Invalid foreground instance operation".into(),
             )),
@@ -331,6 +562,7 @@ impl Runs {
             .map_err(|_| ServerStoreError::Invalid("An instance consumer registration is unresolved; review consumer recovery before starting.".into()))?;
         let plan = self.store.plan_instance_start(id, control)?;
         plan.require_review(expected, fingerprint)?;
+        let launch_store = ServerStore::new(self.store.context().canonicalized()?)?;
         let ports = plan.launch.udp_ports.clone();
         if self
             .runs
@@ -458,21 +690,21 @@ impl Runs {
                     return Err(io::Error::other("Committed runtime changed"));
                 }
                 if !configuration_seeds.is_empty() {
-                    self.store
+                    launch_store
                         .prepare_secret_configuration(id, &configuration_seeds, control)
                         .map_err(|_| {
                             io::Error::other("Protected runtime configuration preparation failed")
                         })?;
                 }
                 if let Some(seed) = &battleye_seed {
-                    self.store
+                    launch_store
                         .prepare_battleye_state(id, seed, control)
                         .map_err(|_| {
                             io::Error::other("Private BattlEye state preparation failed")
                         })?;
                 }
                 if let Some(seed) = &profile_seed {
-                    self.store
+                    launch_store
                         .prepare_native_profile(id, seed, control)
                         .map_err(|_| io::Error::other("Managed profile preparation failed"))?;
                 }
@@ -494,7 +726,21 @@ impl Runs {
                 run.rcon = rcon_plan;
             }
             Err(_) => {
-                run.status.phase = InstanceRuntimePhase::CleanupUncertain;
+                run.status.cleanup_verified = locks.inspect_consumers().is_ok_and(|records| {
+                    !records.iter().any(|record| {
+                        record.session.game_space_id == self.store.context().space_id()
+                            && crate::core::server::headless::consumer_belongs_to(
+                                &record.session.instance_id,
+                                id.as_str(),
+                            )
+                    })
+                });
+                run.status.phase = if run.status.cleanup_verified {
+                    InstanceRuntimePhase::NotOwned
+                } else {
+                    InstanceRuntimePhase::CleanupUncertain
+                };
+                run.observed = Instant::now();
                 self.publish();
                 return Err(ServerStoreError::Invalid("Foreground Start failed; inspect status and installation consumers before retrying.".into()));
             }
@@ -505,6 +751,8 @@ impl Runs {
             completed: true,
             cancelled: false,
             message,
+            backup_id: None,
+            backup_consistency: None,
         };
         self.publish();
         Ok(outcome)
@@ -567,6 +815,8 @@ impl Runs {
                 completed: run.status.cleanup_verified,
                 cancelled: false,
                 message: None,
+                backup_id: None,
+                backup_consistency: None,
             });
         }
         control.checkpoint()?;
@@ -589,6 +839,8 @@ impl Runs {
                     } else {
                         "A headless client did not stop within the timeout. The server was not stopped; retry, or force the stop.".into()
                     }),
+                    backup_id: None,
+                    backup_consistency: None,
                 };
                 self.publish();
                 return Ok(outcome);
@@ -617,6 +869,8 @@ impl Runs {
             let outcome = RuntimeOperationOutcome {
                 status: run.status.clone(), completed, cancelled: false,
                 message: (!completed).then(|| "Forced stop cleanup is unconfirmed; the retained session and protection remain owned.".into()),
+                backup_id: None,
+                backup_consistency: None,
             };
             self.publish();
             return Ok(outcome);
@@ -725,12 +979,15 @@ impl Runs {
             completed,
             cancelled,
             message,
+            backup_id: None,
+            backup_consistency: None,
         };
         self.publish();
         Ok(outcome)
     }
 
     pub(super) fn shutdown(&mut self) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
         let helper = Self::helper(
             self.store.capabilities().definition_kind
                 == Some(super::super::ServerDefinitionKind::Reforger),
@@ -738,11 +995,9 @@ impl Runs {
         for run in self.runs.values_mut() {
             run.headless.hold();
             run.headless.deliver_soft_stop_all(&helper);
-            if let Some(session) = &mut run.session {
-                let _ = session.deliver_soft_stop(Some(&helper));
-            }
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut signalled_servers = BTreeSet::new();
+        let mut next_delivery = Instant::now() + Duration::from_millis(500);
         loop {
             self.observe_all();
             if self
@@ -752,17 +1007,34 @@ impl Runs {
             {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
-                for run in self.runs.values_mut() {
-                    run.headless.force(None);
-                    if let Some(session) = &mut run.session {
+            let expired = Instant::now() >= deadline;
+            let retry = Instant::now() >= next_delivery;
+            for (id, run) in &mut self.runs {
+                if run.headless.running() != 0 {
+                    if expired {
+                        run.headless
+                            .force_with_timeout(None, Duration::from_millis(100));
+                    } else if retry {
+                        run.headless.deliver_soft_stop_all(&helper);
+                    }
+                    if run.headless.running() != 0 {
+                        continue;
+                    }
+                }
+                if let Some(session) = &mut run.session {
+                    if expired {
                         if let Ok(Some(exit)) = session.force_stop(Duration::from_millis(100)) {
                             Self::exited(run, exit);
                         } else {
                             run.status.phase = InstanceRuntimePhase::CleanupUncertain;
                         }
+                    } else if signalled_servers.insert(id.clone()) || retry {
+                        let _ = session.deliver_soft_stop(Some(&helper));
                     }
                 }
+            }
+            if retry {
+                next_delivery = Instant::now() + Duration::from_millis(500);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -804,6 +1076,8 @@ mod tests {
             completed: true,
             cancelled: false,
             message: None,
+            backup_id: None,
+            backup_consistency: None,
         };
         let cancelled = interrupted_restart(stopped, true);
         assert!(!cancelled.completed);
@@ -825,6 +1099,8 @@ mod tests {
             completed: false,
             cancelled: false,
             message: Some("Stop timed out".into()),
+            backup_id: None,
+            backup_consistency: None,
         };
         let refused = interrupted_restart(timed_out, false);
         assert!(!refused.completed);

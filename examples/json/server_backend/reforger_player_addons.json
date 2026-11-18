@@ -1,0 +1,16 @@
+{
+  "game": {
+    "mods": [
+      {
+        "modId": "1111111111111111",
+        "required": true,
+        "version": "1.2.3"
+      },
+      {
+        "modId": "2222222222222222",
+        "required": true,
+        "version": "2.1.0"
+      }
+    ]
+  }
+}

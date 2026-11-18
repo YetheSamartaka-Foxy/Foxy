@@ -33,7 +33,8 @@ impl MaintenanceAction {
             Self::Update => Some(
                 "Unattended installation updates are not available yet. Update the installation explicitly.",
             ),
-            Self::Backup => Some("Server backups are not available yet."),
+            Self::Backup if capabilities.server_backups => None,
+            Self::Backup => Some("Server backups are not available for this game."),
         }
     }
 }
@@ -64,6 +65,11 @@ pub struct MaintenancePolicy {
     pub retry_delay_seconds: u16,
     #[serde(default = "default_stop_timeout")]
     pub stop_timeout_seconds: u16,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::core::server::BackupConsistencyMode::is_stopped"
+    )]
+    pub backup_mode: crate::core::server::BackupConsistencyMode,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +135,7 @@ impl Default for MaintenancePolicy {
             max_attempts: default_attempts(),
             retry_delay_seconds: default_retry_delay(),
             stop_timeout_seconds: default_stop_timeout(),
+            backup_mode: crate::core::server::BackupConsistencyMode::StoppedVerified,
         }
     }
 }

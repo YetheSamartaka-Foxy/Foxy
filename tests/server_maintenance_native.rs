@@ -53,32 +53,64 @@ fn native_maintenance_jobs_run_once_and_never_repeat_unknown_effects() -> io::Re
         "catalog revision",
     )?;
     let restart_at = local_in(45);
-    let scheduled = add_job(
+    let mut scheduled_args = vec![
+        "--name",
+        "Scheduled restart",
+        "--action",
+        "restart",
+        "--at",
+        &restart_at,
+    ];
+    if space == "arma3" {
+        scheduled_args.push("--require-backup");
+    }
+    let scheduled = add_job(&config, &space, &instance, &mut revision, &scheduled_args)?;
+    let update = add_job(
         &config,
         &space,
         &instance,
         &mut revision,
         &[
             "--name",
-            "Scheduled restart",
+            "Update",
             "--action",
-            "restart",
+            "update",
             "--at",
             &restart_at,
         ],
     )?;
-    let backup = add_job(
+    let far_time = far_time_of_day();
+    let live_backup = add_job(
         &config,
         &space,
         &instance,
         &mut revision,
         &[
             "--name",
-            "Backup",
+            "Live backup",
             "--action",
             "backup",
-            "--at",
-            &restart_at,
+            "--live-backup",
+            "--weekly",
+            "daily",
+            "--time",
+            &far_time,
+        ],
+    )?;
+    let stopped_backup = add_job(
+        &config,
+        &space,
+        &instance,
+        &mut revision,
+        &[
+            "--name",
+            "Stopped backup",
+            "--action",
+            "backup",
+            "--weekly",
+            "daily",
+            "--time",
+            &far_time,
         ],
     )?;
     let manual = add_job(
@@ -94,7 +126,7 @@ fn native_maintenance_jobs_run_once_and_never_repeat_unknown_effects() -> io::Re
             "--weekly",
             "daily",
             "--time",
-            &far_time_of_day(),
+            &far_time,
         ],
     )?;
     let queued = add_job(
@@ -110,7 +142,7 @@ fn native_maintenance_jobs_run_once_and_never_repeat_unknown_effects() -> io::Re
             "--weekly",
             "daily",
             "--time",
-            &far_time_of_day(),
+            &far_time,
         ],
     )?;
     let listed = jobs(&config, &space, &instance)?;
@@ -127,9 +159,65 @@ fn native_maintenance_jobs_run_once_and_never_repeat_unknown_effects() -> io::Re
             "Scheduled restart did not replace run {run_1}: {done}"
         )));
     }
+    if space == "arma3" {
+        verify_occurrence_backup(
+            &config,
+            &space,
+            &instance,
+            &done,
+            "stopped_verified",
+            true,
+            &mut evidence,
+        )?;
+    }
     wait_ready(&config, &space, &instance, run_2, &mut evidence)?;
-    let blocked = wait_terminal(&config, &space, &instance, &backup, &mut evidence)?;
+    let blocked = wait_terminal(&config, &space, &instance, &update, &mut evidence)?;
     expect_state(&blocked, "blocked", Some("adapter_unavailable"))?;
+    let live_run = run_now(&config, &space, &instance, &live_backup)?;
+    let live_occ = string(&live_run["data"]["occurrence_id"], "live backup occurrence")?.to_owned();
+    let live_done = wait_occurrence(
+        &config,
+        &space,
+        &instance,
+        &live_occ,
+        &mut evidence,
+        |item| {
+            matches!(
+                item["state"].as_str(),
+                Some("succeeded" | "failed" | "skipped" | "blocked" | "cancelled" | "unknown")
+            )
+        },
+    )?;
+    expect_state(&live_done, "succeeded", None)?;
+    verify_occurrence_backup(
+        &config,
+        &space,
+        &instance,
+        &live_done,
+        "best_effort_live",
+        false,
+        &mut evidence,
+    )?;
+    let after_live = invoke(
+        &config,
+        &[
+            "server",
+            "instance",
+            "status",
+            &instance,
+            "--game-space",
+            &space,
+        ],
+    )?;
+    if number(
+        &after_live["data"]["status"]["run_generation"],
+        "live backup run",
+    )? != run_2
+    {
+        return Err(io::Error::other(
+            "Explicit live backup job unexpectedly restarted the server",
+        ));
+    }
     thread::sleep(Duration::from_secs(8));
     if occurrences_of(&config, &space, &instance, &scheduled)?.len() != 1 {
         return Err(io::Error::other(
@@ -137,7 +225,7 @@ fn native_maintenance_jobs_run_once_and_never_repeat_unknown_effects() -> io::Re
         ));
     }
     report.push(format!(
-        "scheduled restart run {run_1}->{run_2} once, backup blocked (adapter unavailable)"
+        "scheduled restart run {run_1}->{run_2} once, live backup verified, update blocked (adapter unavailable)"
     ));
 
     let first = run_now(&config, &space, &instance, &manual)?;
@@ -302,6 +390,53 @@ fn native_maintenance_jobs_run_once_and_never_repeat_unknown_effects() -> io::Re
     }
     report.push("operator stop before a scheduled restart: skipped, server stayed stopped".into());
 
+    let stopped_run = run_now(&config, &space, &instance, &stopped_backup)?;
+    let stopped_occ = string(
+        &stopped_run["data"]["occurrence_id"],
+        "stopped backup occurrence",
+    )?
+    .to_owned();
+    let stopped_done = wait_occurrence(
+        &config,
+        &space,
+        &instance,
+        &stopped_occ,
+        &mut evidence,
+        |item| {
+            matches!(
+                item["state"].as_str(),
+                Some("succeeded" | "failed" | "skipped" | "blocked" | "cancelled" | "unknown")
+            )
+        },
+    )?;
+    expect_state(&stopped_done, "succeeded", None)?;
+    verify_occurrence_backup(
+        &config,
+        &space,
+        &instance,
+        &stopped_done,
+        "stopped_verified",
+        true,
+        &mut evidence,
+    )?;
+    let still_stopped = invoke(
+        &config,
+        &[
+            "server",
+            "instance",
+            "status",
+            &instance,
+            "--game-space",
+            &space,
+        ],
+    )?;
+    if still_stopped["data"]["status"]["process_exists"] == true {
+        return Err(io::Error::other(
+            "Offline stopped-consistent backup job unexpectedly started the server",
+        ));
+    }
+    report.push("offline stopped-verified maintenance backup succeeded and verified".into());
+
     let history = invoke(
         &config,
         &[
@@ -317,7 +452,15 @@ fn native_maintenance_jobs_run_once_and_never_repeat_unknown_effects() -> io::Re
     if history["data"]["unreadable"] != 0 {
         return Err(io::Error::other("History contains unreadable occurrences"));
     }
-    for job in [&scheduled, &backup, &manual, &queued, &skipped_job] {
+    for job in [
+        &scheduled,
+        &update,
+        &live_backup,
+        &stopped_backup,
+        &manual,
+        &queued,
+        &skipped_job,
+    ] {
         let expected = revision.to_string();
         invoke(
             &config,
@@ -366,6 +509,46 @@ fn native_maintenance_jobs_run_once_and_never_repeat_unknown_effects() -> io::Re
         report.join("; ")
     );
     Ok(())
+}
+
+fn verify_occurrence_backup(
+    config: &Path,
+    space: &str,
+    instance: &str,
+    occurrence: &Value,
+    expected_mode: &str,
+    expected_stopped_verified: bool,
+    evidence: &mut Evidence,
+) -> io::Result<String> {
+    let backup_id = string(&occurrence["backup_id"], "occurrence backup_id")?.to_owned();
+    if occurrence["backup_consistency"].as_str() != Some(expected_mode) {
+        return Err(io::Error::other(format!(
+            "Expected backup consistency {expected_mode}, got: {occurrence}"
+        )));
+    }
+    let verified = invoke(
+        config,
+        &[
+            "server",
+            "backup",
+            "verify",
+            instance,
+            &backup_id,
+            "--game-space",
+            space,
+        ],
+    )?;
+    evidence.push(verified.clone())?;
+    let report = &verified["data"]["verification"];
+    if report["valid"] != true
+        || report["consistency"]["mode"].as_str() != Some(expected_mode)
+        || report["consistency"]["stopped_verified"] != expected_stopped_verified
+    {
+        return Err(io::Error::other(format!(
+            "Verified backup consistency mismatch for {backup_id}: {verified}"
+        )));
+    }
+    Ok(backup_id)
 }
 
 fn local_in(seconds: i64) -> String {

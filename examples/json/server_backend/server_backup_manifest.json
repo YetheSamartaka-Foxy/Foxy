@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "backup_id": "backup_0000000000000000000000000000000000000000000000000000000000000001",
+  "game_space_id": "arma3",
+  "game_id": "arma3",
+  "instance_id": "server_00000000000000000000000000000001",
+  "instance_name": "Main Server",
+  "created_unix_ms": 1795000000000,
+  "plan_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "consistency": {
+    "mode": "stopped_verified",
+    "stopped_verified": true,
+    "owner_running": false,
+    "owner_id": null,
+    "owner_generation": null,
+    "observed_phase": "not_owned",
+    "observed_run_generation": null,
+    "cleanup_verified": true,
+    "headless_running": 0,
+    "active_consumers": 0,
+    "pending_activation_journal": false,
+    "pending_installation_maintenance": false
+  },
+  "engine_set": {
+    "installation_id": "install_00000000000000000000000000000001",
+    "installation_mode": "managed",
+    "engine_build_id": "246810",
+    "active_deployment_record_id": "deployment_1111111111111111111111111111111111111111111111111111111111111111",
+    "active_preparation_id": "prepared_2222222222222222222222222222222222222222222222222222222222222222",
+    "active_runtime_id": "runtime_3333333333333333333333333333333333333333333333333333333333333333",
+    "runtime_manifest_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+    "payload_mode": "reference_metadata_only",
+    "installation_receipt_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "channel": "stable"
+  },
+  "configuration_set": {
+    "instance_revision": 4,
+    "catalog_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "active_configuration_revision_id": "config_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "secret_reference_count": 1,
+    "excluded_secret_paths": [
+      "deployments/runtime-state/home/private-configuration/**",
+      "deployments/runtime-state/home/battleye/**",
+      "deployments/runtime-state/headless/*/join.par",
+      "**/ownerToken.bin"
+    ]
+  },
+  "content_set": {
+    "selected_deployment_record_id": "deployment_1111111111111111111111111111111111111111111111111111111111111111",
+    "active_deployment_record_id": "deployment_1111111111111111111111111111111111111111111111111111111111111111",
+    "pinned_deployment_records": [],
+    "content_stage_ids": [
+      "stage_dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    ],
+    "reforger_addon_lock_digest": null
+  },
+  "provider_set": {
+    "covered_providers": [
+      "arma3_profile_namespace"
+    ],
+    "uncovered_providers": [
+      "arma3_mission_custom_database",
+      "unknown_third_party_persistence"
+    ],
+    "writer_stopped_verified": true
+  },
+  "save_set": {
+    "runtime_state_present": true,
+    "runtime_state_owner_generation": null,
+    "runtime_state_run_generation": null,
+    "save_file_count": 1,
+    "save_total_bytes": 512,
+    "excluded_transient_paths": [
+      "deployments/runtime-state/home/cache/**",
+      "deployments/runtime-state/home/data/**",
+      "deployments/runtime-state/home/runtime/**",
+      "deployments/runtime-state/run_*.log"
+    ]
+  },
+  "total_files": 4,
+  "total_uncompressed_bytes": 1536,
+  "entries": [
+    {
+      "archive_path": "metadata/installation.json",
+      "set": "engine",
+      "size_bytes": 256,
+      "blake3": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "archive_path": "metadata/instance.json",
+      "set": "configuration",
+      "size_bytes": 512,
+      "blake3": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "archive_path": "metadata/provider_coverage.json",
+      "set": "provider",
+      "size_bytes": 256,
+      "blake3": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "archive_path": "saves/home/profiles/Users/FoxyServer/FoxyServer.Arma3Profile",
+      "set": "save",
+      "size_bytes": 512,
+      "blake3": "4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  ]
+}

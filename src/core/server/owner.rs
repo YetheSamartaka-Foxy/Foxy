@@ -431,5 +431,190 @@ fn coordination_file(
     options.open(path)
 }
 
+pub(crate) fn create_server_backup(
+    store: &super::ServerStore,
+    id: &super::ServerInstanceId,
+    mode: super::BackupConsistencyMode,
+    expected_plan_fingerprint: Option<&str>,
+    apply_retention: bool,
+    control: &super::ContentStageControl,
+) -> Result<super::ServerBackupOutcome, super::ServerStoreError> {
+    if !store.capabilities().server_backups {
+        return Err(super::ServerStoreError::UnsupportedGame);
+    }
+    match attach(store.context()) {
+        Ok(Some(attachment)) => {
+            let result = attachment
+                .run_instance(
+                    Operation::CreateServerBackup {
+                        instance_id: id.as_str().into(),
+                        mode: mode.as_str().into(),
+                        expected_plan_fingerprint: expected_plan_fingerprint.map(str::to_owned),
+                        apply_retention,
+                    },
+                    control,
+                )
+                .map_err(|error| {
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        super::ServerStoreError::Cancelled
+                    } else {
+                        super::ServerStoreError::Invalid(error.to_string())
+                    }
+                })?;
+            let backup_id = result.backup_id.ok_or(super::ServerStoreError::Corrupt)?;
+            let pruned = result
+                .message
+                .as_deref()
+                .filter(|receipt| super::valid_prune_receipt_id(receipt))
+                .and_then(|receipt| store.load_prune_receipt(id, receipt, control).ok())
+                .map(|outcome| {
+                    outcome
+                        .removed
+                        .into_iter()
+                        .map(|candidate| candidate.backup_id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            store.load_server_backup_outcome(id, &backup_id, pruned, control)
+        }
+        Ok(None) => with_offline_backup_claim(store, || {
+            store.create_server_backup(
+                id,
+                mode,
+                expected_plan_fingerprint,
+                apply_retention,
+                None,
+                control,
+            )
+        }),
+        Err(error) => Err(super::ServerStoreError::Invalid(error.to_string())),
+    }
+}
+
+pub(crate) fn prune_server_backups(
+    store: &super::ServerStore,
+    id: &super::ServerInstanceId,
+    expected_plan_fingerprint: &str,
+    keep_last_override: Option<u16>,
+    control: &super::ContentStageControl,
+) -> Result<super::BackupPruneOutcome, super::ServerStoreError> {
+    if !store.capabilities().server_backups {
+        return Err(super::ServerStoreError::UnsupportedGame);
+    }
+    match attach(store.context()) {
+        Ok(Some(attachment)) => {
+            let result = attachment
+                .run_instance(
+                    Operation::PruneServerBackups {
+                        instance_id: id.as_str().into(),
+                        expected_plan_fingerprint: expected_plan_fingerprint.to_owned(),
+                        keep_last_override,
+                    },
+                    control,
+                )
+                .map_err(|error| {
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        super::ServerStoreError::Cancelled
+                    } else {
+                        super::ServerStoreError::Invalid(error.to_string())
+                    }
+                })?;
+            let receipt_id = result.message.ok_or(super::ServerStoreError::Corrupt)?;
+            store.load_prune_receipt(id, &receipt_id, control)
+        }
+        Ok(None) => with_offline_backup_claim(store, || {
+            store.apply_backup_prune(id, expected_plan_fingerprint, keep_last_override, control)
+        }),
+        Err(error) => Err(super::ServerStoreError::Invalid(error.to_string())),
+    }
+}
+
+pub(crate) fn restore_server_backup(
+    store: &super::ServerStore,
+    id: &super::ServerInstanceId,
+    backup_id: &str,
+    expected_plan_fingerprint: &str,
+    control: &super::ContentStageControl,
+) -> Result<super::ServerRestoreOutcome, super::ServerStoreError> {
+    run_server_restore(
+        store,
+        id,
+        Operation::RestoreServerBackup {
+            instance_id: id.as_str().into(),
+            backup_id: backup_id.into(),
+            expected_plan_fingerprint: expected_plan_fingerprint.into(),
+        },
+        control,
+        || store.restore_server_backup(id, backup_id, expected_plan_fingerprint, None, control),
+    )
+}
+
+pub(crate) fn rollback_server_restore(
+    store: &super::ServerStore,
+    id: &super::ServerInstanceId,
+    expected_journal_fingerprint: &str,
+    control: &super::ContentStageControl,
+) -> Result<super::ServerRestoreOutcome, super::ServerStoreError> {
+    run_server_restore(
+        store,
+        id,
+        Operation::RollbackServerRestore {
+            instance_id: id.as_str().into(),
+            expected_journal_fingerprint: expected_journal_fingerprint.into(),
+        },
+        control,
+        || store.rollback_server_restore(id, expected_journal_fingerprint, None, control),
+    )
+}
+
+fn run_server_restore(
+    store: &super::ServerStore,
+    id: &super::ServerInstanceId,
+    operation: Operation,
+    control: &super::ContentStageControl,
+    offline: impl FnOnce() -> Result<super::ServerRestoreOutcome, super::ServerStoreError>,
+) -> Result<super::ServerRestoreOutcome, super::ServerStoreError> {
+    if !store.capabilities().server_backups {
+        return Err(super::ServerStoreError::UnsupportedGame);
+    }
+    match attach(store.context()) {
+        Ok(Some(attachment)) => {
+            let result = attachment
+                .run_instance(operation, control)
+                .map_err(|error| {
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        super::ServerStoreError::Cancelled
+                    } else {
+                        super::ServerStoreError::Invalid(error.to_string())
+                    }
+                })?;
+            let receipt = result.message.ok_or(super::ServerStoreError::Corrupt)?;
+            store.load_server_restore_outcome(id, &receipt, control)
+        }
+        Ok(None) => with_offline_backup_claim(store, offline),
+        Err(error) => Err(super::ServerStoreError::Invalid(error.to_string())),
+    }
+}
+
+fn with_offline_backup_claim<T>(
+    store: &super::ServerStore,
+    operation: impl FnOnce() -> Result<T, super::ServerStoreError>,
+) -> Result<T, super::ServerStoreError> {
+    use crate::core::tasks::db_process_lock::{self, LockOutcome};
+    let path = store.validate_claim_path()?;
+    if db_process_lock::holds(&path) {
+        return operation();
+    }
+    match db_process_lock::acquire(&path) {
+        LockOutcome::Acquired => {
+            let result = operation();
+            let _ = db_process_lock::release_for(&path);
+            result
+        }
+        LockOutcome::Busy { .. } => Err(super::ServerStoreError::Ownership),
+        LockOutcome::Unavailable(_) => Err(super::ServerStoreError::Io),
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -393,6 +393,10 @@ impl HeadlessGroup {
     }
 
     pub(super) fn force(&mut self, target: Option<&str>) -> bool {
+        self.force_with_timeout(target, Duration::from_secs(5))
+    }
+
+    pub(super) fn force_with_timeout(&mut self, target: Option<&str>, timeout: Duration) -> bool {
         let server_running = !self.server_ended && !self.hold;
         let now = Instant::now();
         let targets = self.targets(target);
@@ -402,7 +406,7 @@ impl HeadlessGroup {
                 continue;
             };
             client.stop_requested = true;
-            if let Ok(Some(exit)) = session.force_stop(Duration::from_secs(5)) {
+            if let Ok(Some(exit)) = session.force_stop(timeout) {
                 client.exited(exit, server_running, now);
             }
         }
@@ -572,6 +576,8 @@ impl Runs {
             completed,
             cancelled,
             message: Some(message),
+            backup_id: None,
+            backup_consistency: None,
         }
     }
 
@@ -636,7 +642,12 @@ impl Runs {
                 control,
             )?;
             let installation = self.store.native_installation(id)?;
-            let state_root = self.store.record_root(id).join("runtime-state");
+            let state_root = self
+                .store
+                .record_root(id)
+                .join("runtime-state")
+                .canonicalize()
+                .map_err(|_| ServerStoreError::UnsafePath)?;
             let secret = match plans
                 .first()
                 .and_then(|(_, plan, _)| plan.password_reference.as_deref())

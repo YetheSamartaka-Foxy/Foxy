@@ -1,0 +1,14 @@
+{
+  "m_Id": "01234567-89ab-cdef-0123-456789abcdef",
+  "m_eType": 1,
+  "m_iSavedAtUnix": 1700000000,
+  "m_iSavePointNr": 3,
+  "m_sSavePointDisplayName": "Server save",
+  "m_sMissionResource": "{0123456789ABCDEF}Missions/Example.conf",
+  "m_iPlaythroughNr": 2,
+  "m_sPlaythroughDisplayName": "Example playthrough",
+  "m_iStartedUnix": 1699990000,
+  "m_iPlaytimeSeconds": 9000,
+  "m_sGameVersion": "1.9.0.37",
+  "m_aUsedAddons": []
+}
