@@ -6,17 +6,6 @@ use crate::ui::app::server::{ServerDialog, ServerTaskAction};
 use crate::ui::i18n::{tr, tr_fmt};
 use eframe::egui::{self, RichText, Ui};
 
-fn focus_outline(ui: &Ui, response: &egui::Response) {
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect,
-            2.0,
-            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
-
 impl Foxy {
     pub(crate) fn render_server_backups(&mut self, ui: &mut Ui) -> Option<egui::Response> {
         if !crate::core::game::registry()
@@ -40,7 +29,7 @@ impl Foxy {
             }
 
             let status_btn = ui.add_enabled(!busy, egui::Button::new(tr("Refresh restore status")));
-            focus_outline(ui, &status_btn);
+            Self::focus_outline(ui, &status_btn);
             if status_btn.clicked() {
                 self.start_server_task(ServerTaskAction::LoadServerRestoreStatus(id.clone()));
             }
@@ -54,10 +43,9 @@ impl Foxy {
                     ));
                     ui.label(tr_fmt("Recovery fingerprint: {fingerprint}", &[("fingerprint", pending.fingerprint.clone())]));
                     let rollback = ui.add_enabled(!busy, egui::Button::new(tr("Review restore rollback")));
-                    focus_outline(ui, &rollback);
+                    Self::focus_outline(ui, &rollback);
                     if rollback.clicked() {
-                        self.server_view.backups.focus_prune_cancel = true;
-                        self.server_view.dialog = Some(ServerDialog::RollbackServerRestore);
+                        self.server_view.open_dialog(ServerDialog::RollbackServerRestore);
                     }
                 } else {
                     ui.label(tr("No pending restore recovery is recorded."));
@@ -72,7 +60,7 @@ impl Foxy {
                     tr("Allow best-effort live backup while the server is running (default requires witnessed stopped consistency)"),
                 ),
             );
-            focus_outline(ui, &live_check);
+            Self::focus_outline(ui, &live_check);
             if prev_live != self.server_view.backups.live_mode {
                 self.server_view.backups.plan = None;
             }
@@ -96,7 +84,7 @@ impl Foxy {
                     !busy && !dirty,
                     egui::Button::new(tr("Review backup plan")),
                 );
-                focus_outline(ui, &plan_btn);
+                Self::focus_outline(ui, &plan_btn);
                 if plan_btn.clicked() {
                     self.server_view.backups.plan = None;
                     self.server_view.backups.outcome = None;
@@ -114,7 +102,7 @@ impl Foxy {
                     can_create,
                     egui::Button::new(tr("Create verified backup")),
                 );
-                focus_outline(ui, &create_btn);
+                Self::focus_outline(ui, &create_btn);
                 if create_btn.clicked()
                     && let Some((fingerprint, true)) = plan_matches
                 {
@@ -126,7 +114,7 @@ impl Foxy {
                 }
 
                 let refresh_btn = ui.add_enabled(!busy, egui::Button::new(tr("Refresh backups")));
-                focus_outline(ui, &refresh_btn);
+                Self::focus_outline(ui, &refresh_btn);
                 if refresh_btn.clicked() {
                     self.start_server_task(ServerTaskAction::LoadServerBackups(id.clone()));
                 }
@@ -290,10 +278,9 @@ impl Foxy {
                     can_prune,
                     egui::Button::new(tr("Review prune confirmation")),
                 );
-                focus_outline(ui, &confirm_btn);
+                Self::focus_outline(ui, &confirm_btn);
                 if confirm_btn.clicked() {
-                    self.server_view.backups.focus_prune_cancel = true;
-                    self.server_view.dialog = Some(ServerDialog::PruneServerBackups);
+                    self.server_view.open_dialog(ServerDialog::PruneServerBackups);
                 }
             }
 
@@ -361,7 +348,7 @@ impl Foxy {
                         ],
                     );
                     let row = ui.selectable_label(selected, label);
-                    focus_outline(ui, &row);
+                    Self::focus_outline(ui, &row);
                     if row.clicked() {
                         self.server_view.backups.selection = Some(summary.backup_id.clone());
                         self.server_view.backups.restore_plan = None;
@@ -379,7 +366,7 @@ impl Foxy {
             ui.horizontal_wrapped(|ui| {
                 let verify_btn =
                     ui.add_enabled(!busy, egui::Button::new(tr("Verify selected backup")));
-                focus_outline(ui, &verify_btn);
+                Self::focus_outline(ui, &verify_btn);
                 if verify_btn.clicked() {
                     self.start_server_task(ServerTaskAction::VerifyServerBackup {
                         id: id.clone(),
@@ -393,7 +380,7 @@ impl Foxy {
                     "Pin selected backup"
                 };
                 let pin_btn = ui.add_enabled(!busy && !dirty, egui::Button::new(tr(pin_label)));
-                focus_outline(ui, &pin_btn);
+                Self::focus_outline(ui, &pin_btn);
                 if pin_btn.clicked() {
                     self.start_server_task(ServerTaskAction::SetServerBackupPin {
                         id: id.clone(),
@@ -415,7 +402,7 @@ impl Foxy {
                         });
                 let review =
                     ui.add_enabled(!busy && !dirty, egui::Button::new(tr("Review restore")));
-                focus_outline(ui, &review);
+                Self::focus_outline(ui, &review);
                 if review.clicked() {
                     self.server_view.backups.restore_plan = None;
                     self.start_server_task(ServerTaskAction::PlanServerRestore {
@@ -428,10 +415,9 @@ impl Foxy {
                         !busy && !dirty,
                         egui::Button::new(tr("Restore selected backup")),
                     );
-                    focus_outline(ui, &apply);
+                    Self::focus_outline(ui, &apply);
                     if apply.clicked() {
-                        self.server_view.backups.focus_prune_cancel = true;
-                        self.server_view.dialog = Some(ServerDialog::RestoreServerBackup);
+                        self.server_view.open_dialog(ServerDialog::RestoreServerBackup);
                     }
                 }
             });
@@ -484,21 +470,23 @@ impl Foxy {
         }
 
         ui.horizontal_wrapped(|ui| {
-            ui.label(tr("Keep last backups:"));
+            let keep_caption = ui.label(tr("Keep last backups:"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.server_view.backups.keep_last_input)
                     .desired_width(60.0),
-            );
-            ui.label(tr("Max total bytes (optional):"));
+            )
+            .labelled_by(keep_caption.id);
+            let max_caption = ui.label(tr("Max total bytes (optional):"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.server_view.backups.max_bytes_input)
                     .desired_width(120.0),
-            );
+            )
+            .labelled_by(max_caption.id);
             let save_ret = ui.add_enabled(
                 !busy && !dirty,
                 egui::Button::new(tr("Save backup retention policy")),
             );
-            focus_outline(ui, &save_ret);
+            Self::focus_outline(ui, &save_ret);
             if save_ret.clicked() {
                 match parse_retention_inputs(
                     &self.server_view.backups.keep_last_input,
@@ -521,7 +509,7 @@ impl Foxy {
                 !busy && !dirty,
                 egui::Button::new(tr("Review backup pruning")),
             );
-            focus_outline(ui, &prune_plan_btn);
+            Self::focus_outline(ui, &prune_plan_btn);
             if prune_plan_btn.clicked() {
                 self.server_view.backups.prune_plan = None;
                 self.start_server_task(ServerTaskAction::PlanServerBackupPrune {
@@ -540,16 +528,18 @@ fn parse_retention_inputs(
     keep_last_raw: &str,
     max_bytes_raw: &str,
 ) -> Result<BackupRetentionPolicy, String> {
-    let keep_last = keep_last_raw
-        .trim()
-        .parse::<u16>()
-        .map_err(|_| format!("Enter a keep-last count from 1 to {MAX_BACKUP_KEEP_LAST}."))?;
+    let keep_last = keep_last_raw.trim().parse::<u16>().map_err(|_| {
+        tr_fmt(
+            "Enter a keep-last count from 1 to {max}.",
+            &[("max", MAX_BACKUP_KEEP_LAST.to_string())],
+        )
+    })?;
     let max_total_bytes =
         if max_bytes_raw.trim().is_empty() {
             None
         } else {
             Some(max_bytes_raw.trim().parse::<u64>().map_err(|_| {
-                "Enter an integer byte budget or leave blank for unlimited.".to_owned()
+                tr("Enter an integer byte budget or leave blank for unlimited.")
             })?)
         };
     let policy = BackupRetentionPolicy {

@@ -1,6 +1,7 @@
 use super::gradient::{blend_header_color, paint_header_gradient};
 use crate::ui::app::Foxy;
 use crate::ui::i18n::is_rtl;
+use crate::ui::palette::{ON_STRONG_FILL, contrast_ratio};
 use eframe::egui::{
     self, Align, Button, Frame, Layout, Margin, RichText, Sense, TextStyle, Ui, Vec2,
     ViewportCommand,
@@ -92,6 +93,13 @@ impl Foxy {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let size = self.header_control_button_size();
+                let accent = self.color_primary_accent();
+                // Window control glyphs use the 3:1 contrast target for icons.
+                let header_fg = if contrast_ratio(ON_STRONG_FILL, accent) >= 3.0 {
+                    ON_STRONG_FILL
+                } else {
+                    self.color_text_on(accent)
+                };
 
                 let button_frame = Frame {
                     inner_margin: Margin::same(0),
@@ -101,13 +109,18 @@ impl Foxy {
                 if !self.main_view_state.use_window_decorations {
                     if button_frame
                         .show(ui, |ui| {
-                            let close_icon = RichText::new("X").size(
-                                self.settings_view_state
-                                    .font_sizes
-                                    .main_view
-                                    .window_control_icons as f32,
-                            );
-                            let button = ui.add_sized(size, Button::new(close_icon).frame(false));
+                            let close_icon = RichText::new("X")
+                                .size(
+                                    self.settings_view_state
+                                        .font_sizes
+                                        .main_view
+                                        .window_control_icons as f32,
+                                )
+                                .color(header_fg);
+                            let button = ui
+                                .add_sized(size, Button::new(close_icon).frame(false))
+                                .accessible_name(self.t("Close"));
+                            Self::focus_outline_color(ui, &button, header_fg);
                             if button.hovered() && button.sense.senses_click() {
                                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                             }
@@ -120,14 +133,18 @@ impl Foxy {
 
                     if button_frame
                         .show(ui, |ui| {
-                            let maximize_icon = RichText::new("\u{25A1}").size(
-                                self.settings_view_state
-                                    .font_sizes
-                                    .main_view
-                                    .window_control_icons as f32,
-                            );
-                            let button =
-                                ui.add_sized(size, Button::new(maximize_icon).frame(false));
+                            let maximize_icon = RichText::new("\u{25A1}")
+                                .size(
+                                    self.settings_view_state
+                                        .font_sizes
+                                        .main_view
+                                        .window_control_icons as f32,
+                                )
+                                .color(header_fg);
+                            let button = ui
+                                .add_sized(size, Button::new(maximize_icon).frame(false))
+                                .accessible_name(self.t("Maximize"));
+                            Self::focus_outline_color(ui, &button, header_fg);
                             if button.hovered() && button.sense.senses_click() {
                                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                             }
@@ -151,14 +168,18 @@ impl Foxy {
 
                     if button_frame
                         .show(ui, |ui| {
-                            let minimize_icon = RichText::new("\u{2212}").size(
-                                self.settings_view_state
-                                    .font_sizes
-                                    .main_view
-                                    .window_control_icons as f32,
-                            );
-                            let button =
-                                ui.add_sized(size, Button::new(minimize_icon).frame(false));
+                            let minimize_icon = RichText::new("\u{2212}")
+                                .size(
+                                    self.settings_view_state
+                                        .font_sizes
+                                        .main_view
+                                        .window_control_icons as f32,
+                                )
+                                .color(header_fg);
+                            let button = ui
+                                .add_sized(size, Button::new(minimize_icon).frame(false))
+                                .accessible_name(self.t("Minimize"));
+                            Self::focus_outline_color(ui, &button, header_fg);
                             if button.hovered() && button.sense.senses_click() {
                                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                             }
@@ -181,13 +202,18 @@ impl Foxy {
 
                 if button_frame
                     .show(ui, |ui| {
-                        let settings_icon = RichText::new("\u{2699}").size(
-                            self.settings_view_state
-                                .font_sizes
-                                .main_view
-                                .window_control_icons as f32,
-                        );
-                        let button = ui.add_sized(size, Button::new(settings_icon).frame(false));
+                        let settings_icon = RichText::new("\u{2699}")
+                            .size(
+                                self.settings_view_state
+                                    .font_sizes
+                                    .main_view
+                                    .window_control_icons as f32,
+                            )
+                            .color(header_fg);
+                        let button = ui
+                            .add_sized(size, Button::new(settings_icon).frame(false))
+                            .accessible_name(self.t("Settings"));
+                        Self::focus_outline_color(ui, &button, header_fg);
                         if button.hovered() && button.sense.senses_click() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }

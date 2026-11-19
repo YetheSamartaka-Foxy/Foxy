@@ -140,6 +140,7 @@ pub enum HelpTab {
     GameSpaces,
     ChecksAndUpdates,
     ProfilesAndLaunch,
+    ServerAddonProfiles,
     RepositorySpacesAndAddons,
     SteamWorkshopAndExtraFiles,
     EditorMissions,
@@ -161,6 +162,7 @@ impl HelpTab {
             HelpTab::GameSpaces => "Game spaces",
             HelpTab::ChecksAndUpdates => "Checks and updates",
             HelpTab::ProfilesAndLaunch => "Profiles and launch",
+            HelpTab::ServerAddonProfiles => "Server addon profiles",
             HelpTab::RepositorySpacesAndAddons => "Repository spaces and addons",
             HelpTab::SteamWorkshopAndExtraFiles => "Steam Workshop and extra files",
             HelpTab::EditorMissions => "Editor missions",
@@ -175,13 +177,14 @@ impl HelpTab {
         }
     }
 
-    pub fn all_tabs() -> [HelpTab; 16] {
+    pub fn all_tabs() -> [HelpTab; 17] {
         [
             HelpTab::Overview,
             HelpTab::GettingStarted,
             HelpTab::GameSpaces,
             HelpTab::ChecksAndUpdates,
             HelpTab::ProfilesAndLaunch,
+            HelpTab::ServerAddonProfiles,
             HelpTab::RepositorySpacesAndAddons,
             HelpTab::SteamWorkshopAndExtraFiles,
             HelpTab::EditorMissions,

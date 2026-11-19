@@ -170,10 +170,14 @@ impl Foxy {
                                     });
                                 });
 
+                                let delete_fill = self.color_action_destructive();
                                 let delete_button = ui.add_sized(
                                     Vec2::new(30.0, 30.0),
-                                    Button::new("X").fill(self.color_text_error()),
-                                ).on_hover_text(tr("Remove this folder from the additional search folders list. The actual folder is not deleted."));
+                                    Button::new(RichText::new("X").color(self.color_text_on(delete_fill)))
+                                        .fill(delete_fill),
+                                )
+                                .accessible_name(tr_fmt("Remove additional folder {folder}", &[("folder", folder.clone())]))
+                                .on_hover_text(tr("Remove this folder from the additional search folders list. The actual folder is not deleted."));
 
                                 if delete_button.hovered() {
                                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -213,13 +217,14 @@ impl Foxy {
             ui.separator();
 
             ui.horizontal(|ui| {
-                ui.label(tr("Filter:"));
+                let filter_label = ui.label(tr("Filter:"));
                 ui.add_space(horizontal_padding);
                 let text_edit_width = ui.available_width() - 2.0 * horizontal_padding;
                 ui.add(
                     TextEdit::singleline(&mut self.settings_view_state.cleanup_folders_filter)
                         .desired_width(text_edit_width),
-                );
+                )
+                .labelled_by(filter_label.id);
                 ui.add_space(horizontal_padding);
             });
             ui.separator();
@@ -256,10 +261,14 @@ impl Foxy {
                                     ),
                                 );
 
+                                let delete_fill = self.color_action_destructive();
                                 let delete_button = ui.add_sized(
                                     Vec2::new(30.0, 30.0),
-                                    Button::new("X").fill(self.color_text_error()),
-                                ).on_hover_text(tr("Delete this unused addon folder from disk."));
+                                    Button::new(RichText::new("X").color(self.color_text_on(delete_fill)))
+                                        .fill(delete_fill),
+                                )
+                                .accessible_name(tr_fmt("Delete unused folder {folder}", &[("folder", folder.clone())]))
+                                .on_hover_text(tr("Delete this unused addon folder from disk."));
 
                                 if delete_button.hovered() {
                                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);

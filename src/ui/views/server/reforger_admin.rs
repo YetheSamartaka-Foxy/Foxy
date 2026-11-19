@@ -1,4 +1,4 @@
-use eframe::egui::{self, Response, RichText, Ui};
+use eframe::egui::{self, RichText, Ui};
 
 use crate::core::server::owner::RconConnection;
 use crate::core::server::rcon::{RconCommandRecord, RconCommandState, reforger};
@@ -9,17 +9,6 @@ use crate::ui::app::server::reforger_admin::{
     ReforgerAdminAction, ReforgerAdminConfirmation, ReforgerAdminViewState,
 };
 use crate::ui::i18n::{tr, tr_fmt};
-
-fn focus_outline(ui: &Ui, response: &Response) {
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect,
-            2.0,
-            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
 
 fn action_label(action: ReforgerAdminAction) -> &'static str {
     match action {
@@ -294,7 +283,7 @@ impl Foxy {
                 !busy && connected && state.confirmation.is_none(),
                 egui::Button::new(tr("Review command")),
             );
-            focus_outline(ui, &review);
+            Self::focus_outline(ui, &review);
             if review.clicked() {
                 match make_command(&state, &records).and_then(|command| {
                     let wire_text = command.wire_text()?;
@@ -335,18 +324,22 @@ impl Foxy {
                         !busy && connected,
                         egui::Button::new(tr("Send once")),
                     );
-                    focus_outline(ui, &send);
+                    Self::focus_outline(ui, &send);
                     let safe = ui.button(tr("Cancel"));
                     if state.focus_cancel {
                         safe.request_focus();
                         safe.scroll_to_me(Some(egui::Align::Center));
                         state.focus_cancel = false;
                     }
-                    focus_outline(ui, &safe);
+                    Self::focus_outline(ui, &safe);
                     if send.clicked() {
                         send_command = Some(confirmation);
                     }
-                    cancel = safe.clicked();
+                    cancel = safe.clicked()
+                        || (!busy
+                            && ui.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            }));
                 });
                 if cancel {
                     state.confirmation = None;

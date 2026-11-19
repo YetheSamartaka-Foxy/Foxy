@@ -1,8 +1,9 @@
 use crate::core::game::LaunchFlagField;
 use crate::ui::app::Foxy;
 use crate::ui::i18n::tr;
+use crate::ui::palette::contrast_text_on;
 use crate::ui::types::{has_launch_param_token, set_launch_param_token};
-use eframe::egui::{Button, Color32, TextEdit, Ui, Vec2};
+use eframe::egui::{Button, Color32, RichText, TextEdit, Ui, Vec2};
 use log::{info, warn};
 
 struct LaunchParamTarget<'a> {
@@ -201,7 +202,7 @@ impl Foxy {
         ui: &mut Ui,
         repo_index: usize,
         color_primary_accent: Color32,
-        color_text_error: Color32,
+        color_action_destructive: Color32,
         pad_f32: f32,
         _force_redownload: &mut bool,
         _wipe_repository_db_entries: &mut bool,
@@ -211,13 +212,16 @@ impl Foxy {
             let repo = &self.repository_view_state.repositories[repo_index];
             self.is_repository_db_wipe_pending(&repo.address)
         };
+        let accent_ink = contrast_text_on(color_primary_accent);
+        let destructive_ink = contrast_text_on(color_action_destructive);
 
         if !self.repository_view_state.repositories[repo_index].is_local() {
             ui.horizontal(|ui| {
                 let w = ui.available_width() - 2.0 * pad_f32;
                 let recheck_integrity_btn = ui.add_sized(
                     Vec2::new(w, 30.0),
-                    Button::new(tr("Recheck repository integrity")).fill(color_primary_accent),
+                    Button::new(RichText::new(tr("Recheck repository integrity")).color(accent_ink))
+                        .fill(color_primary_accent),
                 );
                 if recheck_integrity_btn.hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -232,7 +236,7 @@ impl Foxy {
                 let w = ui.available_width() - 2.0 * pad_f32;
                 let force_btn = ui.add_enabled(
                     !wipe_pending,
-                    Button::new(tr("Force redownload repository"))
+                    Button::new(RichText::new(tr("Force redownload repository")).color(accent_ink))
                         .fill(color_primary_accent)
                         .min_size(Vec2::new(w, 30.0)),
                 );
@@ -249,9 +253,11 @@ impl Foxy {
                 let w = ui.available_width() - 2.0 * pad_f32;
                 let wipe_db_btn = ui.add_enabled(
                     !wipe_pending,
-                    Button::new(tr("Wipe repository database entries"))
-                        .fill(color_text_error)
-                        .min_size(Vec2::new(w, 30.0)),
+                    Button::new(
+                        RichText::new(tr("Wipe repository database entries")).color(destructive_ink),
+                    )
+                    .fill(color_action_destructive)
+                    .min_size(Vec2::new(w, 30.0)),
                 );
                 if wipe_db_btn.hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -267,7 +273,8 @@ impl Foxy {
             let w = ui.available_width() - 2.0 * pad_f32;
             let d = ui.add_sized(
                 Vec2::new(w, 30.0),
-                Button::new(tr("Delete repository")).fill(color_text_error),
+                Button::new(RichText::new(tr("Delete repository")).color(destructive_ink))
+                    .fill(color_action_destructive),
             );
             if d.hovered() {
                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);

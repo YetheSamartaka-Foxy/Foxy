@@ -454,4 +454,49 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn examples_respect_settings_partition() {
+        let app_raw = include_str!("../../../../examples/json/appdata/app_settings.json");
+        let app_value: Value = serde_json::from_str(app_raw).expect("parse app_settings.json");
+        for key in app_value.as_object().expect("app_settings object").keys() {
+            assert!(
+                !is_game_space_key(key),
+                "app_settings.json must not contain game-space key `{key}`"
+            );
+        }
+        for (name, raw) in [
+            (
+                "arma3",
+                include_str!("../../../../examples/json/appdata/games/arma3/game_settings.json"),
+            ),
+            (
+                "twwh3",
+                include_str!("../../../../examples/json/appdata/games/twwh3/game_settings.json"),
+            ),
+            (
+                "reforger",
+                include_str!("../../../../examples/json/appdata/games/reforger/game_settings.json"),
+            ),
+            (
+                "generic",
+                include_str!("../../../../examples/json/appdata/games/generic/game_settings.json"),
+            ),
+        ] {
+            let value: Value = serde_json::from_str(raw).expect("parse game_settings.json");
+            let obj = value.as_object().expect("game_settings object");
+            for key in obj.keys() {
+                assert!(
+                    GAME_SPACE_SETTINGS_KEYS.contains(&key.as_str()),
+                    "{name}/game_settings.json contains non-game-space key `{key}`"
+                );
+            }
+            let merged = merge_value_over_defaults(
+                serde_json::to_value(crate::ui::types::SettingsViewState::default()).unwrap(),
+                merge_settings_values(app_value.clone(), value),
+            );
+            let _: crate::ui::types::SettingsViewState =
+                serde_json::from_value(merged).expect("merged settings parse");
+        }
+    }
 }

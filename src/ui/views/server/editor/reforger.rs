@@ -9,6 +9,9 @@ pub(super) fn render(
     next_key: &mut u64,
     field_scope: egui::Id,
 ) {
+    ui.group(|ui| {
+        ui.set_min_width(ui.available_width());
+    ui.heading(tr("Identity and network"));
     super::text(
         ui,
         "Server name",
@@ -16,9 +19,11 @@ pub(super) fn render(
         &mut settings.name,
     );
     super::number(ui, "Bind port", &mut settings.bind_port, u16::MAX);
+    ui.label(tr("The bind port receives game traffic. Leave the address unset to use the engine's default interface."));
     let mut custom_address = settings.bind_address.is_some();
     if ui
         .checkbox(&mut custom_address, tr("Use explicit IPv4 bind address"))
+        .on_hover_text(tr("Limits the server socket to this local IPv4 interface; this does not control public listing."))
         .changed()
     {
         settings.bind_address = custom_address.then_some(std::net::Ipv4Addr::LOCALHOST);
@@ -45,10 +50,12 @@ pub(super) fn render(
         *address = std::net::Ipv4Addr::from(octets);
     }
     super::number(ui, "Maximum players", &mut settings.max_players, 128);
-    ui.checkbox(&mut settings.visible, tr("List server publicly"));
+    ui.checkbox(&mut settings.visible, tr("List server publicly"))
+        .on_hover_text(tr("Controls public server listing. It does not restrict network binding or direct connections."));
     let mut query = settings.a2s_port.is_some();
     if ui
         .checkbox(&mut query, tr("Enable A2S query port"))
+        .on_hover_text(tr("Enables the separate Steam server query endpoint used to retrieve server information."))
         .changed()
     {
         settings.a2s_port = query.then_some(17777);
@@ -56,25 +63,33 @@ pub(super) fn render(
     if let Some(port) = &mut settings.a2s_port {
         super::number(ui, "A2S query port", port, u16::MAX);
     }
-    let mut scenario = settings.scenario_id.clone().unwrap_or_default();
-    super::text(
-        ui,
-        "Scenario resource",
-        field_scope.with("scenario"),
-        &mut scenario,
-    );
-    settings.scenario_id = (!scenario.is_empty()).then_some(scenario);
-    ui.label(tr(
-        "Use the full {GUID}path.conf resource name; an empty scenario is allowed in a draft.",
-    ));
-    ui.label(tr(
-        "A scenario resource name does not prove that the scenario is installed.",
-    ));
-    scenario_end(
-        ui,
-        &mut settings.scenario_end,
-        field_scope.with("scenario-end"),
-    );
+    });
+    ui.add_space(6.0);
+    ui.group(|ui| {
+        ui.set_min_width(ui.available_width());
+        ui.heading(tr("Scenario"));
+        let mut scenario = settings.scenario_id.clone().unwrap_or_default();
+        super::text(
+            ui,
+            "Scenario resource",
+            field_scope.with("scenario"),
+            &mut scenario,
+        );
+        settings.scenario_id = (!scenario.is_empty()).then_some(scenario);
+        ui.label(tr(
+            "Use the full {GUID}path.conf resource name; an empty scenario is allowed in a draft.",
+        ));
+        ui.label(tr(
+            "A scenario resource name does not prove that the scenario is installed.",
+        ));
+        scenario_end(
+            ui,
+            &mut settings.scenario_end,
+            field_scope.with("scenario-end"),
+        );
+    });
+    ui.add_space(6.0);
+    ui.collapsing(tr("Advanced server settings"), |ui| {
     ui.heading(tr("Advanced Reforger fields"));
     tri_state(
         ui,
@@ -82,6 +97,7 @@ pub(super) fn render(
         field_scope.with("cross-platform"),
         &mut settings.cross_platform,
     );
+    ui.label(tr("Leave unset to let the engine choose its own default; Explicit false is different from leaving the field out."));
     tri_state(
         ui,
         "Mods required by default",
@@ -121,16 +137,24 @@ pub(super) fn render(
         field_scope.with("third-person"),
         &mut settings.game_properties.disable_third_person,
     );
+    ui.label(tr("Distances are measured in meters. An unset value is omitted from generated configuration."));
+    });
+    ui.add_space(6.0);
+    ui.group(|ui| {
+        ui.set_min_width(ui.available_width());
     ui.heading(tr("Addon intent"));
+    ui.label(tr("These are server-selected addon requirements by GUID. They are separate from player recommendations and from save-session selection."));
     let mut remove = None;
     for (index, addon) in settings.addons.iter_mut().enumerate() {
         ui.push_id(("addon", keys[index]), |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(tr("Addon GUID"));
-                ui.text_edit_singleline(&mut addon.addon_id);
+                let label = ui.label(tr("Addon GUID"));
+                ui.text_edit_singleline(&mut addon.addon_id).labelled_by(label.id)
+                    .on_hover_text(tr("Use the addon's Reforger GUID. Foxy resolves dependencies during content review."));
                 let mut version = addon.version.clone().unwrap_or_default();
-                ui.label(tr("Version (optional)"));
-                ui.text_edit_singleline(&mut version);
+                let label = ui.label(tr("Version (optional)"));
+                ui.text_edit_singleline(&mut version).labelled_by(label.id)
+                    .on_hover_text(tr("A version pin requests this exact addon version; an empty value follows the selected resolution policy."));
                 addon.version = (!version.is_empty()).then_some(version);
                 egui::ComboBox::from_id_salt("required")
                     .selected_text(tr(required_label(addon.required)))
@@ -143,7 +167,7 @@ pub(super) fn render(
                             );
                         }
                     });
-                if ui.button(tr("Remove addon intent")).clicked() {
+                if ui.button(tr("Remove addon intent")).on_hover_text(tr("Removes this addon requirement from the saved server draft." )).clicked() {
                     remove = Some(index);
                 }
             });
@@ -163,6 +187,7 @@ pub(super) fn render(
         keys.push(*next_key);
         *next_key += 1;
     }
+    });
 }
 
 fn scenario_end(ui: &mut Ui, policy: &mut crate::core::server::ReforgerScenarioEnd, id: egui::Id) {
@@ -223,7 +248,8 @@ fn tri_state(ui: &mut Ui, label: &str, id: egui::Id, value: &mut Option<bool>) {
                 }
             })
             .response
-            .labelled_by(caption.id);
+            .labelled_by(caption.id)
+            .on_hover_text(tr("This is an optional native setting. Leave unset to omit the field and use the engine default."));
     });
 }
 
@@ -238,7 +264,13 @@ fn tri_label(value: Option<bool>) -> &'static str {
 fn optional_distance(ui: &mut Ui, label: &str, value: &mut Option<u32>) {
     ui.horizontal_wrapped(|ui| {
         let mut enabled = value.is_some();
-        if ui.checkbox(&mut enabled, tr(label)).changed() {
+        if ui
+            .checkbox(&mut enabled, tr(label))
+            .on_hover_text(tr(
+                "Adds this optional distance value to the server configuration.",
+            ))
+            .changed()
+        {
             *value = enabled.then_some(0);
         }
         if let Some(distance) = value {

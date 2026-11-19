@@ -1,4 +1,3 @@
-use super::palette;
 use eframe::egui::{Button, Response, RichText};
 
 #[derive(Clone)]
@@ -51,7 +50,7 @@ pub fn attach_context_menu<T: Copy>(
                 ui.separator();
             }
             let mut button = Button::new(if item.danger {
-                RichText::new(&item.label).color(palette::ERROR)
+                RichText::new(&item.label).color(ui.visuals().error_fg_color)
             } else {
                 RichText::new(&item.label)
             });

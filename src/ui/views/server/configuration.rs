@@ -119,7 +119,10 @@ impl Foxy {
                                 .on_hover_text(revision);
                             }
                         });
-                if selector.response.has_focus() && !state.revisions.is_empty() {
+                let selector_response = selector
+                    .response
+                    .accessible_name(tr("Selected configuration revision"));
+                if selector_response.has_focus() && !state.revisions.is_empty() {
                     let offset = ui.input_mut(|input| {
                         if input
                             .consume_key(eframe::egui::Modifiers::NONE, eframe::egui::Key::ArrowUp)
@@ -142,7 +145,7 @@ impl Foxy {
                         ui.memory_mut(|memory| {
                             memory.move_focus(eframe::egui::FocusDirection::None)
                         });
-                        selector.response.request_focus();
+                        selector_response.request_focus();
                     }
                 }
                 if let Some(revision) = self.server_view.configuration_choice.clone() {

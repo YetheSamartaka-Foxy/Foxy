@@ -63,8 +63,9 @@ impl Foxy {
             let busy = self.server_view.busy();
             ui.heading(self.t(title));
             if matches!(dialog, ServerDialog::Rename | ServerDialog::Clone) {
-                ui.label(self.t("Instance display name"));
-                ui.add(egui::TextEdit::singleline(&mut self.server_view.dialog_name).id(name_id));
+                let caption = ui.label(self.t("Instance display name"));
+                ui.add(egui::TextEdit::singleline(&mut self.server_view.dialog_name).id(name_id))
+                    .labelled_by(caption.id);
             }
             ui.label(self.t(match dialog {
                 ServerDialog::AcquireRepositoryContent=>"The current remote publication will be downloaded and verified into an inactive retained stage. Previous complete stages, source folders and client enablement are kept.",
@@ -233,24 +234,14 @@ impl Foxy {
             }
             ui.horizontal_wrapped(|ui| {
                 let cancel_button = ui.add_enabled(!busy, egui::Button::new(self.t("Cancel")));
-                if matches!(dialog, ServerDialog::PruneServerBackups | ServerDialog::RestoreServerBackup | ServerDialog::RollbackServerRestore)
-                    && self.server_view.backups.focus_prune_cancel
-                {
+                if cancel_button.enabled() && ui.is_visible() && std::mem::take(&mut self.server_view.focus_dialog_cancel) {
                     cancel_button.request_focus();
-                    self.server_view.backups.focus_prune_cancel = false;
                 }
-                if cancel_button.has_focus() {
-                    ui.painter().rect_stroke(
-                        cancel_button.rect,
-                        2.0,
-                        egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-                        egui::StrokeKind::Inside,
-                    );
-                }
+                Self::focus_outline(ui, &cancel_button);
                 if cancel_button.clicked() {
                     cancel = true;
                 }
-                if ui.add_enabled(!busy, egui::Button::new(self.t(match dialog {
+                let confirm_button = ui.add_enabled(!busy, egui::Button::new(self.t(match dialog {
                     ServerDialog::DiscardAndClose => "Discard and close",
                     ServerDialog::SelectDeploymentRecord => "Select offline record",
                     ServerDialog::ReclaimDeploymentStorage => "Reclaim reviewed artifacts",
@@ -263,7 +254,9 @@ impl Foxy {
                     ServerDialog::AcquireWorkshop => "Acquire reviewed items",
                     ServerDialog::AcquireRepositoryContent=>"Acquire repository content",
                     _ => "Confirm",
-                }))).clicked() { confirm = true; }
+                })));
+                Self::focus_outline(ui, &confirm_button);
+                if confirm_button.clicked() { confirm = true; }
             });
             if !busy && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { cancel = true; }
         });
@@ -275,15 +268,10 @@ impl Foxy {
             if dialog == ServerDialog::ReclaimDeploymentStorage {
                 self.server_view.reconciliation_plan = None;
             }
-            if dialog == ServerDialog::PruneServerBackups {
-                self.server_view.backups.focus_prune_cancel = false;
-                self.server_view.pending_focus = Some("server-backup-controls");
-            }
             if matches!(
                 dialog,
-                ServerDialog::RestoreServerBackup | ServerDialog::RollbackServerRestore
+                ServerDialog::PruneServerBackups | ServerDialog::RestoreServerBackup | ServerDialog::RollbackServerRestore
             ) {
-                self.server_view.backups.focus_prune_cancel = false;
                 self.server_view.pending_focus = Some("server-backup-controls");
             }
             if dialog == ServerDialog::NativeInstall {
@@ -297,6 +285,7 @@ impl Foxy {
                 self.server_view.acquisition_plan = None;
             }
             self.server_view.dialog = None;
+            return;
         }
         if confirm {
             if dialog == ServerDialog::AcquireRepositoryContent {
@@ -464,7 +453,7 @@ impl Foxy {
         if self.server_view.dirty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_requested_at = None;
-            self.server_view.dialog = Some(ServerDialog::DiscardAndClose);
+            self.server_view.open_dialog(ServerDialog::DiscardAndClose);
             self.needs_repaint = true;
             return true;
         }

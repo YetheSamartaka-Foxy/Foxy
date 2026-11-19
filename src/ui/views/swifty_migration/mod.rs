@@ -133,6 +133,10 @@ impl Foxy {
     }
 
     pub fn render_swifty_migration_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render_swifty_migration_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_swifty_migration_contents(&mut self, ui: &mut Ui) {
         let settings_margin = Margin {
             left: 15,
             right: 15,
@@ -161,15 +165,18 @@ impl Foxy {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let close_icon_size =
                     self.settings_view_state.font_sizes.settings_view.close_icon as f32;
-                let close_button = ui.add_sized(
-                    Self::modal_icon_button_size(close_icon_size),
-                    Button::new(
-                        RichText::new("X")
-                            .color(self.color_text_normal())
-                            .size(close_icon_size),
+                let close_button = ui
+                    .add_sized(
+                        Self::modal_icon_button_size(close_icon_size),
+                        Button::new(
+                            RichText::new("X")
+                                .color(self.color_text_normal())
+                                .size(close_icon_size),
+                        )
+                        .fill(self.color_main_bg()),
                     )
-                    .fill(self.color_main_bg()),
-                );
+                    .accessible_name(tr("Close"));
+                Self::focus_outline(ui, &close_button);
                 if close_button.hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
@@ -442,7 +449,8 @@ impl Foxy {
         card_frame.show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let checkbox = Self::ui_state_checkbox(ui, &mut selected, "");
+                let checkbox =
+                    Self::ui_state_checkbox(ui, &mut selected, "").accessible_name(name.as_str());
                 if checkbox.hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }

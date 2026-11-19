@@ -219,7 +219,13 @@ impl Foxy {
                     };
                     let confirm_enabled = name_error.is_none();
                     let confirm_button = if action.kind == Arma3ProfileActionKind::Delete {
-                        ui.add(Button::new(confirm_label).fill(self.color_text_error()))
+                        let delete_fill = self.color_action_destructive();
+                        ui.add(
+                            Button::new(
+                                RichText::new(confirm_label).color(self.color_text_on(delete_fill)),
+                            )
+                            .fill(delete_fill),
+                        )
                     } else {
                         ui.add_enabled(confirm_enabled, Button::new(confirm_label))
                     };

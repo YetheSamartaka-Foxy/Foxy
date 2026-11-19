@@ -37,7 +37,7 @@ impl Foxy {
         if self.profile_backup_work_in_flight() {
             return Some("Wait for profile backup work to finish.");
         }
-        if self.startup_recovery_rx.is_some() {
+        if self.startup_recovery_rx.is_some() || self.startup_diagnostics_rx.is_some() {
             return Some("Finish downloads and scans before switching game spaces.");
         }
         if self.hash_evidence_retry_in_flight
@@ -375,6 +375,9 @@ impl Foxy {
         reservation: crate::core::tasks::db_process_lock::ReservedClaim,
     ) {
         self.hash_evidence_state = None;
+        self.hash_evidence_notice_open = false;
+        self.backend_progress_rx = None;
+        self.clear_progress_event_history();
         if let Err(error) = crate::core::tasks::init_database::close_active_database_sync() {
             self.end_client_worker_handoff();
             self.mark_fs_watch_index_dirty();

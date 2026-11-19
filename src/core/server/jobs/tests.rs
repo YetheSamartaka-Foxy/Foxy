@@ -662,3 +662,12 @@ fn public_examples_are_valid_catalog_and_occurrence_records() {
     );
     assert!(occurrence.state.terminal());
 }
+
+#[test]
+fn public_reforger_maintenance_example_is_valid_catalog() {
+    let catalog: MaintenanceCatalog = serde_json::from_str(include_str!(
+        "../../../../examples/json/server_backend/server_reforger_maintenance_jobs.json"
+    ))
+    .unwrap();
+    catalog.validate(&catalog.instance_id).unwrap();
+}

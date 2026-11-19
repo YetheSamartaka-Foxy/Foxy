@@ -26,21 +26,7 @@ fn push_configured_path(paths: &mut Vec<api::StartupStoragePath>, role: &'static
 }
 
 impl Foxy {
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        launch_debug_mode: bool,
-        agent_gui: AgentGuiLaunchConfig,
-        debug_modal_previews: Vec<crate::ui::app::debug_modals::DebugModal>,
-        mode_override: Option<crate::core::app_mode::AppMode>,
-    ) -> Self {
-        info!("Initializing Foxy UI state");
-        let mut visuals = Self::base_visuals(true);
-        visuals.override_text_color = Some(palette::TEXT_NORMAL);
-        cc.egui_ctx.set_theme(egui::Theme::Dark);
-        // Avoid the native theme call: egui 0.36 has turned Foxy's Glow surface black on some hybrid-GPU systems.
-        cc.egui_ctx.options_mut(|o| o.sync_window_theme = false);
-        cc.egui_ctx.set_visuals(visuals);
-
+    fn register_fonts(egui_ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert(
             "roboto".to_owned(),
@@ -138,9 +124,20 @@ impl Foxy {
             .or_default()
             .push("noto_sans_hebrew".to_owned());
 
-        cc.egui_ctx.set_fonts(fonts);
+        egui_ctx.set_fonts(fonts);
+    }
 
-        api::ensure_logger();
+    fn new_shell(
+        egui_ctx: &egui::Context,
+        launch_debug_mode: bool,
+        debug_modal_previews: Vec<crate::ui::app::debug_modals::DebugModal>,
+        mode_override: Option<crate::core::app_mode::AppMode>,
+        last_saved_window_state: Option<WindowState>,
+    ) -> (
+        Self,
+        std::sync::mpsc::Receiver<PersistenceRequest>,
+        std::sync::mpsc::Sender<PersistenceResult>,
+    ) {
         let (updates_sender, server_updates) =
             std::sync::mpsc::channel::<crate::ui::app::runtime::ServerQueryResult>();
         let (join_preflight_result_tx, join_preflight_result_rx) =
@@ -188,10 +185,7 @@ impl Foxy {
             std::sync::mpsc::channel::<PersistenceRequest>();
         let (persistence_result_tx, persistence_result_rx) =
             std::sync::mpsc::channel::<PersistenceResult>();
-        std::thread::spawn(move || {
-            Self::run_persistence_worker(persistence_request_rx, persistence_result_tx);
-        });
-        let mut app = Self {
+        let app = Self {
             interrupted_update_instances: HashSet::new(),
             startup_recovery_rx: None,
             pending_download_retry: None,
@@ -210,7 +204,7 @@ impl Foxy {
             tfr_logo: None,
             default_repo_image: None,
             game_logo_textures: Default::default(),
-            repaint_ctx: Some(cc.egui_ctx.clone()),
+            repaint_ctx: Some(egui_ctx.clone()),
             agent_gui: None,
             show_debug_windows: false,
             show_delete_confirmation: false,
@@ -633,7 +627,7 @@ impl Foxy {
             cached_color32: None,
             last_font_image_size: [0, 0],
             last_font_pixels_per_point: 0.0,
-            last_saved_window_state: Self::load_window_state(),
+            last_saved_window_state,
             last_logged_display_metrics: None,
             tray_manager: None,
             hidden_to_tray: false,
@@ -682,6 +676,50 @@ impl Foxy {
             workshop_task_worker: None,
             workshop_task_generation: 0,
         };
+        (app, persistence_request_rx, persistence_result_tx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_headless(egui_ctx: &egui::Context) -> Self {
+        let mut visuals = Self::base_visuals(true);
+        visuals.override_text_color = Some(palette::TEXT_NORMAL);
+        egui_ctx.set_theme(egui::Theme::Dark);
+        egui_ctx.set_visuals(visuals);
+        let (mut app, _persistence_rx, _persistence_tx) =
+            Self::new_shell(egui_ctx, false, Vec::new(), None, None);
+        app.i18n = I18n::new("en");
+        app.apply_runtime_palette_visuals(egui_ctx);
+        app
+    }
+
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        launch_debug_mode: bool,
+        agent_gui: AgentGuiLaunchConfig,
+        debug_modal_previews: Vec<crate::ui::app::debug_modals::DebugModal>,
+        mode_override: Option<crate::core::app_mode::AppMode>,
+    ) -> Self {
+        info!("Initializing Foxy UI state");
+        let mut visuals = Self::base_visuals(true);
+        visuals.override_text_color = Some(palette::TEXT_NORMAL);
+        cc.egui_ctx.set_theme(egui::Theme::Dark);
+        // Avoid the native theme call: egui 0.36 has turned Foxy's Glow surface black on some hybrid-GPU systems.
+        cc.egui_ctx.options_mut(|o| o.sync_window_theme = false);
+        cc.egui_ctx.set_visuals(visuals);
+
+        Self::register_fonts(&cc.egui_ctx);
+
+        api::ensure_logger();
+        let (mut app, persistence_request_rx, persistence_result_tx) = Self::new_shell(
+            &cc.egui_ctx,
+            launch_debug_mode,
+            debug_modal_previews,
+            mode_override,
+            Self::load_window_state(),
+        );
+        std::thread::spawn(move || {
+            Self::run_persistence_worker(persistence_request_rx, persistence_result_tx);
+        });
         match crate::core::app_mode::read_saved_app_mode(&Self::get_app_settings_path()) {
             Ok(mode) => app.settings_view_state.app_mode = mode,
             Err(error) => log::warn!("{error}"),

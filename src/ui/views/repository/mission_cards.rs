@@ -271,6 +271,24 @@ impl Foxy {
                     let row_size = Vec2::new(ui.available_width(), MISSION_ROW_INNER_HEIGHT);
                     let rect = egui::Rect::from_min_size(ui.cursor().min, row_size);
                     let response = ui.interact(rect, row_id, Sense::click());
+                    Self::focus_outline(ui, &response);
+                    let mission_row_label = match entry {
+                        MissionListEntry::ParentFolder => tr("Parent folder"),
+                        MissionListEntry::Folder { name, .. } => {
+                            format!("{}/", arma3_editor_display_name(name))
+                        }
+                        MissionListEntry::Mission { mission, .. } => {
+                            arma3_editor_display_name(&mission.display_name)
+                        }
+                    };
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::Role::Button,
+                            true,
+                            is_selected,
+                            mission_row_label.as_str(),
+                        )
+                    });
                     ui.advance_cursor_after_rect(rect);
 
                     let painter = ui.painter();

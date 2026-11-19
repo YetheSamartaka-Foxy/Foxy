@@ -75,7 +75,6 @@ struct Instance {
 }
 
 impl Instance {
-    #[cfg(windows)]
     fn prepare_with_keys(
         root: &Path,
         payload: &Path,
@@ -87,6 +86,7 @@ impl Instance {
     }
 
     /// Regular clients cannot join loopback=1 servers; admission fixtures listen normally with a random password and no UPnP.
+    #[cfg(windows)]
     fn prepare_client_joinable(
         root: &Path,
         payload: &Path,

@@ -80,7 +80,6 @@ impl Foxy {
             "Owner handoff: {status}",
             &[("status", gate_status(self, inspection.owner_handoff))],
         ));
-        ui.label(self.t("Activation and recovery actions are unavailable."));
 
         if let Some(error) = inspection.inspection_error {
             ui.label(self.t("Recovery inspection is incomplete; status is unknown."));

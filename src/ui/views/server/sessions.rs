@@ -3,17 +3,6 @@ use crate::ui::app::Foxy;
 use crate::ui::i18n::{tr, tr_fmt};
 use eframe::egui::{self, RichText, Ui};
 
-fn focus_outline(ui: &Ui, response: &egui::Response) {
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect,
-            2.0,
-            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
-
 impl Foxy {
     pub(crate) fn render_server_sessions(&mut self, ui: &mut Ui) -> Option<egui::Response> {
         if !crate::core::game::registry()
@@ -45,7 +34,7 @@ impl Foxy {
                 let refresh = ui.add_enabled(!busy, egui::Button::new(tr("Refresh session saves")));
                 anchor = refresh.clone();
                 self.server_view.sessions.controls_focus = Some(refresh.id);
-                focus_outline(ui, &refresh);
+                Self::focus_outline(ui, &refresh);
                 if refresh.clicked() {
                     self.server_view.sessions.plan = None;
                     self.server_view.sessions.confirmation = false;
@@ -111,7 +100,7 @@ impl Foxy {
                                     }
                                     if session.compatible {
                                         let select = ui.button(tr("Select this save point"));
-                                        focus_outline(ui, &select);
+                                        Self::focus_outline(ui, &select);
                                         if select.clicked() {
                                             self.server_view.sessions.mode = "selected".into();
                                             self.server_view.sessions.save_id = session.save_id.clone();
@@ -127,7 +116,7 @@ impl Foxy {
 
             ui.separator();
             ui.horizontal_wrapped(|ui| {
-                ui.label(tr("Next launch session intent:"));
+                let caption = ui.label(tr("Next launch session intent:"));
                 let before = self.server_view.sessions.mode.clone();
                 egui::ComboBox::from_id_salt(("server-session-mode", id.as_str()))
                     .selected_text(tr(session_mode_label(&self.server_view.sessions.mode)))
@@ -144,7 +133,9 @@ impl Foxy {
                                 tr(label),
                             );
                         }
-                    });
+                    })
+                    .response
+                    .labelled_by(caption.id);
                 if before != self.server_view.sessions.mode {
                     self.server_view.sessions.plan = None;
                     self.server_view.sessions.confirmation = false;
@@ -152,13 +143,15 @@ impl Foxy {
             });
             if self.server_view.sessions.mode == "selected" {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(tr("Save point UUID:"));
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut self.server_view.sessions.save_id)
-                            .desired_width(300.0)
-                            .id(egui::Id::unique(("server-session-save-id", id.as_str()))),
-                    );
-                    focus_outline(ui, &response);
+                    let caption = ui.label(tr("Save point UUID:"));
+                    let response = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.server_view.sessions.save_id)
+                                .desired_width(300.0)
+                                .id(egui::Id::unique(("server-session-save-id", id.as_str()))),
+                        )
+                        .labelled_by(caption.id);
+                    Self::focus_outline(ui, &response);
                 });
             }
             ui.label(tr("Changing this setting applies only to a later launch. It does not request a save, change the running process, or start a server."));
@@ -169,7 +162,7 @@ impl Foxy {
                     && self.server_view.sessions.inventory.as_ref().is_some_and(|inventory| inventory.instance_id == id),
                 egui::Button::new(tr("Review session intent")),
             );
-            focus_outline(ui, &plan_button);
+            Self::focus_outline(ui, &plan_button);
             if plan_button.clicked() {
                 self.server_view.sessions.plan = None;
                 self.server_view.sessions.confirmation = false;
@@ -212,7 +205,7 @@ impl Foxy {
                     !busy && !dirty && review_matches && plan.blockers.is_empty(),
                     egui::Button::new(tr("Confirm session intent")),
                 );
-                focus_outline(ui, &confirm);
+                Self::focus_outline(ui, &confirm);
                 if confirm.clicked() {
                     self.server_view.sessions.confirmation = true;
                     self.server_view.sessions.focus_cancel = true;
@@ -261,16 +254,21 @@ impl Foxy {
                     safe.request_focus();
                     self.server_view.sessions.focus_cancel = false;
                 }
-                focus_outline(ui, &safe);
+                Self::focus_outline(ui, &safe);
                 if safe.clicked() {
                     cancel = true;
                 }
                 let confirm = ui.add_enabled(!busy && !dirty, egui::Button::new(tr("Save next-launch intent")));
-                focus_outline(ui, &confirm);
+                Self::focus_outline(ui, &confirm);
                 if confirm.clicked() {
                     apply = true;
                 }
             });
+            if !busy
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
+                cancel = true;
+            }
         });
         if cancel {
             self.server_view.sessions.confirmation = false;

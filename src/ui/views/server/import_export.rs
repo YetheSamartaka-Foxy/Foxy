@@ -18,14 +18,14 @@ impl Foxy {
             .get(&game.game_id)
             .map(|module| module.server_capabilities())
             .unwrap_or_default();
-        if !capabilities.instance_packs {
+        if !capabilities.configuration_import && !capabilities.instance_packs {
             return;
         }
         ui.separator();
         ui.heading(tr("Configuration import and instance packs"));
-        ui.label(tr("Import full server, basic, or profile files from disk. Secret values are masked before review."));
         let mut inputs = Vec::new();
         if capabilities.configuration_import {
+            ui.label(tr("Import full server, basic, or profile files from disk. Secret values are masked before review."));
             for (label, role, path, managed) in [
                 (
                     "Server configuration file",
@@ -47,8 +47,9 @@ impl Foxy {
                 ),
             ] {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(tr(label));
-                    ui.add(egui::TextEdit::singleline(path).desired_width(280.0));
+                    let caption = ui.label(tr(label));
+                    ui.add(egui::TextEdit::singleline(path).desired_width(280.0))
+                        .labelled_by(caption.id);
                     if ui.button(tr("Choose file")).clicked()
                         && let Some(selected) =
                             agent_support::pick_file(|| FileDialog::new().pick_file())
@@ -128,10 +129,9 @@ impl Foxy {
             }
         }
 
-        ui.separator();
-        ui.label(tr("Export or import a portable instance pack. Imported packs create a new draft without an installation binding."));
-        ui.checkbox(&mut self.server_view.export_pack_sanitized, tr("Sanitize export: remove operator text and policy identifiers; the pack will be incomplete."));
-        ui.horizontal_wrapped(|ui| {
+        if capabilities.instance_packs {
+            ui.separator();
+            ui.checkbox(&mut self.server_view.export_pack_sanitized, tr("Sanitize export: remove operator text and policy identifiers; the pack will be incomplete."));
             if ui.button(tr("Export instance pack")).clicked()
                 && let Some(path) = agent_support::save_file(|| {
                     FileDialog::new()
@@ -145,10 +145,28 @@ impl Foxy {
                     sanitized: self.server_view.export_pack_sanitized,
                 });
             }
+        }
+        self.render_reforger_configuration(ui);
+    }
+
+    pub(super) fn render_server_instance_pack_import(&mut self, ui: &mut Ui) {
+        let game = crate::core::game::spaces::active_game_space();
+        let capabilities = crate::core::game::registry()
+            .get(&game.game_id)
+            .map(|module| module.server_capabilities())
+            .unwrap_or_default();
+        if !capabilities.instance_packs {
+            return;
+        }
+
+        ui.separator();
+        ui.heading(tr("Foxy server instance pack"));
+        ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.server_view.import_pack_path)
                     .desired_width(240.0),
-            );
+            )
+            .accessible_name(tr("Instance pack file"));
             if ui.button(tr("Choose pack file")).clicked()
                 && let Some(path) = agent_support::pick_file(|| {
                     FileDialog::new()
@@ -162,7 +180,8 @@ impl Foxy {
                 egui::TextEdit::singleline(&mut self.server_view.import_pack_name)
                     .desired_width(180.0)
                     .hint_text(tr("New draft name")),
-            );
+            )
+            .accessible_name(tr("New draft name"));
             if ui
                 .add_enabled(
                     !self.server_view.import_pack_path.is_empty()
@@ -216,7 +235,6 @@ impl Foxy {
         if apply_pack && let Some(plan) = self.server_view.instance_pack_import_plan.take() {
             self.start_server_task(ServerTaskAction::ApplyInstancePackImport(plan));
         }
-        self.render_reforger_configuration(ui);
     }
 
     fn render_reforger_configuration(&mut self, ui: &mut Ui) {
@@ -239,11 +257,12 @@ impl Foxy {
             "Import keeps typed fields and unknown JSON. Secret values are removed. Save the draft after using an import.",
         ));
         ui.horizontal_wrapped(|ui| {
-            ui.label(tr("Reforger server.json file"));
+            let import_label = ui.label(tr("Reforger server.json file"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.server_view.reforger_import_path)
                     .desired_width(280.0),
-            );
+            )
+            .labelled_by(import_label.id);
             if ui.button(tr("Choose file")).clicked()
                 && let Some(selected) = agent_support::pick_file(|| {
                     FileDialog::new()
@@ -293,11 +312,12 @@ impl Foxy {
             **settings = review.definition;
         }
         ui.horizontal_wrapped(|ui| {
-            ui.label(tr("Export saved server.json"));
+            let export_label = ui.label(tr("Export saved server.json"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.server_view.reforger_export_path)
                     .desired_width(280.0),
-            );
+            )
+            .labelled_by(export_label.id);
             if ui.button(tr("Choose export file")).clicked()
                 && let Some(selected) = agent_support::pick_file(|| {
                     FileDialog::new()
@@ -331,11 +351,12 @@ impl Foxy {
             "A failed listing is not stored and does not change the selected scenario.",
         ));
         ui.horizontal_wrapped(|ui| {
-            ui.label(tr("Scenario listing log"));
+            let log_label = ui.label(tr("Scenario listing log"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.server_view.scenario_log_path)
                     .desired_width(280.0),
-            );
+            )
+            .labelled_by(log_label.id);
             if ui.button(tr("Choose listing log")).clicked()
                 && let Some(selected) = agent_support::pick_file(|| FileDialog::new().pick_file())
             {

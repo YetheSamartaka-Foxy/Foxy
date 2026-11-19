@@ -776,16 +776,18 @@ impl Foxy {
 
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
-            ui.label(tr("UI Scale"));
-            let slider = ui.add(
-                Slider::new(
-                    &mut self.settings_view_state.ui_scale_percent_draft,
-                    MIN_UI_SCALE_PERCENT..=MAX_UI_SCALE_PERCENT,
+            let scale_label = ui.label(tr("UI Scale"));
+            let slider = ui.label_inputs_by(scale_label.id, |ui| {
+                ui.add(
+                    Slider::new(
+                        &mut self.settings_view_state.ui_scale_percent_draft,
+                        MIN_UI_SCALE_PERCENT..=MAX_UI_SCALE_PERCENT,
+                    )
+                    .suffix("%")
+                    .show_value(true)
+                    .trailing_fill(true),
                 )
-                .suffix("%")
-                .show_value(true)
-                .trailing_fill(true),
-            );
+            });
             if slider.hovered() {
                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
             }

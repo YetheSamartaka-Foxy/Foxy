@@ -74,6 +74,31 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn missing_only_keeps_existing_translations_and_inserts_new_ones() {
+    let fixture = Fixture::new();
+    let batch = serde_json::json!({
+        "cs": {
+            "Files {count}": "Replace {count}",
+            "Files {count}.few": "Soubory {count}"
+        }
+    });
+    fs::write(fixture.0.join("batch.json"), batch.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_locale-apply"))
+        .args(["--translations", "batch.json", "--missing-only"])
+        .current_dir(&fixture.0)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let actual: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.0.join("src/ui/locales/cs.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        actual,
+        serde_json::json!({"Files {count}": "Soubory {count}", "Files {count}.few": "Soubory {count}"})
+    );
+}
+
+#[test]
 fn locale_only_plurals_are_applied_preserved_and_audited() {
     let fixture = Fixture::new();
     fixture.git(&["init", "--quiet"]);

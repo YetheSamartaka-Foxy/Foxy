@@ -1,17 +1,21 @@
 use crate::core::server::{
     Arma3HeadlessClient, HeadlessAddonSelection, HeadlessLifecyclePolicy, HeadlessProcessOverrides,
-    MAX_HEADLESS_CLIENTS, new_headless_id,
+    MAX_HEADLESS_CLIENTS, ServerAddonRole, new_headless_id, selects_headless_source,
 };
-use crate::ui::i18n::tr;
+use crate::ui::i18n::{tr, tr_fmt};
 use eframe::egui::{self, Ui};
 
-use super::forms::{self, Form};
+use super::{
+    HeadlessProfiles,
+    forms::{self, Form},
+};
 
 pub(super) fn render(
     ui: &mut Ui,
     form: Form,
     clients: &mut Vec<Arma3HeadlessClient>,
     field_scope: egui::Id,
+    profiles: HeadlessProfiles<'_>,
 ) {
     ui.heading(tr("Headless clients"));
     ui.label(tr("Headless clients run this server installation in client mode, connect from 127.0.0.1 and start only after the server answers its query port. Foxy does not verify mission slots or AI offload."));
@@ -40,9 +44,15 @@ pub(super) fn render(
                 ui.checkbox(
                     &mut client.addons.inherit_required,
                     tr("Load the server's required addons"),
-                );
+                )
+                .on_hover_text(tr("Adds the server's Required sources in their configured order. Optional and Server-only sources are not inherited."));
                 ui.horizontal_wrapped(|ui| {
                     let label = ui.label(tr("Also load sources"));
+                    if let Some(sources) = profiles.registered {
+                        source_chooser(ui, &mut client.addons.include, sources, profiles.reviewed, scope.with("include-choice"));
+                    } else {
+                        ui.label(tr("Open Addons and load the registered profiles to choose them here."));
+                    }
                     forms::edit_source_list(
                         ui,
                         form,
@@ -62,7 +72,44 @@ pub(super) fn render(
                             label.id,
                         );
                     });
+                    ui.label(tr("Excluded sources are removed from inherited Required addons."));
                 });
+                if let Some(reviewed) = profiles.reviewed {
+                    ui.collapsing(tr("Headless addon preview"), |ui| {
+                        ui.label(tr("Calculated from the last saved loadout and the current headless client settings."));
+                        let mut any = false;
+                        for entry in &reviewed.bindings {
+                            let binding = &entry.binding;
+                            if binding.role == ServerAddonRole::Optional || !selects_headless_source(
+                                &client.addons,
+                                &binding.source_id,
+                                binding.role == ServerAddonRole::Required,
+                            ) {
+                                continue;
+                            }
+                            any = true;
+                            let explicit = client.addons.include.iter().any(|name|
+                                name.eq_ignore_ascii_case(&binding.source_id)
+                            );
+                            ui.label(tr_fmt(if explicit {
+                                "Explicit source: {name}"
+                            } else {
+                                "Inherited source: {name}"
+                            }, &[("name", entry.profile.name.clone())]));
+                            for name in &entry.profile.addons {
+                                ui.label(name);
+                            }
+                            if entry.profile.addons.is_empty() {
+                                ui.label(tr("Uses the entire source folder."));
+                            }
+                        }
+                        if !any {
+                            ui.weak(tr("This headless client selects no sources from the saved loadout."));
+                        }
+                    });
+                } else {
+                    ui.weak(tr("Save a current loadout under Addons to preview inherited sources."));
+                }
                 overrides(ui, form, &mut client.process, scope);
                 lifecycle(ui, &mut client.lifecycle);
             });
@@ -96,6 +143,43 @@ pub(super) fn render(
             process: HeadlessProcessOverrides::default(),
             lifecycle: HeadlessLifecyclePolicy::default(),
         });
+    }
+}
+
+fn source_chooser(
+    ui: &mut Ui,
+    included: &mut Vec<String>,
+    sources: &crate::core::server::ContentSources,
+    reviewed: Option<&crate::core::server::ContentBindingsDocument>,
+    id: egui::Id,
+) {
+    if sources.profiles.is_empty() {
+        ui.weak(tr("No registered content profiles are loaded."));
+        return;
+    }
+    let mut selected = String::new();
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(tr("Choose a loaded source"))
+        .show_ui(ui, |ui| {
+            for profile in &sources.profiles {
+                let already_included = included
+                    .iter()
+                    .any(|source| source.eq_ignore_ascii_case(&profile.name));
+                let eligible = reviewed.is_none_or(|document| document.bindings.iter().any(|entry|
+                    entry.binding.source_id == profile.name && entry.binding.role != ServerAddonRole::Optional
+                ));
+                if ui
+                    .add_enabled(!already_included && eligible, egui::Button::new(&profile.name))
+                    .on_hover_text(tr("Adds this registered content profile to this headless client's include list."))
+                    .on_disabled_hover_text(tr("Select a Required or Server-only profile from this server's loadout that is not already included."))
+                    .clicked()
+                {
+                    selected.clone_from(&profile.name);
+                }
+            }
+        });
+    if !selected.is_empty() {
+        included.push(selected);
     }
 }
 

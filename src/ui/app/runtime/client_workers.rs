@@ -191,6 +191,7 @@ pub(crate) const HANDOFF_RETAINED_HANDLES: &[&str] = &[
     "fs_watch_worker",
     "backup_cleanup_worker",
     "startup_recovery_rx",
+    "startup_diagnostics_rx",
     "pending_queries",
     "join_preflight_worker",
     "mission_scan_worker",
@@ -243,6 +244,9 @@ impl Foxy {
     pub(in crate::ui::app) fn client_worker_handoff_ready(&mut self) -> bool {
         self.reap_client_worker_handles();
         self.startup_recovery_rx.is_none()
+            && self.startup_diagnostics_rx.is_none()
+            && !self.hash_evidence_retry_in_flight
+            && !self.retained_files_cleanup_in_flight
             && !self.profile_backup_work_in_flight()
             && self.fs_watch_worker.is_none()
             && self.backup_cleanup_worker.is_none()
@@ -290,6 +294,7 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn reap_client_worker_handles(&mut self) {
+        self.poll_startup_diagnostics();
         reap_worker(
             &mut self.fs_watch_worker,
             "Filesystem watcher worker failed.",
@@ -598,6 +603,7 @@ mod tests {
             .0;
         for required in [
             "startup_recovery_rx",
+            "startup_diagnostics_rx",
             "fs_watch_worker",
             "backup_cleanup_worker",
         ] {
@@ -623,5 +629,27 @@ mod tests {
             !reset.contains("self.addon_backup_worker = None"),
             "reset detaches the addon backup worker"
         );
+        let ownership = include_str!("ownership.rs");
+        let service = ownership
+            .split_once("pub(crate) fn service_mode_ownership")
+            .expect("service_mode_ownership")
+            .1
+            .split_once("pub(crate) fn retry_mode_ownership")
+            .expect("retry_mode_ownership")
+            .0;
+        let handoff = service
+            .find("self.client_worker_handoff_ready()")
+            .expect("handoff readiness check");
+        let clear = service
+            .find("self.hash_evidence_state = None")
+            .expect("hash_evidence_state cleared before close");
+        let clear_history = service
+            .find("self.clear_progress_event_history()")
+            .expect("progress event history cleared before close");
+        let launch = service
+            .find("self.launch_owner_transition(")
+            .expect("owner transition launch");
+        assert!(handoff < clear && clear < launch);
+        assert!(handoff < clear_history && clear_history < launch);
     }
 }

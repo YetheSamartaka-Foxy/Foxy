@@ -390,7 +390,8 @@ impl Foxy {
                                 ui.horizontal_wrapped(|ui| {
                                     let before = remote.selected;
                                     let checkbox =
-                                        Self::ui_state_checkbox(ui, &mut remote.selected, "");
+                                        Self::ui_state_checkbox(ui, &mut remote.selected, "")
+                                            .accessible_name(remote.reported_name.as_str());
                                     if checkbox.hovered() {
                                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                                     }
@@ -1355,41 +1356,48 @@ impl Foxy {
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .default_width(620.0)
             .show(ctx, |ui| {
-                ui.label(self.t("Repository address or repository space address"));
-                let input = ui.add(
-                    TextEdit::singleline(&mut self.add_repository_input_address)
-                        .id(egui::Id::unique("agent.add-repository-input"))
-                        .desired_width(ui.available_width()),
-                );
+                let address_label =
+                    ui.label(self.t("Repository address or repository space address"));
+                let input = ui
+                    .add(
+                        TextEdit::singleline(&mut self.add_repository_input_address)
+                            .id(egui::Id::unique("agent.add-repository-input"))
+                            .desired_width(ui.available_width()),
+                    )
+                    .labelled_by(address_label.id);
                 if input.hovered() {
                     ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Text);
                 }
 
                 let optional_hint = self.t("Optional");
                 ui.add_space(8.0);
-                ui.label(self.t("Name"));
-                let name_input = ui.add(
-                    TextEdit::singleline(&mut self.add_repository_input_name)
-                        .hint_text(optional_hint.clone())
-                        .char_limit(100)
-                        .desired_width(ui.available_width()),
-                );
+                let name_label = ui.label(self.t("Name"));
+                let name_input = ui
+                    .add(
+                        TextEdit::singleline(&mut self.add_repository_input_name)
+                            .hint_text(optional_hint.clone())
+                            .char_limit(100)
+                            .desired_width(ui.available_width()),
+                    )
+                    .labelled_by(name_label.id);
                 if name_input.hovered() {
                     ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Text);
                 }
 
                 ui.add_space(8.0);
-                ui.label(self.t("Local Path"));
+                let path_label = ui.label(self.t("Local Path"));
                 let browse_label = self.t("Browse");
                 ui.horizontal(|ui| {
                     let browse_width = 90.0;
                     let path_width = (ui.available_width() - browse_width).max(100.0);
-                    let path_input = ui.add(
-                        TextEdit::singleline(&mut self.add_repository_input_path)
-                            .hint_text(optional_hint)
-                            .char_limit(500)
-                            .desired_width(path_width),
-                    );
+                    let path_input = ui
+                        .add(
+                            TextEdit::singleline(&mut self.add_repository_input_path)
+                                .hint_text(optional_hint)
+                                .char_limit(500)
+                                .desired_width(path_width),
+                        )
+                        .labelled_by(path_label.id);
                     if path_input.hovered() {
                         ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Text);
                     }

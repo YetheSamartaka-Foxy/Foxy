@@ -65,6 +65,8 @@ For multi-locale batches, prefer the `locale-apply` helper binary instead of han
 cargo run --manifest-path tools/i18n-checker/Cargo.toml --bin locale-apply -- --repo . --translations translations.json --keys-out changed-keys.txt
 ```
 
+Pass `--missing-only` when a coverage batch should preserve all existing locale values.
+
 The `translations.json` file must be UTF-8 and shaped as `{ "locale": { "English key from en.json": "translated value" } }`. The helper preserves existing formatting, inserts missing keys near their `en.json` order, checks placeholders, and rejects literal `?` in changed values unless `--allow-question-mark` is passed after manual review. Pass `--remove-extra` when the same batch also replaces obsolete keys; it removes only keys absent from `en.json` in the locale files named by the batch.
 
 Locale-specific plural keys such as `.few` can also appear in translation batches when their base key exists in `en.json`. The helper inserts these variants after the base key and preserves valid plural variants under `--remove-extra`. The checker validates their empty values and placeholders against the English base. The changed-pair audit includes newly added entries as well as edits to existing entries.
@@ -170,7 +172,8 @@ i18n provides the infrastructure: keys, translation files, formatting helpers. L
 - RTL locales are Arabic (`ar.json`), Persian (`fa.json`), Urdu (`ur.json`), and Hebrew (`he.json`). Their `LocaleFormat` sets `TextDirection::Rtl`.
 - RTL-aware layout helpers (`content_layout`, `trailing_layout`, `leading_align2`, `is_rtl`) in `src/ui/i18n.rs` drive widget placement. Use them instead of hardcoded `Layout::left_to_right` or `Layout::right_to_left`.
 - Do not assume left-to-right text direction in new layout code. Avoid hardcoded directional padding or margins where a mirrored layout would break.
-- egui currently does not provide full bidirectional text rendering. Mixed RTL/LTR text within a single label may not reorder correctly, and `TextEdit` does not support RTL cursor movement. Layout-level mirroring is the current support scope.
+- Foxy pins the egui 0.37.0 backport of emilk/egui#8577 for bidirectional shaping and row placement. Keep source strings, search input and accessible values in logical Unicode order. The renderer handles visual ordering, including mixed Arabic or Hebrew with Latin text and numbers.
+- Caret navigation within RTL runs uses logical character order. AccessKit receives logical text values and egui currently marks its text runs as left-to-right. Test wrapped rendering, logical text and AccessKit values when updating the egui pin.
 - Bundled Arabic font: `src/ui/fonts/NotoSansArabic-Regular.ttf` is loaded as a proportional fallback in `Foxy::new` so Arabic, Persian, and Urdu glyphs render correctly.
 - Bundled Hebrew font: `src/ui/fonts/NotoSansHebrew-Regular.ttf` is loaded as a proportional fallback for Hebrew glyphs.
 

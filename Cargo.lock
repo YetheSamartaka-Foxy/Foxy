@@ -1948,8 +1948,7 @@ dependencies = [
 [[package]]
 name = "ecolor"
 version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31bcbef0d4263a63eb32c4834e5d711613035ce1333468e107d928923e21e6e2"
+source = "git+https://github.com/richerfu/egui?rev=f7e89e23a1639cc4fdf232edd6f9270f167711e5#f7e89e23a1639cc4fdf232edd6f9270f167711e5"
 dependencies = [
  "bytemuck",
  "emath",
@@ -2004,8 +2003,7 @@ checksum = "7bd50d24b1b75aa817bb0339cb9f2e0e664bdfab1e160a69a0fda9145b77fab2"
 [[package]]
 name = "egui"
 version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bec9144f49b7a28b5f395d3147e325b4fe3e77ba686eac11d1bdf0a7da3f375f"
+source = "git+https://github.com/richerfu/egui?rev=f7e89e23a1639cc4fdf232edd6f9270f167711e5#f7e89e23a1639cc4fdf232edd6f9270f167711e5"
 dependencies = [
  "accesskit",
  "ahash",
@@ -2119,8 +2117,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 [[package]]
 name = "emath"
 version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e73ce90f54750be8672c02be0743fe47530e6f251e066f0ee2869b59eb297af5"
+source = "git+https://github.com/richerfu/egui?rev=f7e89e23a1639cc4fdf232edd6f9270f167711e5#f7e89e23a1639cc4fdf232edd6f9270f167711e5"
 dependencies = [
  "bytemuck",
  "serde",
@@ -2210,8 +2207,6 @@ dependencies = [
 [[package]]
 name = "epaint"
 version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97bac86ae3dde93fc3951e790951caea739ff39a6c89d909cdaf1d9278dbb1bd"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -2228,6 +2223,7 @@ dependencies = [
  "serde",
  "skrifa",
  "smallvec",
+ "unicode-bidi",
  "unicode-general-category",
  "unicode-properties",
  "unicode-segmentation",
@@ -2237,8 +2233,7 @@ dependencies = [
 [[package]]
 name = "epaint_default_fonts"
 version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfc1cc505827f4c23eedc297975a0fd038268d41293f389dd8ff3b574aefab19"
+source = "git+https://github.com/richerfu/egui?rev=f7e89e23a1639cc4fdf232edd6f9270f167711e5#f7e89e23a1639cc4fdf232edd6f9270f167711e5"
 
 [[package]]
 name = "equator"
@@ -7826,6 +7821,12 @@ name = "unicase"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-general-category"

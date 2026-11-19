@@ -6,13 +6,13 @@ use crate::core::server::{
     ConfigurationCommitPlan, ConfigurationPreview, ConfigurationRevisions,
     ConfigurationRollbackPlan, ConfigurationVerification, ContentAcquisitionOutcome,
     ContentAcquisitionPlan, ContentBindingsPlan, ContentBindingsSnapshot, ContentConsumerReport,
-    ContentDeploymentPlan, ContentPlanRequest, ContentSourceSnapshot, ContentStageControl,
-    ContentStageList, ContentStagePlan, ContentStageReport, DeploymentActivationPlan,
-    DeploymentActivationStatus, DeploymentCompositionPlan, DeploymentCompositionRequest,
-    DeploymentOperationOutcome, DeploymentPins, DeploymentPreflight, DeploymentPreparationList,
-    DeploymentPreparationPlan, DeploymentPreparationReport, DeploymentRecordCommit,
-    DeploymentRecordPlan, DeploymentRecordSelectionPlan, DeploymentRecordState,
-    DeploymentRecordVerification, DeploymentResolutionReview, DraftChange,
+    ContentDeploymentPlan, ContentPlanRequest, ContentSourceSnapshot, ContentSources,
+    ContentStageControl, ContentStageList, ContentStagePlan, ContentStageReport,
+    DeploymentActivationPlan, DeploymentActivationStatus, DeploymentCompositionPlan,
+    DeploymentCompositionRequest, DeploymentOperationOutcome, DeploymentPins, DeploymentPreflight,
+    DeploymentPreparationList, DeploymentPreparationPlan, DeploymentPreparationReport,
+    DeploymentRecordCommit, DeploymentRecordPlan, DeploymentRecordSelectionPlan,
+    DeploymentRecordState, DeploymentRecordVerification, DeploymentResolutionReview, DraftChange,
     InstallationBuildObservation, NativeInstallOutcome, NativeInstallPlan, NativeInstallRequest,
     NativeInstallationCheck, NativeInstallationValidation, NativeMaintenanceAction,
     PlayerPublicationOutcome, PlayerPublicationPlan, PlayerPublicationRequest,
@@ -161,6 +161,11 @@ pub(crate) enum ServerTaskAction {
     Inspect(PathBuf),
     Preflight(ServerInstanceId),
     LoadContentSources,
+    SaveContentSources {
+        sources: ContentSources,
+        expected_fingerprint: Option<String>,
+    },
+    ScanAddonFolder(PathBuf),
     ReloadContentBindings(ServerInstanceId),
     PlanContent {
         request: ContentPlanRequest,
@@ -397,6 +402,11 @@ pub(crate) enum ServerTaskOutput {
     Inspection(ServerInstallation, Box<InstallationBuildObservation>),
     Preflight(Box<DeploymentPreflight>),
     ContentSources(ContentSourceSnapshot),
+    ContentSourcesSaved(ContentSourceSnapshot),
+    AddonCandidates {
+        folder: PathBuf,
+        names: Vec<String>,
+    },
     ContentPlan(Box<ContentDeploymentPlan>),
     ContentBindings {
         sources: ContentSourceSnapshot,
@@ -939,6 +949,17 @@ pub(crate) fn execute(
         ServerTaskAction::LoadContentSources => {
             ServerTaskOutput::ContentSources(store.content_sources()?)
         }
+        ServerTaskAction::SaveContentSources {
+            sources,
+            expected_fingerprint,
+        } => {
+            store.save_content_sources(&sources, expected_fingerprint.as_deref())?;
+            ServerTaskOutput::ContentSourcesSaved(store.content_sources()?)
+        }
+        ServerTaskAction::ScanAddonFolder(folder) => ServerTaskOutput::AddonCandidates {
+            names: ContentSources::addon_candidates(&folder).map_err(ServerStoreError::Invalid)?,
+            folder,
+        },
         ServerTaskAction::ReloadContentBindings(id) => {
             let sources = store.content_sources()?;
             let snapshot = store.content_bindings(&id)?;

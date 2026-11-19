@@ -46,7 +46,7 @@ impl Foxy {
             });
 
         let color_primary_accent = self.color_primary_accent();
-        let color_text_error = self.color_text_error();
+        let color_action_destructive = self.color_action_destructive();
         let color_text_dim = self.color_text_dim();
 
         let mut delete_repository = false;
@@ -103,7 +103,7 @@ impl Foxy {
                     ui,
                     repo_index,
                     color_primary_accent,
-                    color_text_error,
+                    color_action_destructive,
                     pad_f32,
                     &mut force_redownload,
                     &mut wipe_repository_db_entries,
@@ -164,10 +164,15 @@ impl Foxy {
                                     }
 
                                     let no_btn = ui.button(tr("No"));
+                                    Self::focus_outline(ui, &no_btn);
                                     if no_btn.hovered() {
                                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                                     }
-                                    if no_btn.clicked() {
+                                    if no_btn.clicked()
+                                        || ui.input_mut(|i| {
+                                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                        })
+                                    {
                                         self.show_delete_confirmation = false;
                                         self.delete_repository_delete_files = false;
                                         info!("Repository delete canceled");
@@ -209,10 +214,15 @@ impl Foxy {
                                 }
 
                                 let no_btn = ui.button(tr("No"));
+                                Self::focus_outline(ui, &no_btn);
                                 if no_btn.hovered() {
                                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                                 }
-                                if no_btn.clicked() {
+                                if no_btn.clicked()
+                                    || ui.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                    })
+                                {
                                     self.show_force_redownload_confirmation = false;
                                     info!("Force redownload canceled");
                                 }
@@ -255,10 +265,15 @@ impl Foxy {
                                     }
 
                                     let no_btn = ui.button(tr("No"));
+                                    Self::focus_outline(ui, &no_btn);
                                     if no_btn.hovered() {
                                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                                     }
-                                    if no_btn.clicked() {
+                                    if no_btn.clicked()
+                                        || ui.input_mut(|i| {
+                                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                        })
+                                    {
                                         self.show_wipe_repo_db_confirmation = false;
                                         info!("Repository database wipe canceled");
                                     }

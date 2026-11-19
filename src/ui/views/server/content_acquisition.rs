@@ -28,13 +28,17 @@ impl Foxy {
             ui.label(tr("A plan reviews local intent and works offline. Current remote publication is resolved when acquisition starts, so the preview does not pin remote content."));
 
             ui.horizontal_wrapped(|ui| {
-                ui.label(tr("Seed stage id (optional)"));
-                let seed_input=ui.add_enabled(
-                    !busy && !dirty,
-                    egui::TextEdit::singleline(&mut self.server_view.acquisition_seed)
-                        .desired_width(240.0),
-                );
-                if seed_input.changed() {self.server_view.invalidate_content_acquisition_plan();}
+                let seed_label = ui.label(tr("Seed stage id (optional)"));
+                let seed_input = ui
+                    .add_enabled(
+                        !busy && !dirty,
+                        egui::TextEdit::singleline(&mut self.server_view.acquisition_seed)
+                            .desired_width(240.0),
+                    )
+                    .labelled_by(seed_label.id);
+                if seed_input.changed() {
+                    self.server_view.invalidate_content_acquisition_plan();
+                }
             });
             let review = ui.add_enabled(
                 !busy && !dirty,
@@ -99,7 +103,7 @@ impl Foxy {
                     egui::Button::new(tr("Acquire reviewed repository content")),
                 );
                 if apply.clicked() {
-                    self.server_view.dialog = Some(ServerDialog::AcquireRepositoryContent);
+                    self.server_view.open_dialog(ServerDialog::AcquireRepositoryContent);
                 }
             }
 

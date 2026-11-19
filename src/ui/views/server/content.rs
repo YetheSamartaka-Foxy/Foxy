@@ -1,6 +1,6 @@
 use crate::core::server::{ContentPlanRequest, ServerAddonBinding, ServerAddonRole};
 use crate::ui::app::Foxy;
-use crate::ui::app::server::ServerTaskAction;
+use crate::ui::app::server::{ServerPage, ServerTaskAction};
 use crate::ui::i18n::{tr, tr_fmt};
 use eframe::egui::{self, Ui};
 
@@ -37,22 +37,34 @@ impl Foxy {
             self.server_view.content_bindings_plan = None;
         }
         ui.separator();
-        ui.heading(tr("Server content planning"));
-        ui.label(tr(
-            "Preview only: this does not download or copy files. Present files are not verified.",
-        ));
-        let mut action = None;
-        let refresh = ui.add_enabled(
-            !dirty && !self.server_view.busy(),
-            egui::Button::new(tr("Refresh server content profiles")),
-        );
-        if refresh.clicked() {
-            action = Some(ServerTaskAction::LoadContentSources);
+        ui.heading(tr("Server loadout"));
+        ui.label(tr("Choose named addon sets for this server. Reviewed changes take effect through deployment."));
+        if ui
+            .button(tr("Addon profiles"))
+            .on_hover_text(tr(
+                "Create named addon sets and manage their source folders.",
+            ))
+            .clicked()
+        {
+            self.server_view.page = ServerPage::Profiles;
         }
-        let reload = ui.add_enabled(
-            !dirty && !self.server_view.busy(),
-            egui::Button::new(tr("Reload saved content bindings")),
-        );
+        let mut action = None;
+        if !dirty
+            && !self.server_view.busy()
+            && self.server_view.saved_content_bindings.is_none()
+            && !self.server_view.content_bindings_load_requested
+        {
+            self.server_view.content_bindings_load_requested = true;
+            action = Some(ServerTaskAction::ReloadContentBindings(instance_id.clone()));
+        }
+        let reload = ui
+            .add_enabled(
+                !dirty && !self.server_view.busy(),
+                egui::Button::new(tr("Reload saved content bindings")),
+            )
+            .on_hover_text(tr(
+                "Replace the current selection with the server's saved addon bindings.",
+            ));
         if reload.clicked() && !dirty && !self.server_view.busy() {
             action = Some(ServerTaskAction::ReloadContentBindings(instance_id.clone()));
         }
@@ -64,7 +76,9 @@ impl Foxy {
         }
         if let Some(sources) = &self.server_view.content_sources {
             if sources.sources.profiles.is_empty() {
-                ui.label(tr("No content profiles are registered. Add folders and profiles with the server content registration CLI."));
+                ui.label(tr(
+                    "Add a folder, then create a profile and choose its addons.",
+                ));
             }
             let profiles = sources.sources.profiles.clone();
             let mut changed = false;
@@ -77,10 +91,15 @@ impl Foxy {
                         .any(|binding| binding.source_id == profile.name);
                     let response = ui
                         .push_id((field_scope, &profile.name, "selected"), |ui| {
-                            ui.checkbox(
-                                &mut selected,
-                                tr_fmt("Profile: {name}", &[("name", profile.name.clone())]),
-                            )
+                            ui.horizontal_wrapped(|ui| {
+                                let response = Foxy::ui_state_checkbox(
+                                    ui,
+                                    &mut selected,
+                                    tr_fmt("Profile: {name}", &[("name", profile.name.clone())]),
+                                ).on_hover_text(tr("Assign this named addon set to the selected server."));
+                                ui.label(tr_fmt("{count} selected addons", &[("count", profile.addons.len().to_string())]));
+                                response
+                            }).inner
                         })
                         .inner;
                     if response.changed() {
@@ -154,9 +173,9 @@ impl Foxy {
                         .find(|binding| binding.source_id == name)
                     {
                         ui.push_id((field_scope, &name), |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(tr_fmt("Role for {name}", &[("name", name.clone())]));
-                                egui::ComboBox::from_id_salt((
+                            ui.horizontal_wrapped(|ui| {
+                                let role_label = ui.label(tr_fmt("Role for {name}", &[("name", name.clone())]));
+                                let combo = egui::ComboBox::from_id_salt((
                                     "server-content-role",
                                     field_scope,
                                     &name,
@@ -180,6 +199,8 @@ impl Foxy {
                                         }
                                     }
                                 });
+                                combo.response.labelled_by(role_label.id)
+                                    .on_hover_text(tr("Required loads for the server and players. Optional is available for recommendations. Server only loads privately on the server."));
                                 move_up = ui
                                     .add_enabled(
                                         index > 0,
@@ -220,7 +241,7 @@ impl Foxy {
             let response = ui.add_enabled(
                 !dirty && !self.server_view.busy(),
                 egui::Button::new(tr("Preview selected content")),
-            );
+            ).on_hover_text(tr("Review the exact profile membership, role, order and source availability before saving."));
             let clicked = response.clicked();
             anchor = response;
             if clicked {
@@ -240,7 +261,12 @@ impl Foxy {
                     expected_bindings_fingerprint,
                 });
             }
-            if self.server_view.saved_content_bindings.is_some()
+            if self
+                .server_view
+                .saved_content_bindings
+                .as_ref()
+                .and_then(|snapshot| snapshot.document.as_ref())
+                .is_some_and(|document| !document.bindings.is_empty())
                 && self.server_view.content_bindings.is_empty()
             {
                 ui.label(tr(
@@ -268,20 +294,22 @@ impl Foxy {
                     ui.label(tr(issue));
                 }
                 if let Some(document) = &snapshot.document {
-                    for entry in &document.bindings {
-                        ui.label(tr_fmt(
-                            "Reviewed profile {name}: {url} at {path}",
-                            &[
-                                ("name", entry.profile.name.clone()),
-                                ("url", entry.profile.remote_url.clone()),
-                                ("path", entry.profile.local_path.display().to_string()),
-                            ],
-                        ));
-                        ui.label(tr_fmt(
-                            "Reviewed content folder: {path}",
-                            &[("path", entry.folder.path.display().to_string())],
-                        ));
-                    }
+                    ui.collapsing(tr("Saved binding details"), |ui| {
+                        for entry in &document.bindings {
+                            ui.label(tr_fmt(
+                                "Reviewed profile {name}: {url} at {path}",
+                                &[
+                                    ("name", entry.profile.name.clone()),
+                                    ("url", entry.profile.remote_url.clone()),
+                                    ("path", entry.profile.local_path.display().to_string()),
+                                ],
+                            ));
+                            ui.label(tr_fmt(
+                                "Reviewed content folder: {path}",
+                                &[("path", entry.folder.path.display().to_string())],
+                            ));
+                        }
+                    });
                 }
             }
             if self.server_view.content_bindings_plan.is_some() {
@@ -300,7 +328,7 @@ impl Foxy {
             }
         } else {
             ui.label(tr(
-                "Refresh server content profiles to load registered sources.",
+                "Reload saved content bindings to see this server's current loadout.",
             ));
         }
         if let Some(plan) = &self.server_view.content_plan {

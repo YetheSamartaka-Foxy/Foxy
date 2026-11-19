@@ -283,4 +283,13 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn example_storage_targets_parses() {
+        let records: BTreeMap<String, VolumeIdentity> = serde_json::from_str(include_str!(
+            "../../../examples/json/appdata/games/arma3/storage_targets.json"
+        ))
+        .expect("parse example storage_targets.json");
+        assert!(!records.is_empty());
+    }
 }

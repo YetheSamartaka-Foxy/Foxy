@@ -34,6 +34,7 @@ fn main() {
     let mut touched_values = 0usize;
     let mut removed_values = 0usize;
     let mut changed_keys: Vec<String> = Vec::new();
+    let mut pending_writes = Vec::new();
 
     for (locale, translations) in &batch {
         if locale == "en" {
@@ -63,10 +64,12 @@ fn main() {
         });
 
         let mut available: BTreeSet<&str> = locale_map.keys().map(String::as_str).collect();
-        available.extend(translations.keys().map(String::as_str));
 
         let mut changed_here = 0usize;
         for (key, translated) in ordered {
+            if config.missing_only && available.contains(key.as_str()) {
+                continue;
+            }
             let Some(source_key) = english_source_key(key, &en_map) else {
                 errors.push(format!("{locale}: key is not present in en.json: {key:?}"));
                 continue;
@@ -113,9 +116,14 @@ fn main() {
                 None => previous_present_key(&en_keys, key, &available),
             };
             let Some(anchor) = anchor else {
-                errors.push(format!(
-                    "{locale}: could not infer insertion point for {key:?}; pass --after-key"
-                ));
+                if insert_before_first_entry(&mut lines, key, translated, newline) {
+                    available.insert(key);
+                    changed_here += 1;
+                } else {
+                    errors.push(format!(
+                        "{locale}: no line-based insertion point for {key:?}; pass --after-key"
+                    ));
+                }
                 continue;
             };
             let Some(anchor_index) = find_entry_line(&lines, anchor) else {
@@ -139,6 +147,7 @@ fn main() {
                 anchor_index + 1,
                 locale_entry_line_indented(&indent, key, translated, newline, anchor_has_comma),
             );
+            available.insert(key);
             changed_here += 1;
         }
 
@@ -164,10 +173,7 @@ fn main() {
             touched_files += 1;
             touched_values += changed_here;
             if !config.dry_run {
-                or_die(
-                    fs::write(&locale_path, lines.concat())
-                        .map_err(|e| format!("Failed to write {}: {e}", locale_path.display())),
-                );
+                pending_writes.push((locale_path, lines.concat()));
             }
         }
     }
@@ -178,6 +184,13 @@ fn main() {
             println!("- {}", truncate(error, 300));
         }
         process::exit(1);
+    }
+
+    for (path, content) in pending_writes {
+        or_die(
+            fs::write(&path, content)
+                .map_err(|e| format!("Failed to write {}: {e}", path.display())),
+        );
     }
 
     if let Some(keys_out) = &config.keys_out
@@ -202,6 +215,23 @@ fn main() {
             changed_keys.len()
         );
     }
+}
+
+fn insert_before_first_entry(
+    lines: &mut Vec<String>,
+    key: &str,
+    value: &Value,
+    newline: &str,
+) -> bool {
+    let Some(first) = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('"'))
+    else {
+        return false;
+    };
+    let entry = locale_entry_line_indented(entry_indent(&lines[first]), key, value, newline, true);
+    lines.insert(first, entry);
+    true
 }
 
 fn record_changed(changed: &mut Vec<String>, key: &str) {
@@ -250,6 +280,7 @@ struct Config {
     keys_out: Option<PathBuf>,
     dry_run: bool,
     allow_question_mark: bool,
+    missing_only: bool,
     remove_extra: bool,
 }
 
@@ -260,6 +291,7 @@ fn parse_args() -> Config {
     let mut keys_out = None;
     let mut dry_run = false;
     let mut allow_question_mark = false;
+    let mut missing_only = false;
     let mut remove_extra = false;
     let mut args = env::args().skip(1);
 
@@ -273,6 +305,7 @@ fn parse_args() -> Config {
             "--keys-out" => keys_out = Some(PathBuf::from(require_value(&mut args, "--keys-out"))),
             "--dry-run" => dry_run = true,
             "--allow-question-mark" => allow_question_mark = true,
+            "--missing-only" => missing_only = true,
             "--remove-extra" => remove_extra = true,
             "--help" | "-h" => {
                 print_help();
@@ -299,6 +332,7 @@ fn parse_args() -> Config {
         keys_out,
         dry_run,
         allow_question_mark,
+        missing_only,
         remove_extra,
     }
 }
@@ -327,6 +361,7 @@ fn print_help() {
         "  --keys-out <path>       Write the unique translated en.json keys to this UTF-8 file."
     );
     println!("  --dry-run               Validate and report without writing locale files.");
+    println!("  --missing-only          Keep all existing locale values.");
     println!(
         "  --allow-question-mark   Allow literal '?' in translated values after manual review."
     );
@@ -343,6 +378,21 @@ fn or_die<T>(result: Result<T, String>) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn can_insert_an_english_key_before_the_locale_first_entry() {
+        let mut lines = split_lines_keep_ends("{\r\n    \"Kept\": \"Old\"\r\n}\r\n");
+        assert!(insert_before_first_entry(
+            &mut lines,
+            "New",
+            &Value::String("Translated".into()),
+            "\r\n"
+        ));
+        assert_eq!(
+            lines.concat(),
+            "{\r\n    \"New\": \"Translated\",\r\n    \"Kept\": \"Old\"\r\n}\r\n"
+        );
+    }
 
     #[test]
     fn removing_the_last_entry_repairs_its_predecessor() {

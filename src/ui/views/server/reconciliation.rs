@@ -101,7 +101,7 @@ impl Foxy {
                 });
                 let review_enabled = !busy && !dirty && plan.blockers.is_empty() && !plan.candidates.is_empty();
                 if ui.add_enabled(review_enabled, egui::Button::new(tr("Review reclamation confirmation"))).clicked() {
-                    self.server_view.dialog = Some(ServerDialog::ReclaimDeploymentStorage);
+                    self.server_view.open_dialog(ServerDialog::ReclaimDeploymentStorage);
                 }
             }
             if let Some(outcome) = self.server_view.reconciliation_outcome.as_ref().filter(|outcome| outcome.instance_id == id) {

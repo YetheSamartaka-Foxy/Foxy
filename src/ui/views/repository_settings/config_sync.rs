@@ -30,7 +30,8 @@ impl Foxy {
             |ui| {
                 let combo_width =
                     (block_width - 8.0).clamp(150.0, Self::REPO_SETTING_COMBO_MAX_WIDTH);
-                Self::render_repo_setting_label(ui, tr(label_key), block_width);
+                let label_resp =
+                    Self::render_repo_setting_label(ui, tr(label_key), block_width);
 
                 let selected_text = match *repo_value {
                     Some(true) => tr("On (override)"),
@@ -67,7 +68,7 @@ impl Foxy {
                             *changed = true;
                         }
                     });
-                if combo.response.hovered() {
+                if combo.response.labelled_by(label_resp.id).hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
             },
@@ -267,8 +268,12 @@ impl Foxy {
                         let combo_width =
                             (block_width - 8.0).clamp(150.0, Self::REPO_SETTING_COMBO_MAX_WIDTH);
                         let hashing_help = tr("When set to Prefer Swifty, Foxy will use MD5 hashing instead of BLAKE3 if the repository supports it.");
-                        Self::render_repo_setting_label(ui, tr("Hashing algorithm"), block_width)
-                            .on_hover_text(hashing_help.as_str());
+                        let hashing_label = Self::render_repo_setting_label(
+                            ui,
+                            tr("Hashing algorithm"),
+                            block_width,
+                        )
+                        .on_hover_text(hashing_help.as_str());
 
                         let selected_text = match repo.hash_algorithm_preference {
                             HashAlgorithmPreference::PreferFoxy => tr("Prefer Foxy (BLAKE3)"),
@@ -303,10 +308,13 @@ impl Foxy {
                                 *changed = true;
                             }
                         });
-                        if combo.response.hovered() {
+                        let combo_response = combo
+                            .response
+                            .labelled_by(hashing_label.id)
+                            .on_hover_text(hashing_help);
+                        if combo_response.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
-                        combo.response.on_hover_text(hashing_help);
                     },
                 );
             });

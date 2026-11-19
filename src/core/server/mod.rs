@@ -107,13 +107,13 @@ pub use deployments::{
 };
 pub use distribution::ContentChannel;
 pub use engine_layout::TestedEngineLayout;
-pub(crate) use headless::valid_headless_id;
 pub use headless::{
     Arma3HeadlessClient, HEADLESS_LOOPBACK, HeadlessAddonSelection, HeadlessClientState,
     HeadlessClientStatus, HeadlessConnection, HeadlessGroupStatus, HeadlessLaunchPlan,
     HeadlessLifecyclePolicy, HeadlessProcessOverrides, HeadlessReason, MAX_HEADLESS_CLIENTS,
     NativeHeadlessClient, new_headless_id, ordered_headless_clients, validate_headless_clients,
 };
+pub(crate) use headless::{selects as selects_headless_source, valid_headless_id};
 pub use installation::{
     BuildEvidence, InstallationBuildObservation, InstallationId, InstallationOwnership,
     ServerInstallation, ServerPlatform,

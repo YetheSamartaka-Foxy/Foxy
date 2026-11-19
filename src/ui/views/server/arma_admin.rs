@@ -1,4 +1,4 @@
-use eframe::egui::{self, Response, RichText, Ui};
+use eframe::egui::{self, RichText, Ui};
 
 use crate::core::server::rcon::arma3::{
     ArmaAdminCommand, ArmaBanList, ArmaMissionList, ArmaRoster, parse_bans, parse_missions,
@@ -11,17 +11,6 @@ use crate::ui::app::server::arma_admin::{ArmaAdminAction, ArmaAdminConfirmation}
 use crate::ui::i18n::{tr, tr_fmt};
 
 const MAX_ADMIN_ROWS: usize = 100;
-
-fn focus_outline(ui: &Ui, response: &Response) {
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect,
-            2.0,
-            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
 
 fn latest_reply<'a>(
     records: impl Iterator<Item = &'a RconCommandRecord>,
@@ -178,8 +167,8 @@ impl Foxy {
         }
         ui.add_enabled_ui(state.confirmation.is_none(), |ui| {
             ui.horizontal(|ui| {
-                ui.label(tr("Action"));
-                egui::ComboBox::from_id_salt(("arma-admin-action", id.as_str()))
+                let action_label_resp = ui.label(tr("Action"));
+                let combo = egui::ComboBox::from_id_salt(("arma-admin-action", id.as_str()))
                     .selected_text(tr(action_label(state.action)))
                     .show_ui(ui, |ui| {
                         for action in [
@@ -202,45 +191,56 @@ impl Foxy {
                             );
                         }
                     });
+                combo.response.labelled_by(action_label_resp.id);
             })
         });
 
         ui.add_enabled_ui(state.confirmation.is_none(), |ui| match state.action {
             ArmaAdminAction::Announce => {
-                ui.label(tr("Message"));
-                ui.add(egui::TextEdit::multiline(&mut state.message).desired_rows(3).char_limit(1024));
+                let label = ui.label(tr("Message"));
+                ui.add(egui::TextEdit::multiline(&mut state.message).desired_rows(3).char_limit(1024))
+                    .labelled_by(label.id);
             }
             ArmaAdminAction::Kick => {
                 ui.horizontal(|ui| {
-                    ui.label(tr("Player ID"));
-                    ui.add(egui::TextEdit::singleline(&mut state.target).desired_width(100.0).char_limit(10));
-                    ui.label(tr("Expected GUID"));
-                    ui.add(egui::TextEdit::singleline(&mut state.guid).desired_width(220.0).char_limit(128));
+                    let pid_label = ui.label(tr("Player ID"));
+                    ui.add(egui::TextEdit::singleline(&mut state.target).desired_width(100.0).char_limit(10))
+                        .labelled_by(pid_label.id);
+                    let guid_label = ui.label(tr("Expected GUID"));
+                    ui.add(egui::TextEdit::singleline(&mut state.guid).desired_width(220.0).char_limit(128))
+                        .labelled_by(guid_label.id);
                 });
-                ui.label(tr("Reason"));
-                ui.add(egui::TextEdit::singleline(&mut state.reason).desired_width(360.0).char_limit(512));
+                let reason_label = ui.label(tr("Reason"));
+                ui.add(egui::TextEdit::singleline(&mut state.reason).desired_width(360.0).char_limit(512))
+                    .labelled_by(reason_label.id);
             }
             ArmaAdminAction::AddBan => {
                 ui.horizontal(|ui| {
-                    ui.label(tr("GUID"));
-                    ui.add(egui::TextEdit::singleline(&mut state.guid).desired_width(220.0).char_limit(128));
-                    ui.label(tr("Minutes"));
-                    ui.add(egui::TextEdit::singleline(&mut state.minutes).desired_width(100.0).char_limit(10));
+                    let guid_label = ui.label(tr("GUID"));
+                    ui.add(egui::TextEdit::singleline(&mut state.guid).desired_width(220.0).char_limit(128))
+                        .labelled_by(guid_label.id);
+                    let min_label = ui.label(tr("Minutes"));
+                    ui.add(egui::TextEdit::singleline(&mut state.minutes).desired_width(100.0).char_limit(10))
+                        .labelled_by(min_label.id);
                 });
-                ui.label(tr("Reason"));
-                ui.add(egui::TextEdit::singleline(&mut state.reason).desired_width(360.0).char_limit(512));
+                let reason_label = ui.label(tr("Reason"));
+                ui.add(egui::TextEdit::singleline(&mut state.reason).desired_width(360.0).char_limit(512))
+                    .labelled_by(reason_label.id);
             }
             ArmaAdminAction::RemoveBan => {
                 ui.horizontal(|ui| {
-                    ui.label(tr("Ban ID"));
-                    ui.add(egui::TextEdit::singleline(&mut state.target).desired_width(100.0).char_limit(10));
-                    ui.label(tr("Expected GUID"));
-                    ui.add(egui::TextEdit::singleline(&mut state.guid).desired_width(220.0).char_limit(128));
+                    let ban_label = ui.label(tr("Ban ID"));
+                    ui.add(egui::TextEdit::singleline(&mut state.target).desired_width(100.0).char_limit(10))
+                        .labelled_by(ban_label.id);
+                    let guid_label = ui.label(tr("Expected GUID"));
+                    ui.add(egui::TextEdit::singleline(&mut state.guid).desired_width(220.0).char_limit(128))
+                        .labelled_by(guid_label.id);
                 });
             }
             ArmaAdminAction::ChangeMission => {
-                ui.label(tr("Mission template"));
-                ui.add(egui::TextEdit::singleline(&mut state.mission).desired_width(360.0).char_limit(256));
+                let mission_label = ui.label(tr("Mission template"));
+                ui.add(egui::TextEdit::singleline(&mut state.mission).desired_width(360.0).char_limit(256))
+                    .labelled_by(mission_label.id);
                 ui.label(tr("Changing mission does not restart the server. Deploy the new mission before selecting it."));
             }
             _ => {}
@@ -256,7 +256,7 @@ impl Foxy {
                 !busy && connected && state.confirmation.is_none(),
                 egui::Button::new(tr("Review command")),
             );
-            focus_outline(ui, &preview_button);
+            Self::focus_outline(ui, &preview_button);
             if preview_button.clicked() {
                 match make_command(&state).and_then(|command| {
                     let wire_text = command.wire_text()?;
@@ -306,25 +306,27 @@ impl Foxy {
                 if matches!(&confirmation.command, ArmaAdminCommand::ChangeMission { .. } | ArmaAdminCommand::RestartMission) {
                     ui.label(tr("This changes or restarts the mission only. It does not restart the server."));
                 }
-                let mut cancel = None;
+                let mut cancel = ui.input_mut(|input| {
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                });
                 ui.horizontal(|ui| {
                     let send = ui.add_enabled(!busy && connected, egui::Button::new(tr("Send once")));
-                    focus_outline(ui, &send);
+                    Self::focus_outline(ui, &send);
                     let safe = ui.button(tr("Cancel"));
                     if state.focus_cancel {
                         safe.request_focus();
                         safe.scroll_to_me(Some(egui::Align::Center));
                         state.focus_cancel = false;
                     }
-                    focus_outline(ui, &safe);
+                    Self::focus_outline(ui, &safe);
                     if send.clicked() {
                         send_command = Some(confirmation);
                     }
                     if safe.clicked() {
-                        cancel = Some(());
+                        cancel = true;
                     }
                 });
-                if cancel.is_some() {
+                if cancel {
                     state.confirmation = None;
                 }
             });

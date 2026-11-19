@@ -1,4 +1,4 @@
-use egui::{Button, Color32, CursorIcon, RichText, TextStyle, Ui, Vec2, Visuals};
+use egui::{Align, Button, Color32, CursorIcon, Layout, RichText, TextStyle, Ui, Vec2, Visuals};
 
 use crate::ui::app::{CachedPaletteColor32, Foxy};
 use crate::ui::i18n::tr;
@@ -159,6 +159,25 @@ impl Foxy {
         self.color_cache().action_destructive
     }
 
+    pub(in crate::ui) fn color_text_on(&self, background: Color32) -> Color32 {
+        palette::contrast_text_on(background)
+    }
+
+    pub(in crate::ui) fn focus_outline(ui: &Ui, response: &egui::Response) {
+        Self::focus_outline_color(ui, response, ui.visuals().selection.stroke.color);
+    }
+
+    pub(in crate::ui) fn focus_outline_color(ui: &Ui, response: &egui::Response, color: Color32) {
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                response.rect,
+                2.0,
+                egui::Stroke::new(2.0, color),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
     pub(in crate::ui::app) fn blend_color(start: Color32, end: Color32, factor: f32) -> Color32 {
         let factor = factor.clamp(0.0, 1.0);
         let blend = |a: u8, b: u8| -> u8 {
@@ -197,17 +216,21 @@ impl Foxy {
         button: Button<'_>,
         enabled: bool,
     ) -> egui::Response {
+        let accent = self.color_primary_accent();
+        let hover = self.color_primary_accent_hover();
+        let active = self.color_primary_accent_active();
+        let ink = self.color_text_on(accent);
         ui.scope(|ui| {
             let visuals = &mut ui.style_mut().visuals.widgets;
-            visuals.inactive.bg_fill = self.color_primary_accent();
-            visuals.hovered.bg_fill = self.color_primary_accent_hover();
-            visuals.hovered.weak_bg_fill = self.color_primary_accent_hover();
-            visuals.active.bg_fill = self.color_primary_accent_active();
-            visuals.active.weak_bg_fill = self.color_primary_accent_active();
-            ui.add_enabled(
-                enabled,
-                button.fill(self.color_primary_accent()).min_size(size),
-            )
+            visuals.inactive.bg_fill = accent;
+            visuals.inactive.fg_stroke.color = ink;
+            visuals.hovered.bg_fill = hover;
+            visuals.hovered.weak_bg_fill = hover;
+            visuals.hovered.fg_stroke.color = self.color_text_on(hover);
+            visuals.active.bg_fill = active;
+            visuals.active.weak_bg_fill = active;
+            visuals.active.fg_stroke.color = self.color_text_on(active);
+            ui.add_enabled(enabled, button.fill(accent).min_size(size))
         })
         .inner
     }
@@ -321,8 +344,9 @@ impl Foxy {
                         .add_sized(
                             Vec2::new(tab_widths[index], 30.0),
                             Button::new(
-                                RichText::new(label.as_str()).color(self.color_text_normal()),
+                                RichText::new(label.as_str()).color(self.color_text_on(color)),
                             )
+                            .selected(is_selected)
                             .truncate()
                             .min_size(Vec2::new(0.0, 30.0))
                             .fill(color),
@@ -344,6 +368,136 @@ impl Foxy {
         clicked
     }
 
+    /// Render tabs with stable semantic IDs and concise descriptions for help and assistive technology.
+    pub fn render_adaptive_tab_bar_described(
+        &self,
+        ui: &mut Ui,
+        tabs: &[(&str, &str, &str)],
+        selected_index: usize,
+        id_salt: impl std::hash::Hash + std::fmt::Debug,
+        subordinate: bool,
+    ) -> Option<usize> {
+        if tabs.is_empty() {
+            return None;
+        }
+
+        let mut clicked = None;
+        ui.push_id(id_salt, |ui| {
+            let available = ui.available_width().min(ui.clip_rect().width());
+            let spacing = ui.spacing().item_spacing.x;
+            let labels = tabs
+                .iter()
+                .map(|(label, _, _)| tr(label))
+                .collect::<Vec<_>>();
+            let text_widths = tab_text_widths(ui, &labels);
+            let average_text = text_widths.iter().sum::<f32>() / tabs.len() as f32;
+            let preferred = (average_text + 2.0 * ui.spacing().button_padding.x + 8.0).max(84.0);
+            let columns = (((available + spacing) / (preferred + spacing)) as usize).max(1);
+            let rows = tabs.len().div_ceil(columns);
+            let per_row = tabs.len().div_ceil(rows);
+            let mut responses = Vec::with_capacity(tabs.len());
+            let mut focused = None;
+            let rtl = crate::ui::i18n::is_rtl();
+            let layout = if rtl {
+                Layout::right_to_left(Align::Center)
+            } else {
+                Layout::left_to_right(Align::Center)
+            };
+            let tab_height = if subordinate { 28.0 } else { 30.0 };
+            let bar_id = ui.scope_id();
+            for (row, row_labels) in labels.chunks(per_row).enumerate() {
+                let first = row * per_row;
+                let widths = scaled_tab_widths(
+                    ui,
+                    &text_widths[first..first + row_labels.len()],
+                    (available - spacing * row_labels.len().saturating_sub(1) as f32 - 1.0)
+                        .max(0.0),
+                );
+                ui.allocate_ui_with_layout(Vec2::new(available, tab_height), layout, |ui| {
+                    ui.spacing_mut().item_spacing.x = spacing;
+                    for (column, (label, width)) in row_labels.iter().zip(widths).enumerate() {
+                        let index = first + column;
+                        let (_, semantic_id, description) = tabs[index];
+                        let selected = index == selected_index;
+                        let fill = if selected {
+                            if subordinate {
+                                self.color_widget_bg_active()
+                            } else {
+                                self.color_primary_accent()
+                            }
+                        } else {
+                            self.color_main_bg()
+                        };
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new().scope_id(bar_id.with(semantic_id)),
+                                |ui| {
+                                    ui.add_sized(
+                                        Vec2::new(width, tab_height),
+                                        Button::new(
+                                            RichText::new(label.as_str())
+                                                .color(self.color_text_on(fill)),
+                                        )
+                                        .selected(selected)
+                                        .truncate()
+                                        .min_size(Vec2::new(0.0, tab_height))
+                                        .fill(fill),
+                                    )
+                                },
+                            )
+                            .inner
+                            .on_hover_text(format!("{label}\n{description}"))
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        ui.ctx().accesskit_node_builder(response.id, |node| {
+                            node.set_role(egui::accesskit::Role::Tab);
+                            node.set_label(label.as_str());
+                            node.set_description(description);
+                            node.set_selected(selected);
+                        });
+                        Foxy::focus_outline(ui, &response);
+                        if response.clicked() {
+                            clicked = Some(index);
+                            response.request_focus();
+                        }
+                        if ui.memory(|memory| memory.has_focus(response.id)) {
+                            focused = Some(index);
+                            ui.memory_mut(|memory| {
+                                memory.set_focus_lock_filter(
+                                    response.id,
+                                    egui::EventFilter {
+                                        horizontal_arrows: true,
+                                        ..Default::default()
+                                    },
+                                )
+                            });
+                        }
+                        responses.push(response);
+                    }
+                });
+            }
+            if let Some(index) = focused {
+                let step = ui.input_mut(|input| {
+                    if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+                        1
+                    } else if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+                        -1
+                    } else {
+                        0
+                    }
+                });
+                if step != 0 {
+                    let next = (index as isize + if rtl { -step } else { step })
+                        .clamp(0, tabs.len() as isize - 1) as usize;
+                    ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+                    responses[next].request_focus();
+                    clicked = Some(next);
+                    ui.ctx().request_repaint();
+                }
+            }
+        });
+        clicked
+    }
+
     pub fn header_bar_height(&self) -> f32 {
         (self.header_control_button_size().y + 12.0).max(40.0)
     }
@@ -362,26 +516,25 @@ impl Foxy {
         }
 
         let is_dark = ui.visuals().dark_mode;
-        let (base_fill, hover_fill, active_fill, border_color, label_color, check_color) =
-            if is_dark {
-                (
-                    palette::CHECKBOX_ENABLED,
-                    palette::CHECKBOX_ENABLED_HOVER,
-                    palette::CHECKBOX_ENABLED_ACTIVE,
-                    palette::CHECKBOX_ENABLED_BORDER,
-                    palette::CHECKBOX_ENABLED_LABEL,
-                    Color32::WHITE,
-                )
-            } else {
-                (
-                    palette::CHECKBOX_ENABLED_LIGHT,
-                    palette::CHECKBOX_ENABLED_HOVER_LIGHT,
-                    palette::CHECKBOX_ENABLED_ACTIVE_LIGHT,
-                    palette::CHECKBOX_ENABLED_BORDER_LIGHT,
-                    palette::CHECKBOX_ENABLED_LABEL_LIGHT,
-                    Color32::WHITE,
-                )
-            };
+        let (base_fill, hover_fill, active_fill, border_color, label_color) = if is_dark {
+            (
+                palette::CHECKBOX_ENABLED,
+                palette::CHECKBOX_ENABLED_HOVER,
+                palette::CHECKBOX_ENABLED_ACTIVE,
+                palette::CHECKBOX_ENABLED_BORDER,
+                palette::CHECKBOX_ENABLED_LABEL,
+            )
+        } else {
+            (
+                palette::CHECKBOX_ENABLED_LIGHT,
+                palette::CHECKBOX_ENABLED_HOVER_LIGHT,
+                palette::CHECKBOX_ENABLED_ACTIVE_LIGHT,
+                palette::CHECKBOX_ENABLED_BORDER_LIGHT,
+                palette::CHECKBOX_ENABLED_LABEL_LIGHT,
+            )
+        };
+        let check_color = palette::contrast_text_on(base_fill);
+        let focus_stroke = egui::Stroke::new(2.0, ui.visuals().selection.stroke.color);
         let label = text.into();
 
         ui.scope(|ui| {
@@ -399,7 +552,7 @@ impl Foxy {
 
             style.visuals.widgets.active.bg_fill = active_fill;
             style.visuals.widgets.active.weak_bg_fill = active_fill;
-            style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, border_color);
+            style.visuals.widgets.active.bg_stroke = focus_stroke;
             style.visuals.widgets.active.fg_stroke = egui::Stroke::new(2.0, check_color);
 
             style.visuals.widgets.open.bg_fill = base_fill;
@@ -537,7 +690,8 @@ impl Foxy {
         let widget_hover = cache.widget_bg_hover;
         let widget_active = cache.widget_bg_active;
         let accent_stroke = egui::Stroke::new(2.0, cache.primary_accent);
-        let focus_fill = Self::blend_color(cache.widget_bg, cache.primary_accent, 0.36);
+        let focus_stroke = egui::Stroke::new(2.0, cache.text_normal);
+        let focus_fill = Self::blend_color(cache.widget_bg, cache.primary_accent, 0.22);
 
         visuals.widgets.inactive.bg_fill = widget_base;
         visuals.widgets.inactive.weak_bg_fill = widget_base;
@@ -551,15 +705,15 @@ impl Foxy {
 
         visuals.widgets.active.bg_fill = widget_active;
         visuals.widgets.active.weak_bg_fill = widget_active;
-        visuals.widgets.active.bg_stroke = accent_stroke;
+        visuals.widgets.active.bg_stroke = focus_stroke;
         visuals.widgets.active.fg_stroke.color = cache.text_normal;
 
         visuals.widgets.open.bg_fill = widget_active;
         visuals.widgets.open.weak_bg_fill = widget_active;
-        visuals.widgets.open.bg_stroke = accent_stroke;
+        visuals.widgets.open.bg_stroke = focus_stroke;
         visuals.widgets.open.fg_stroke.color = cache.text_normal;
         visuals.selection.bg_fill = focus_fill;
-        visuals.selection.stroke = egui::Stroke::new(2.0, cache.text_normal);
+        visuals.selection.stroke = focus_stroke;
 
         let active_theme = if dark_mode {
             egui::Theme::Dark
@@ -578,9 +732,12 @@ impl Foxy {
 }
 
 fn adaptive_tab_widths(ui: &Ui, labels: &[String], available_width: f32) -> Vec<f32> {
+    scaled_tab_widths(ui, &tab_text_widths(ui, labels), available_width)
+}
+
+fn tab_text_widths(ui: &Ui, labels: &[String]) -> Vec<f32> {
     let font_id = TextStyle::Button.resolve(ui.style());
-    let default_padding_x = ui.spacing().button_padding.x;
-    let text_widths: Vec<f32> = labels
+    labels
         .iter()
         .map(|label| {
             ui.painter()
@@ -588,7 +745,11 @@ fn adaptive_tab_widths(ui: &Ui, labels: &[String], available_width: f32) -> Vec<
                 .size()
                 .x
         })
-        .collect();
+        .collect()
+}
+
+fn scaled_tab_widths(ui: &Ui, text_widths: &[f32], available_width: f32) -> Vec<f32> {
+    let default_padding_x = ui.spacing().button_padding.x;
     let preferred_widths: Vec<f32> = text_widths
         .iter()
         .map(|text_width| (text_width + default_padding_x * 2.0 + 8.0).max(48.0))
@@ -803,5 +964,71 @@ mod tests {
         assert!(widths[1] >= fallback[1]);
         assert!(widths[2] >= fallback[2]);
         assert!((widths.iter().sum::<f32>() - 300.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn focus_visuals_meet_wcag_aa_stroke_and_contrast() {
+        let mut cases = vec![(
+            "default".to_string(),
+            crate::ui::palette::PaletteColors::default(),
+        )];
+        cases.extend(
+            crate::ui::theme::builtin_presets()
+                .into_iter()
+                .map(|preset| (preset.name.to_string(), preset.palette)),
+        );
+
+        for (label, palette_colors) in cases {
+            let ctx = egui::Context::default();
+            let mut app = Foxy::new_headless(&ctx);
+            app.settings_view_state.palette_colors = palette_colors.clone();
+            app.last_applied_palette = None;
+            app.apply_runtime_palette_visuals(&ctx);
+
+            let theme = if uses_dark_visuals(
+                palette_colors.main_bg.to_color32(),
+                palette_colors.text_normal.to_color32(),
+            ) {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            };
+            let visuals = ctx.style_of(theme).visuals.clone();
+            assert!(
+                visuals.widgets.active.bg_stroke.width >= 2.0,
+                "{label}: active bg_stroke too thin"
+            );
+            assert!(
+                visuals.widgets.open.bg_stroke.width >= 2.0,
+                "{label}: open bg_stroke too thin"
+            );
+            assert!(
+                visuals.widgets.hovered.bg_stroke.width >= 2.0,
+                "{label}: hovered bg_stroke too thin"
+            );
+            assert!(
+                visuals.selection.stroke.width >= 2.0,
+                "{label}: selection stroke too thin"
+            );
+
+            let stroke_color = visuals.selection.stroke.color;
+            for (surface_name, bg, min_ratio) in [
+                ("main_bg", palette_colors.main_bg.to_color32(), 4.5),
+                ("card_bg", palette_colors.card_bg.to_color32(), 4.5),
+                ("widget_bg", palette_colors.widget_bg.to_color32(), 4.5),
+                // Active/pressed controls satisfy WCAG 2.1 SC 1.4.11 (>= 3.0) non-text border contrast.
+                ("widget_bg_active", app.color_widget_bg_active(), 3.0),
+            ] {
+                let ratio = crate::ui::palette::contrast_ratio(stroke_color, bg);
+                assert!(
+                    ratio >= min_ratio,
+                    "{label}: focus stroke contrast on {surface_name} is {ratio:.2} (< {min_ratio})"
+                );
+            }
+
+            let spacing = &ctx.global_style().spacing;
+            assert!(spacing.interact_size.x >= 44.0);
+            assert!(spacing.interact_size.y >= 28.0);
+        }
     }
 }

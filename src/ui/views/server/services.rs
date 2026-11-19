@@ -3,17 +3,6 @@ use crate::ui::app::Foxy;
 use crate::ui::i18n::tr;
 use eframe::egui::{self, Ui};
 
-fn focus_outline(ui: &Ui, response: &egui::Response) {
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect,
-            2.0,
-            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
-
 impl Foxy {
     pub(crate) fn render_server_service_export(&mut self, ui: &mut Ui) {
         if !crate::core::game::registry()
@@ -44,7 +33,7 @@ impl Foxy {
             ui.horizontal_wrapped(|ui| {
                 let preview = ui.add_enabled(!self.server_view.busy(), egui::Button::new(tr("Preview export")));
                 self.server_view.services.controls_focus = Some(preview.id);
-                focus_outline(ui, &preview);
+                Self::focus_outline(ui, &preview);
                 if preview.clicked() {
                     self.request_server_service_export_plan();
                 }
@@ -67,17 +56,20 @@ impl Foxy {
                         .desired_rows(12)
                         .desired_width(f32::INFINITY)
                         .interactive(false),
-                );
+                )
+                .accessible_name(tr("Unattended owner definition preview"));
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(tr("Destination file"));
+                    let caption = ui.label(tr("Destination file"));
                     let id = egui::Id::unique(("server.service-export-path", space_id.as_str()));
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(&mut self.server_view.services.path)
-                            .id(id)
-                            .desired_width(320.0)
-                            .hint_text(&plan.file_name),
-                    );
-                    focus_outline(ui, &edit);
+                    let edit = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.server_view.services.path)
+                                .id(id)
+                                .desired_width(320.0)
+                                .hint_text(&plan.file_name),
+                        )
+                        .labelled_by(caption.id);
+                    Self::focus_outline(ui, &edit);
                     if edit.changed() {
                         self.server_view.services.exported = false;
                     }
@@ -90,7 +82,7 @@ impl Foxy {
                         egui::Button::new(tr("Save new definition")),
                     );
                     self.server_view.services.controls_focus = Some(save.id);
-                    focus_outline(ui, &save);
+                    Self::focus_outline(ui, &save);
                     if save.clicked() {
                         self.export_reviewed_server_service();
                     }

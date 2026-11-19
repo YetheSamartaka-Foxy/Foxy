@@ -133,7 +133,17 @@ fn repository_limit_issues(
     repositories: &[StartupRepositoryInstance],
     prober: &VolumeProber,
 ) -> Vec<StorageIssue> {
-    if repositories.is_empty() {
+    repository_limit_issues_with(repositories, prober, || {
+        crate::core::tasks::db_process_lock::held_database_path().is_some()
+    })
+}
+
+fn repository_limit_issues_with(
+    repositories: &[StartupRepositoryInstance],
+    prober: &VolumeProber,
+    has_database_lock: impl Fn() -> bool,
+) -> Vec<StorageIssue> {
+    if repositories.is_empty() || !has_database_lock() {
         return Vec::new();
     }
     let Some(runtime) = crate::core::api::background_runtime() else {
@@ -145,6 +155,9 @@ fn repository_limit_issues(
     let mut issues = Vec::new();
     let mut queried = 0usize;
     for repository in repositories {
+        if !has_database_lock() {
+            break;
+        }
         let path = normalized_path(Path::new(repository.local_path.trim()));
         let Some(volume) = prober.probe(&path) else {
             continue;
@@ -156,6 +169,9 @@ fn repository_limit_issues(
         } else {
             i64::MAX as u64
         };
+        if !has_database_lock() {
+            break;
+        }
         let limits = match runtime.block_on(repository_path_limits(
             &repository.repo_url,
             &repository.local_path,
@@ -1136,5 +1152,24 @@ mod tests {
         let storage = StartupStoragePath::new("config", "/foxy/config");
         assert_eq!(storage.role, "config");
         assert_eq!(storage.path, PathBuf::from("/foxy/config"));
+    }
+
+    #[test]
+    fn repository_limit_issues_skips_when_database_lock_is_not_held() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let prober = VolumeProber::new();
+        let repos = vec![StartupRepositoryInstance {
+            repo_url: "http://repo.example.invalid:8080/".to_string(),
+            local_path: std::env::temp_dir().to_string_lossy().into_owned(),
+        }];
+        assert!(repository_limit_issues_with(&repos, &prober, || false).is_empty());
+
+        let checks = AtomicUsize::new(0);
+        let dropped_before_query = repository_limit_issues_with(&repos, &prober, || {
+            checks.fetch_add(1, Ordering::SeqCst) == 0
+        });
+        assert!(dropped_before_query.is_empty());
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
     }
 }

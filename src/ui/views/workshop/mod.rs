@@ -308,25 +308,28 @@ impl Foxy {
             self.render_workshop_state_badge(ui);
         });
         ui.horizontal(|ui| {
-            ui.label(tr("Filter"));
+            let filter_label = ui.label(tr("Filter"));
             let width = (ui.available_width() * 0.4).max(120.0);
             ui.add(
                 TextEdit::singleline(&mut self.workshop_view_state.filter)
                     .hint_text(tr("Name or id"))
                     .desired_width(width),
-            );
+            )
+            .labelled_by(filter_label.id);
         });
     }
 
     fn render_workshop_comparison(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label(tr("Compare with"));
+            let compare_label = ui.label(tr("Compare with"));
             let width = (ui.available_width() - 90.0).max(120.0);
-            let response = ui.add(
-                TextEdit::singleline(&mut self.workshop_view_state.compare_code)
-                    .hint_text(tr("Paste a friend's share code"))
-                    .desired_width(width),
-            );
+            let response = ui
+                .add(
+                    TextEdit::singleline(&mut self.workshop_view_state.compare_code)
+                        .hint_text(tr("Paste a friend's share code"))
+                        .desired_width(width),
+                )
+                .labelled_by(compare_label.id);
             if response.changed() {
                 self.refresh_workshop_comparison();
             }
@@ -791,7 +794,8 @@ impl Foxy {
                     TextEdit::multiline(&mut self.workshop_view_state.import_text)
                         .desired_rows(6)
                         .desired_width(f32::INFINITY),
-                );
+                )
+                .accessible_name(tr("Workshop mod share code or IDs"));
                 ui.add_space(6.0);
                 ui.checkbox(
                     &mut self.workshop_view_state.import_download,

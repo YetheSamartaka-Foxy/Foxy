@@ -441,6 +441,8 @@ fn paint_external_addon_icon_cell(
         font_id,
         style.text_color,
     );
+    Foxy::focus_outline(ui, &response);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     response
 }
 
@@ -787,7 +789,14 @@ impl Foxy {
             group_by_origin,
             entry_index,
         ));
+        let addon_label = self.repository_external_addons_list_cache.rows[entry_index]
+            .addon_name
+            .clone();
         let context_response = ui.interact(card_rect, row_id, egui::Sense::click());
+        Self::focus_outline(ui, &context_response);
+        context_response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, true, addon_label.as_str())
+        });
         let card_fill = if context_response.hovered() {
             self.color_widget_bg_active()
         } else {
@@ -935,11 +944,14 @@ impl Foxy {
         if favorite_button.hovered() {
             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
         }
-        let favorite_button = favorite_button.on_hover_text(if favorite {
+        let favorite_label = if favorite {
             tooltips.remove_favorite.as_str()
         } else {
             tooltips.add_favorite.as_str()
-        });
+        };
+        let favorite_button = favorite_button
+            .accessible_name(favorite_label)
+            .on_hover_text(favorite_label);
         let favorite_clicked = favorite_button.clicked();
         if favorite_clicked
             && self.set_repository_external_addon_row_favorite_cached(entry_index, !favorite)
@@ -950,7 +962,18 @@ impl Foxy {
 
         let mut client_side_clicked = false;
         if let Some(client_side_button_rect) = client_side_button_rect {
-            let client_side_text_color = if forced_client_side || client_side || is_enabled {
+            let client_side_fill = if client_side && !forced_client_side {
+                self.color_primary_accent()
+            } else if forced_client_side {
+                self.color_widget_bg_active()
+            } else {
+                self.color_main_bg()
+            };
+            let client_side_text_color = if forced_client_side {
+                self.color_text_gray()
+            } else if client_side {
+                self.color_text_on(client_side_fill)
+            } else if is_enabled {
                 row_style.color_text_normal
             } else {
                 row_style.color_text_gray
@@ -962,13 +985,7 @@ impl Foxy {
                 "C",
                 row_style.name_font_id.clone(),
                 ExternalAddonIconCellStyle {
-                    fill: if client_side && !forced_client_side {
-                        self.color_primary_accent()
-                    } else if forced_client_side {
-                        self.color_widget_bg_active()
-                    } else {
-                        self.color_main_bg()
-                    },
+                    fill: client_side_fill,
                     stroke: if client_side || forced_client_side {
                         self.color_primary_accent()
                     } else {
@@ -980,13 +997,16 @@ impl Foxy {
             if client_side_button.hovered() && !forced_client_side {
                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
             }
-            let client_side_button = client_side_button.on_hover_text(if forced_client_side {
+            let client_side_label = if forced_client_side {
                 tooltips.forced_client_side.as_str()
             } else if client_side {
                 tooltips.remove_client_side.as_str()
             } else {
                 tooltips.mark_client_side.as_str()
-            });
+            };
+            let client_side_button = client_side_button
+                .accessible_name(client_side_label)
+                .on_hover_text(client_side_label);
             client_side_clicked = client_side_button.clicked();
             if !forced_client_side
                 && client_side_clicked
@@ -1004,7 +1024,10 @@ impl Foxy {
                 egui::UiBuilder::new()
                     .max_rect(checkbox_rect)
                     .layout(Layout::left_to_right(Align::Center)),
-                |ui| Self::ui_state_checkbox(ui, &mut row_enabled, ""),
+                |ui| {
+                    Self::ui_state_checkbox(ui, &mut row_enabled, "")
+                        .accessible_name(addon_label.as_str())
+                },
             )
             .inner;
         let checkbox_clicked = checkbox_response.clicked();
@@ -1140,10 +1163,14 @@ impl Foxy {
                         .font_sizes
                         .repository_settings_view
                         .refresh_icon as f32;
-                    let recheck_button = ui.add_sized(
-                        Self::toolbar_icon_button_size(refresh_icon_size),
-                        Button::new(RichText::new("\u{21bb}").size(refresh_icon_size)),
-                    );
+                    let recheck_button = ui
+                        .add_sized(
+                            Self::toolbar_icon_button_size(refresh_icon_size),
+                            Button::new(RichText::new("\u{21bb}").size(refresh_icon_size)),
+                        )
+                        .accessible_name(tr("Recheck external addons"))
+                        .on_hover_text(tr("Recheck external addons"));
+                    Self::focus_outline(ui, &recheck_button);
 
                     if recheck_button.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -1249,8 +1276,9 @@ impl Foxy {
 
                 let filter_width =
                     super::responsive_filter_field_width(ui.available_width(), controls_width);
-                let filter_edit =
-                    ui.add(TextEdit::singleline(filter).desired_width(filter_width));
+                let filter_edit = ui
+                    .add(TextEdit::singleline(filter).desired_width(filter_width))
+                    .accessible_name(tr("Filter external addons"));
                 if filter_edit.changed() {
                     ui_state_changed = true;
                 }
@@ -1278,7 +1306,7 @@ impl Foxy {
                 }
                 ui.add_space(16.0);
 
-                ui.label(tr("Origin:"));
+                let origin_label = ui.label(tr("Origin:"));
                 ui.add_space(6.0);
                 let origin_combo = egui::ComboBox::from_id_salt("external_addon_origin_filter")
                     .selected_text(origin_selected)
@@ -1304,7 +1332,7 @@ impl Foxy {
                             }
                         }
                     });
-                if origin_combo.response.hovered() {
+                if origin_combo.response.labelled_by(origin_label.id).hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
                 ui.add_space(16.0);
@@ -1352,7 +1380,7 @@ impl Foxy {
                     ui.add_space(16.0);
                 }
 
-                ui.label(tr("State:"));
+                let state_label = ui.label(tr("State:"));
                 ui.add_space(6.0);
                 let combo_box_response =
                     egui::ComboBox::from_id_salt("external_addon_state_filter")
@@ -1390,7 +1418,7 @@ impl Foxy {
                                 ui_state_changed = true;
                             }
                         });
-                if combo_box_response.response.hovered() {
+                if combo_box_response.response.labelled_by(state_label.id).hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
             });

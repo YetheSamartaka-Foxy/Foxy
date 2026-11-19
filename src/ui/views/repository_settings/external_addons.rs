@@ -152,10 +152,13 @@ impl Foxy {
                         .font_sizes
                         .repository_settings_view
                         .refresh_icon as f32;
-                    let recheck_button = ui.add_sized(
-                        Self::toolbar_icon_button_size(refresh_icon_size),
-                        Button::new(RichText::new("\u{21bb}").size(refresh_icon_size)),
-                    );
+                    let recheck_button = ui
+                        .add_sized(
+                            Self::toolbar_icon_button_size(refresh_icon_size),
+                            Button::new(RichText::new("\u{21bb}").size(refresh_icon_size)),
+                        )
+                        .accessible_name(tr("Recheck external addons"))
+                        .on_hover_text(tr("Recheck external addons"));
 
                     if recheck_button.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -201,9 +204,9 @@ impl Foxy {
                 Foxy::filter_help_icon_colored(ui, color_text_dim, &tr("addon_filter_help"));
                 ui.add_space(horizontal_padding);
 
-                let filter_edit = ui.add(
-                    TextEdit::singleline(filter).desired_width(ui.available_width()),
-                );
+                let filter_edit = ui
+                    .add(TextEdit::singleline(filter).desired_width(ui.available_width()))
+                    .accessible_name(tr("Filter external addons"));
                 if filter_edit.changed() {
                     ui_state_changed = true;
                 }
@@ -225,7 +228,7 @@ impl Foxy {
                 }
                 ui.add_space(16.0);
 
-                ui.label(tr("Origin:"));
+                let origin_label = ui.label(tr("Origin:"));
                 ui.add_space(6.0);
                 let origin_combo = egui::ComboBox::from_id_salt("external_addon_origin_filter")
                     .selected_text(if origin_filter == "All" {
@@ -255,7 +258,7 @@ impl Foxy {
                             }
                         }
                     });
-                if origin_combo.response.hovered() {
+                if origin_combo.response.labelled_by(origin_label.id).hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
                 ui.add_space(16.0);
@@ -270,7 +273,7 @@ impl Foxy {
                 }
                 ui.add_space(16.0);
 
-                ui.label(tr("State:"));
+                let state_label = ui.label(tr("State:"));
                 ui.add_space(6.0);
                 let combo_box_response =
                     egui::ComboBox::from_id_salt("external_addon_state_filter")
@@ -313,7 +316,7 @@ impl Foxy {
                             }
                         });
 
-                if combo_box_response.response.hovered() {
+                if combo_box_response.response.labelled_by(state_label.id).hovered() {
                     ui.ctx()
                         .output_mut(Foxy::set_pointing_cursor_output);
                 }
@@ -407,7 +410,8 @@ impl Foxy {
                                         RichText::new(addon_name.as_str()).color(text_color),
                                     ),
                                 );
-                                let chk = Self::ui_state_checkbox(ui, is_enabled, "");
+                                let chk = Self::ui_state_checkbox(ui, is_enabled, "")
+                                    .accessible_name(addon_name.as_str());
                                 if chk.changed() {
                                     *repo_data_changed = true;
                                 }

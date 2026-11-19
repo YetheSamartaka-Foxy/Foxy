@@ -16,3 +16,6 @@ pub mod steam;
 pub mod tasks;
 pub mod ts3_plugin;
 pub mod utils;
+
+#[cfg(test)]
+mod examples_validation;

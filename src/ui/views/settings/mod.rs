@@ -26,6 +26,10 @@ use log::info;
 
 impl Foxy {
     pub fn render_settings_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render_settings_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_settings_contents(&mut self, ui: &mut Ui) {
         let settings_margin = Margin {
             left: 15,
             right: 15,
@@ -47,15 +51,18 @@ impl Foxy {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let close_icon_size =
                             self.settings_view_state.font_sizes.settings_view.close_icon as f32;
-                        let close_button = ui.add_sized(
-                            Self::modal_icon_button_size(close_icon_size),
-                            Button::new(
-                                RichText::new("X")
-                                    .color(self.color_text_normal())
-                                    .size(close_icon_size),
+                        let close_fill = self.color_main_bg();
+                        let close_button = ui
+                            .add_sized(
+                                Self::modal_icon_button_size(close_icon_size),
+                                Button::new(
+                                    RichText::new("X")
+                                        .color(self.color_text_on(close_fill))
+                                        .size(close_icon_size),
+                                )
+                                .fill(close_fill),
                             )
-                            .fill(self.color_main_bg()),
-                        );
+                            .accessible_name(tr("Close"));
 
                         if close_button.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -180,12 +187,14 @@ fn render_font_size_slider(
 ) -> bool {
     ui.horizontal(|ui| {
         ui.add_space(horizontal_padding);
-        ui.label(label);
-        let response = ui.add(
-            Slider::new(value, range.min..=range.max)
-                .show_value(true)
-                .trailing_fill(true),
-        );
+        let caption = ui.label(label);
+        let response = ui.label_inputs_by(caption.id, |ui| {
+            ui.add(
+                Slider::new(value, range.min..=range.max)
+                    .show_value(true)
+                    .trailing_fill(true),
+            )
+        });
         if response.hovered() {
             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
         }
@@ -208,11 +217,11 @@ fn render_palette_color_picker(
             Vec2::new(row_width, 0.0),
             Layout::left_to_right(Align::Center),
             |ui| {
-                ui.label(label);
+                let caption = ui.label(label);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_space(3.0);
                     let mut color = value.to_color32();
-                    let response = ui.color_edit_button_srgba(&mut color);
+                    let response = ui.color_edit_button_srgba(&mut color).labelled_by(caption.id);
                     if response.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }

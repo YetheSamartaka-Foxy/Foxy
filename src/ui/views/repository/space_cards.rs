@@ -502,6 +502,7 @@ impl Foxy {
             } else {
                 self.color_text_dim()
             };
+            let check_name = repo.name.clone();
             let cache = if detail_cache {
                 &mut self.space_detail_candidate_galleys
             } else {
@@ -516,7 +517,8 @@ impl Foxy {
             );
             let mut hovered = false;
             ui.horizontal(|ui| {
-                let check = Self::ui_state_checkbox(ui, &mut candidate.checked, "");
+                let check = Self::ui_state_checkbox(ui, &mut candidate.checked, "")
+                    .accessible_name(check_name);
                 hovered |= check.hovered();
                 let label = ui.add(Label::new(galley).sense(Sense::click()).truncate());
                 if label.clicked() {

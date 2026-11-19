@@ -371,9 +371,10 @@ impl Foxy {
                                     &mut self.repository_view_state.repository_filter,
                                 )
                                 .id_salt("repository_filter_input")
-                                .hint_text(repository_filter_hint)
+                                .hint_text(repository_filter_hint.clone())
                                 .align(egui::Align2::CENTER_TOP),
-                            );
+                            )
+                            .accessible_name(repository_filter_hint);
                             ui.add_space(6.0);
                             self.filter_help_icon(ui, &repository_filter_help);
                         },

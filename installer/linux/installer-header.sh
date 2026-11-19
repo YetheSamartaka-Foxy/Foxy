@@ -12,6 +12,8 @@ APP_NAME="Foxy"
 BIN_NAME="Foxy"
 DESKTOP_NAME="foxy.desktop"
 PREFIX_MARKER=".foxy_install_prefix"
+INSTALL_MARKER=".installed_by_foxy_installer"
+NEED_SUDO=0
 
 usage() {
     echo "Foxy Installer"
@@ -124,61 +126,94 @@ refresh_desktop_database() {
     fi
 }
 
-if [ "$UNINSTALL" -eq 1 ]; then
-    echo "Uninstalling Foxy..."
+run_cmd() {
+    if [ "$NEED_SUDO" -eq 1 ]; then
+        sudo "$@"
+    else
+        "$@"
+    fi
+}
 
+render_desktop_entry() {
+    local prefix="$1"
+    local template="$2"
+    local prefix_escaped
+    prefix_escaped="$(printf '%s' "$prefix" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g')"
+    awk -v prefix="$prefix" -v prefix_escaped="$prefix_escaped" \
+        '{gsub(/@PREFIX_ESCAPED@/, prefix_escaped); gsub(/@PREFIX@/, prefix); print}' \
+        "$template"
+}
+
+if [ "$UNINSTALL" -eq 1 ]; then
+    PREFIX="$(realpath -e -- "$PREFIX")"
+    if [ "$PREFIX" = / ] || [ ! -f "$PREFIX/$PREFIX_MARKER" ] || [ -L "$PREFIX/$PREFIX_MARKER" ] || \
+        [ ! -f "$PREFIX/$INSTALL_MARKER" ] || [ -L "$PREFIX/$INSTALL_MARKER" ]; then
+        echo "Error: This directory is not a Foxy installation." >&2
+        exit 1
+    fi
+    recorded_prefix="$(cat -- "$PREFIX/$PREFIX_MARKER")"
+    # Legacy installers recorded relative prefixes without their working directory.
+    if [ -z "$recorded_prefix" ] || \
+        { [[ "$recorded_prefix" = /* ]] && [ "$(realpath -e -- "$recorded_prefix")" != "$PREFIX" ]; }; then
+        echo "Error: The Foxy installation marker does not match the requested prefix." >&2
+        exit 1
+    fi
+
+    echo "Uninstalling Foxy..."
     if kill_running_instances; then
         echo "Stopping running Foxy instance..."
-        sleep 2
-    fi
-
-    if [ -d "$PREFIX" ]; then
-        if [ -w "$PREFIX" ] || [ "$(id -u)" -eq 0 ]; then
-            rm -rf "$PREFIX"
-        else
-            sudo rm -rf "$PREFIX"
+        if ! wait_for_exit 10; then
+            echo "Error: Foxy is still running. Close it before uninstalling." >&2
+            exit 1
         fi
-        echo "Removed: $PREFIX"
     fi
 
+    if path_needs_sudo "$PREFIX"; then
+        NEED_SUDO=1
+    fi
+
+    target_exe="$(realpath -m -- "$PREFIX/$BIN_NAME")"
     for link_dir in /usr/local/bin "$HOME/.local/bin"; do
-        if [ -L "$link_dir/foxy" ]; then
-            if [ -w "$link_dir" ] || [ "$(id -u)" -eq 0 ]; then
-                rm -f "$link_dir/foxy"
+        link_path="$link_dir/foxy"
+        if [ -L "$link_path" ] && [ "$(realpath -m -- "$link_path")" = "$target_exe" ]; then
+            if path_needs_sudo "$link_dir"; then
+                sudo rm -f -- "$link_path"
             else
-                sudo rm -f "$link_dir/foxy"
+                rm -f -- "$link_path"
             fi
-            echo "Removed symlink: $link_dir/foxy"
+            echo "Removed symlink: $link_path"
         fi
     done
 
-    for desktop_path in "$HOME/.local/share/applications/$DESKTOP_NAME" "/usr/share/applications/$DESKTOP_NAME"; do
-        if [ -f "$desktop_path" ]; then
-            if path_needs_sudo "$desktop_path"; then
-                sudo rm -f "$desktop_path"
+    if [ -f "$PREFIX/$DESKTOP_NAME" ] && [ ! -L "$PREFIX/$DESKTOP_NAME" ]; then
+        for desktop_path in "$HOME/.local/share/applications/$DESKTOP_NAME" "/usr/share/applications/$DESKTOP_NAME"; do
+            if [ -f "$desktop_path" ] && [ ! -L "$desktop_path" ] && \
+                cmp -s -- "$desktop_path" <(render_desktop_entry "$recorded_prefix" "$PREFIX/$DESKTOP_NAME"); then
+                desktop_dir="$(dirname "$desktop_path")"
+                if path_needs_sudo "$desktop_dir"; then
+                    sudo rm -f -- "$desktop_path"
+                    refresh_desktop_database "$desktop_dir" 1
+                else
+                    rm -f -- "$desktop_path"
+                    refresh_desktop_database "$desktop_dir" 0
+                fi
                 echo "Removed: $desktop_path"
-                refresh_desktop_database "$(dirname "$desktop_path")" 1
-            else
-                rm -f "$desktop_path"
-                echo "Removed: $desktop_path"
-                refresh_desktop_database "$(dirname "$desktop_path")" 0
             fi
-        fi
-    done
-
-    marker_path="$PREFIX/$PREFIX_MARKER"
-    if [ -f "$marker_path" ] && [ ! -d "$PREFIX" ]; then
-        if path_needs_sudo "$marker_path"; then
-            sudo rm -f "$marker_path"
-        else
-            rm -f "$marker_path"
-        fi
+        done
     fi
+    run_cmd rm -f -- "$PREFIX/$BIN_NAME" "$PREFIX/libsteam_api.so" "$PREFIX/foxy.png" \
+        "$PREFIX/$DESKTOP_NAME" "$PREFIX/$INSTALL_MARKER" "$PREFIX/$PREFIX_MARKER"
+    run_cmd rmdir --ignore-fail-on-non-empty -- "$PREFIX"
 
     echo "Foxy has been uninstalled."
     exit 0
 fi
 
+PREFIX="$(realpath -m -- "$PREFIX")"
+if [ "$PREFIX" = / ]; then
+    echo "Error: The install prefix cannot be the filesystem root." >&2
+    exit 1
+fi
 
 echo "Foxy Installer"
 echo "Install directory: $PREFIX"
@@ -194,7 +229,6 @@ if kill_running_instances; then
     fi
 fi
 
-NEED_SUDO=0
 if path_needs_sudo "$PREFIX" || path_needs_sudo "$PREFIX/$BIN_NAME" || path_needs_sudo "$PREFIX/$PREFIX_MARKER"; then
     NEED_SUDO=1
 fi
@@ -205,14 +239,6 @@ if [ "$NEED_SUDO" -eq 1 ] && [ "$SILENT" -eq 1 ]; then
         exit 73
     fi
 fi
-
-run_cmd() {
-    if [ "$NEED_SUDO" -eq 1 ]; then
-        sudo "$@"
-    else
-        "$@"
-    fi
-}
 
 run_cmd mkdir -p "$PREFIX"
 
@@ -226,10 +252,13 @@ echo "Extracting files..."
 tail -n +"$ARCHIVE_LINE" "$0" | run_cmd tar xzf - -C "$PREFIX"
 
 run_cmd chmod +x "$PREFIX/$BIN_NAME"
-run_cmd touch "$PREFIX/.installed_by_foxy_installer"
-printf '%s\n' "$PREFIX" > "/tmp/foxy_install_prefix.$$"
-run_cmd install -m 0644 "/tmp/foxy_install_prefix.$$" "$PREFIX/$PREFIX_MARKER"
-rm -f "/tmp/foxy_install_prefix.$$"
+run_cmd touch "$PREFIX/$INSTALL_MARKER"
+tmp_prefix="$(mktemp)"
+trap 'rm -f -- "$tmp_prefix"' EXIT
+printf '%s\n' "$PREFIX" > "$tmp_prefix"
+run_cmd install -m 0644 "$tmp_prefix" "$PREFIX/$PREFIX_MARKER"
+rm -f -- "$tmp_prefix"
+trap - EXIT
 
 echo "Installed $BIN_NAME to $PREFIX/"
 
@@ -280,13 +309,9 @@ if [ "$DESKTOP_FILE" -eq 1 ] && [ -f "$PREFIX/$DESKTOP_NAME" ]; then
         mkdir -p "$desktop_dir"
     fi
 
-    # Use awk instead of sed to avoid regex metacharacter issues in PREFIX.
     if [ "$DESKTOP_FILE" -eq 1 ]; then
-    prefix_escaped="$(printf '%s' "$PREFIX" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g')"
     tmp_desktop="$(mktemp)"
-    awk -v prefix="$PREFIX" -v prefix_escaped="$prefix_escaped" \
-        '{gsub(/@PREFIX_ESCAPED@/, prefix_escaped); gsub(/@PREFIX@/, prefix); print}' \
-        "$PREFIX/$DESKTOP_NAME" > "$tmp_desktop"
+    render_desktop_entry "$PREFIX" "$PREFIX/$DESKTOP_NAME" > "$tmp_desktop"
     if [ "$NEED_DESKTOP_SUDO" -eq 1 ]; then
         sudo install -m 0644 "$tmp_desktop" "$desktop_dir/$DESKTOP_NAME"
     else

@@ -1985,4 +1985,14 @@ mod tests {
             FoxyMode::None
         );
     }
+
+    #[test]
+    fn example_remote_repo_manifest_parses() {
+        let manifest: RemoteRepositoryManifest = serde_json::from_str(include_str!(
+            "../../../examples/json/remote_repositories/repo.json"
+        ))
+        .expect("parse example repo.json");
+        assert!(!manifest.repo_name.is_empty());
+        assert!(!manifest.checksum.is_empty());
+    }
 }

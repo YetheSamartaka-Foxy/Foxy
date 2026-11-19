@@ -177,8 +177,16 @@ impl Foxy {
                                 .color(self.color_text_normal()),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let delete_button =
-                                ui.add(Button::new("X").fill(self.color_text_error()));
+                            let delete_fill = self.color_action_destructive();
+                            let delete_button = ui
+                                .add(
+                                    Button::new(
+                                        RichText::new("X").color(self.color_text_on(delete_fill)),
+                                    )
+                                    .fill(delete_fill),
+                                )
+                                .accessible_name(tr_fmt("Delete scheduled action {name}", &[("name", job.name.clone())]))
+                                .on_hover_text(tr("Delete"));
                             if delete_button.hovered() {
                                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                             }
@@ -274,12 +282,13 @@ impl Foxy {
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
-                ui.label(tr("Name:"));
+                let name_label = ui.label(tr("Name:"));
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.name)
                         .hint_text(tr("Scheduled job"))
                         .desired_width((ui.available_width() - horizontal_padding).max(160.0)),
-                );
+                )
+                .labelled_by(name_label.id);
             });
             ui.add_space(6.0);
 
@@ -296,24 +305,21 @@ impl Foxy {
                 ScheduleKind::Once => {
                     ui.horizontal(|ui| {
                         ui.label(tr("Date:"));
-                        ui.add(egui::DragValue::new(&mut draft.year).range(2024..=2100));
+                        ui.add(egui::DragValue::new(&mut draft.year).range(2024..=2100))
+                            .accessible_name(tr("Year"));
                         ui.label("-");
-                        ui.add(egui::DragValue::new(&mut draft.month).range(1..=12));
+                        ui.add(egui::DragValue::new(&mut draft.month).range(1..=12))
+                            .accessible_name(tr("Month"));
                         ui.label("-");
-                        ui.add(egui::DragValue::new(&mut draft.day).range(1..=31));
+                        ui.add(egui::DragValue::new(&mut draft.day).range(1..=31))
+                            .accessible_name(tr("Day"));
                         ui.add_space(12.0);
-                        ui.label(tr("Time:"));
-                        ui.add(egui::DragValue::new(&mut draft.hour).range(0..=23));
-                        ui.label(":");
-                        ui.add(egui::DragValue::new(&mut draft.minute).range(0..=59));
+                        Self::render_scheduling_time_inputs(ui, &mut draft);
                     });
                 }
                 ScheduleKind::Recurring => {
                     ui.horizontal(|ui| {
-                        ui.label(tr("Time:"));
-                        ui.add(egui::DragValue::new(&mut draft.hour).range(0..=23));
-                        ui.label(":");
-                        ui.add(egui::DragValue::new(&mut draft.minute).range(0..=59));
+                        Self::render_scheduling_time_inputs(ui, &mut draft);
                     });
                     ui.horizontal(|ui| {
                         ui.label(tr("Days:"));
@@ -404,7 +410,11 @@ impl Foxy {
                 ui.add_space(6.0);
             }
             ui.horizontal(|ui| {
-                let save_button = ui.add(Button::new(tr("Save")).fill(self.color_primary_accent()));
+                let save_fill = self.color_primary_accent();
+                let save_button = ui.add(
+                    Button::new(RichText::new(tr("Save")).color(self.color_text_on(save_fill)))
+                        .fill(save_fill),
+                );
                 if save_button.hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
@@ -529,6 +539,15 @@ impl Foxy {
         }
     }
 
+    fn render_scheduling_time_inputs(ui: &mut Ui, draft: &mut ScheduleJobDraft) {
+        ui.label(tr("Time:"));
+        ui.add(egui::DragValue::new(&mut draft.hour).range(0..=23))
+            .accessible_name(tr("Hour"));
+        ui.label(":");
+        ui.add(egui::DragValue::new(&mut draft.minute).range(0..=59))
+            .accessible_name(tr("Minute"));
+    }
+
     fn render_scheduling_repo_picker(&self, ui: &mut Ui, draft: &mut ScheduleJobDraft) {
         let selected_text = draft
             .target_repo
@@ -548,7 +567,9 @@ impl Foxy {
                         draft.target_repo = Some(key);
                     }
                 }
-            });
+            })
+            .response
+            .accessible_name(tr("Target repository"));
     }
 
     fn render_scheduling_space_picker(&self, ui: &mut Ui, draft: &mut ScheduleJobDraft) {
@@ -572,7 +593,9 @@ impl Foxy {
                         draft.target_space_id = Some(space.id.clone());
                     }
                 }
-            });
+            })
+            .response
+            .accessible_name(tr("Target repository space"));
     }
 
     fn render_scheduling_custom_picker(&self, ui: &mut Ui, draft: &mut ScheduleJobDraft) {

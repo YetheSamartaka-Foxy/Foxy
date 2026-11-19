@@ -46,16 +46,21 @@ impl Foxy {
             crate::ui::types::AppUpdateMode::Server => {
                 ui.horizontal(|ui| {
                     ui.add_space(horizontal_padding);
-                    ui.label(tr("Update source URL"));
+                    let caption = ui.label(tr("Update source URL"));
+                    ui.add_space(horizontal_padding);
+                    let url_label_id = caption.id;
+                    let _ = url_label_id;
                 });
                 ui.horizontal(|ui| {
                     ui.add_space(horizontal_padding);
                     let text_edit_width = ui.available_width() - 2.0 * horizontal_padding;
-                    let url_response = ui.add_sized(
-                        Vec2::new(text_edit_width, 24.0),
-                        egui::TextEdit::singleline(&mut self.settings_view_state.app_update_url)
-                            .hint_text("http://myserver.com/foxy/"),
-                    );
+                    let url_response = ui
+                        .add_sized(
+                            Vec2::new(text_edit_width, 24.0),
+                            egui::TextEdit::singleline(&mut self.settings_view_state.app_update_url)
+                                .hint_text("http://myserver.com/foxy/"),
+                        )
+                        .accessible_name(tr("Update source URL"));
                     if url_response.changed() {
                         self.settings_view_state.app_update_url_user_override =
                             !self.settings_view_state.app_update_url.trim().is_empty();
@@ -81,13 +86,15 @@ impl Foxy {
                 ui.horizontal(|ui| {
                     ui.add_space(horizontal_padding);
                     let text_edit_width = ui.available_width() - 2.0 * horizontal_padding;
-                    let repo_response = ui.add_sized(
-                        Vec2::new(text_edit_width, 24.0),
-                        egui::TextEdit::singleline(
-                            &mut self.settings_view_state.app_update_github_repo,
+                    let repo_response = ui
+                        .add_sized(
+                            Vec2::new(text_edit_width, 24.0),
+                            egui::TextEdit::singleline(
+                                &mut self.settings_view_state.app_update_github_repo,
+                            )
+                            .hint_text("owner/repo"),
                         )
-                        .hint_text("owner/repo"),
-                    );
+                        .accessible_name(tr("GitHub repository"));
                     if repo_response.changed() {
                         *changed = true;
                     }
@@ -292,11 +299,16 @@ impl Foxy {
                                     }
 
                                     let no_btn = ui.button(tr("Cancel"));
+                                    Self::focus_outline(ui, &no_btn);
                                     if no_btn.hovered() {
                                         ui.ctx()
                                             .output_mut(Foxy::set_pointing_cursor_output);
                                     }
-                                    if no_btn.clicked() {
+                                    if no_btn.clicked()
+                                        || ui.input_mut(|i| {
+                                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                                        })
+                                    {
                                         self.show_wipe_db_confirmation = false;
                                         info!("Database wipe canceled");
                                     }

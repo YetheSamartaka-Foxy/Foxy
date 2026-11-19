@@ -1,4 +1,6 @@
 pub mod about;
+#[cfg(test)]
+pub(in crate::ui::views) mod accesskit_audit;
 pub mod app_update;
 pub mod changelog;
 pub(crate) mod galley_cache;

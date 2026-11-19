@@ -9,10 +9,17 @@ use crate::ui::app::{Foxy, RepositoryCheckCompletionState, RepositoryDbWipeCompl
 use crate::ui::types::{DownloadSummary, DownloadTelemetrySample, RepoState};
 
 impl Foxy {
+    fn should_record_progress_event(evt: &ProgressEvent) -> bool {
+        !matches!(
+            evt,
+            ProgressEvent::Diff { .. } | ProgressEvent::HashEvidence { .. }
+        )
+    }
+
     fn record_progress_event(&mut self, evt: &ProgressEvent) {
         const PROGRESS_EVENT_HISTORY_LIMIT: usize = 256;
 
-        if matches!(evt, ProgressEvent::Diff { .. }) {
+        if !Self::should_record_progress_event(evt) {
             return;
         }
 
@@ -1501,6 +1508,21 @@ mod tests {
         assert!(!Foxy::stage_hidden_by_cancel(
             false,
             "Download 361/864 50.9%"
+        ));
+    }
+
+    #[test]
+    fn progress_event_history_excludes_hash_evidence_and_diff() {
+        let state =
+            std::sync::Arc::new(crate::core::tasks::calculate_hashes::HashEvidenceState::default());
+        assert!(!Foxy::should_record_progress_event(
+            &crate::core::api::ProgressEvent::HashEvidence { state }
+        ));
+        assert!(!Foxy::should_record_progress_event(
+            &crate::core::api::ProgressEvent::Diff { mods: Vec::new() }
+        ));
+        assert!(Foxy::should_record_progress_event(
+            &crate::core::api::ProgressEvent::Finished
         ));
     }
 }

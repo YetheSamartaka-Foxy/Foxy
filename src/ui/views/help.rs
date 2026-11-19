@@ -44,6 +44,10 @@ fn selected_help_tab(current: HelpTab, tabs: &[HelpTab]) -> Option<HelpTab> {
 
 impl Foxy {
     pub fn render_help_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render_help_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_help_contents(&mut self, ui: &mut Ui) {
         let help_margin = Margin {
             left: 8,
             right: 8,
@@ -62,15 +66,18 @@ impl Foxy {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let close_icon_size =
                             self.settings_view_state.font_sizes.settings_view.close_icon as f32;
-                        let close_button = ui.add_sized(
-                            Self::modal_icon_button_size(close_icon_size),
-                            Button::new(
-                                RichText::new("X")
-                                    .color(self.color_text_normal())
-                                    .size(close_icon_size),
+                        let close_button = ui
+                            .add_sized(
+                                Self::modal_icon_button_size(close_icon_size),
+                                Button::new(
+                                    RichText::new("X")
+                                        .color(self.color_text_normal())
+                                        .size(close_icon_size),
+                                )
+                                .fill(self.color_main_bg()),
                             )
-                            .fill(self.color_main_bg()),
-                        );
+                            .accessible_name(self.t("Close"));
+                        Self::focus_outline(ui, &close_button);
                         if close_button.hovered() {
                             ui.ctx()
                                 .output_mut(|o| o.cursor_icon = CursorIcon::PointingHand);
@@ -216,6 +223,11 @@ impl Foxy {
             } else {
                 self.color_main_bg()
             };
+            let text_color = if is_selected {
+                self.color_text_on(color)
+            } else {
+                self.color_text_normal()
+            };
 
             let tab_button = ui
                 .scope_builder(
@@ -225,18 +237,20 @@ impl Foxy {
                         ui.add_sized(
                             Vec2::new(ui.available_width(), 40.0),
                             Button::new(
-                                RichText::new(self.t(tab.as_str()))
-                                    .color(self.color_text_normal())
-                                    .size(
-                                        self.settings_view_state.font_sizes.help_view.tab_label
-                                            as f32,
-                                    ),
+                                RichText::new(self.t(tab.as_str())).color(text_color).size(
+                                    self.settings_view_state.font_sizes.help_view.tab_label as f32,
+                                ),
                             )
                             .fill(color),
                         )
                     },
                 )
                 .inner;
+            if is_selected {
+                Self::focus_outline_color(ui, &tab_button, text_color);
+            } else {
+                Self::focus_outline(ui, &tab_button);
+            }
 
             if tab_button.hovered() {
                 ui.ctx()
@@ -245,6 +259,7 @@ impl Foxy {
 
             if tab_button.clicked() {
                 self.current_help_tab = tab;
+                tab_button.request_focus();
                 info!("Switched help tab to {}", tab.as_str());
             }
 
@@ -394,6 +409,17 @@ impl Foxy {
                     "Enabled extra files are copied into the game directory before each launch. See the Steam Workshop and extra files help tab.",
                 ],
             ),
+            HelpTab::ServerAddonProfiles => HelpPage::new(
+                "Server addon profiles",
+                &["A profile is a named addon set. Assign it to a server from Server loadout."],
+                &[
+                    "In Server mode, select the server and open Setup, then Configure addons. In Addon profiles, add a folder, create a profile, select its addons, then review and save.",
+                    "Open Server loadout to assign profiles, choose their roles and order, and save the reviewed selection. Prepare and activate a deployment to use it at launch.",
+                    "Check the affected instances before editing a shared profile. Use Copy Profile to make an independent local addon set.",
+                    "For Arma 3 headless clients, use the include and exclude lists under Setup to adjust the inherited loadout.",
+                    "For Arma Reforger, set the scenario and addon requirements in Setup. Review resolved addon versions and dependencies under Addons.",
+                ],
+            ),
             HelpTab::RepositorySpacesAndAddons => HelpPage::new(
                 "Repository spaces and addons",
                 &[
@@ -486,17 +512,22 @@ impl Foxy {
                 ],
                 &[
                     "Use the Application settings tab to configure language, Steam path, temporary storage, startup behavior, and other global options.",
-                    "Server mode is a preview. Switching modes does not install or start a dedicated server.",
+                    "Switching to Server mode opens the dedicated-server workspace and starts or attaches to a foreground owner; it does not install or launch a server automatically.",
+                    "Use Add server or select an instance in the sidebar.",
                     "Entering Server mode finishes client work and closes its database before authenticating a foreground owner. Client schedules and database tools stay paused until ownership returns to Client mode.",
                     "In Server mode, inspect or acquire a dedicated installation, bind it to a draft, and review deployment blockers. Adoption leaves existing game files unchanged. Reviewed native runtimes use the foreground lifecycle controls.",
                     "Server monitoring separates process existence, query readiness, freshness and CPU/memory measurements. Query timeouts do not mean process exit. Game FPS, joinability and scenario readiness remain unknown.",
                     "Detach owner and keep server running explicitly preserves supervision when this window closes. Reopen Server mode or reconnect to refresh the same owner's status. Stop every instance before shutting down the idle owner or returning that game space to Client mode.",
+                    "Unattended owner export previews and saves a systemd user unit on Linux or a current-user task definition on Windows. Register it separately under the account that owns the config root.",
                     "After an owner crash, review Consumer recovery before applying cleanup. Only exact old-owner records with verified native tree-exit receipts can be retired. Pending group members and unknown records remain blocked; recovery never starts a game automatically.",
                     "Server logs show a bounded sanitized tail for the current run. Search, pause logs, auto-scroll, copy or export a new JSON snapshot; pausing logs keeps process and query status live.",
                     "Arma headless clients start automatically once the running server answers its query port, in order and each with its own profile and logs. One that exits unexpectedly is restarted a few times with a growing delay, then left stopped until you start it. Stopping the server stops them first, and a server restart brings back the clients you had not stopped. Joined means the client log reports a started mission.",
-                    "Scheduled maintenance restarts a server at a set time or weekly, only while its server owner is running. A scheduled restart never starts a server you stopped, can wait for an empty server, and an occurrence interrupted by an owner crash is shown as unknown and never repeated. A queued Foxy update waits while supervised server sessions or a detached owner are running.",
+                    "Scheduled maintenance restarts a server or rotates content at a set time or weekly, only while its server owner is running. Backup jobs and backup-before-action policies create self-verifying backups with stopped consistency by default (or explicit live mode when enabled), while unattended update jobs remain blocked. A queued Foxy update waits while supervised server sessions or a detached owner are running.",
+                    "Server backups and restore create bounded self-verifying save and configuration archives and restore verified local saves from exact stopped-verified backups. Pending restore recovery blocks activation, Start and new backups until resolved.",
+                    "Reforger sessions inspect recognized local savepoints by UUID and record next-launch continuation intent when writers are stopped.",
+                    "Player content publication reviews committed server deployments to publish a local player repository for Arma or pinned addon references for Reforger, then verifies the output.",
                     "RCon sends administration commands to a running server through its server owner. The password stays in protected storage. Each command is sent exactly once; if no reply arrives, its outcome is unknown and you should check the server before sending it again.",
-                    "Arma administration provides typed player, ban and mission lists, announcements and reviewed moderation or mission controls. A reply alone does not prove the effect completed. Scheduled Arma jobs can announce before restart or rotate a deployed mission; backup-required jobs remain blocked until backup support is available.",
+                    "Arma administration and native Reforger administration provide typed player, ban, mission/scenario and moderation controls. A reply alone does not prove the effect completed.",
                     "Saved configuration revisions provide Preview, Prepare commit, verification and reviewed rollback. Selecting a configuration does not change a running server or its saves.",
                     "Set a global download speed limit in Application settings, or leave it unlimited.",
                     "Use Auto recheck repositories on launch and Auto quick scan for changes on launch in Application settings to start background verification automatically.",
@@ -578,11 +609,12 @@ impl Foxy {
                     "Use foxy workshop to add, import, enable, freeze, share, and remove Steam Workshop items, and foxy game reforger for Arma Reforger Workshop addons.",
                     "Use foxy config export and foxy config import for .foxypack config packs, and foxy config extra-file to manage extra files.",
                     "Use foxy launch to start the game with a repository and profile, and foxy direct-download to download content by URL without database sync.",
-                    "Add --json for machine-readable output, --dry-run to preview a change without writing it, and --yes to confirm destructive operations.",
+                    "Use foxy server with --game-space <id> for dedicated-server drafts, installations, content staging, deployment activation, lifecycle, headless clients, maintenance, backups, restore, sessions, RCon, administration, service exports, and player content publication. All server commands refuse --wipe-db.",
+                    "Add --json or --toon for machine-readable output, --dry-run to preview a change without writing it, and --yes to confirm destructive operations.",
                     "Use --quiet to reduce output, or --no-progress to turn off live progress updates, which works better with screen readers.",
                     "Use --config-dir or the FOXY_CONFIG_DIR environment variable to point Foxy at a different config directory.",
                     "Only one Foxy window or command can use a config directory at a time, even for different game spaces. If it is already in use, the command stops with a database busy error.",
-                    "Use foxy ui to start the desktop app from a terminal.",
+                    "Use foxy ui --mode client or foxy ui --mode server to start the desktop app in a specific mode for one session.",
                 ],
             ),
             HelpTab::KeyboardShortcuts => HelpPage::new(
@@ -594,11 +626,12 @@ impl Foxy {
                     "Press F1 to open Help from any screen.",
                     "Press F2 to open or close Settings, and F3 to show or hide the activity log.",
                     "Press F4 to open memory diagnostics when Show memory diagnostics icon in footer is turned on.",
-                    "Use Tab and Shift+Tab to move focus between interactive controls in any view.",
+                    "Use Tab and Shift+Tab to move focus between interactive controls in any view. Visible focus outlines highlight the focused control.",
                     "Press Enter to activate the focused button, card, or default action in the current context.",
-                    "Use Arrow Up and Arrow Down to navigate repository lists, addon lists, and other vertical item lists.",
-                    "Use Arrow Left and Arrow Right to navigate between server cards in the repository detail view.",
-                    "Press Escape to close modal dialogs, the help view, settings, and other overlay panels.",
+                    "Use Arrow Up and Arrow Down to navigate repository lists, addon lists, server drafts, and other vertical item lists.",
+                    "Use Arrow Left and Arrow Right to navigate between server cards and option groups such as Application mode.",
+                    "Use Page Up and Page Down to scroll long forms such as Server instances.",
+                    "Press Escape to close modal dialogs, confirmation prompts, the help view, settings, and other overlay panels.",
                     "Repeated clicks on launch, update, and other long-running actions are suppressed while the operation is starting or already in progress.",
                     "In text fields, use standard editing shortcuts: Ctrl+A to select all, Ctrl+C to copy, Ctrl+V to paste, and Ctrl+Z to undo.",
                     "Most buttons and clickable surfaces show a pointer cursor on hover to indicate that they are interactive.",

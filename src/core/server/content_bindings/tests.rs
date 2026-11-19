@@ -502,3 +502,12 @@ fn linked_binding_parent_is_refused_and_target_is_preserved() {
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     crate::core::tasks::db_process_lock::release_for(&claim).unwrap();
 }
+
+#[test]
+fn example_content_plan_bindings_parses() {
+    let bindings: Vec<crate::core::server::ServerAddonBinding> = serde_json::from_str(include_str!(
+        "../../../../examples/json/server_backend/content_plan_bindings.json"
+    ))
+    .unwrap();
+    assert!(!bindings.is_empty());
+}

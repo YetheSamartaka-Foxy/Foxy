@@ -139,20 +139,9 @@ fn trigger_text(occurrence: &Occurrence) -> String {
     }
 }
 
-fn focus_outline(ui: &Ui, response: &Response) {
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect,
-            2.0,
-            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
-
 impl Foxy {
     /// Returns the section's focus anchor for restoring focus after a maintenance task.
-    pub(super) fn render_server_maintenance(&mut self, ui: &mut Ui) -> Option<Response> {
+    pub(in crate::ui::views) fn render_server_maintenance(&mut self, ui: &mut Ui) -> Option<Response> {
         let capabilities = crate::core::game::registry().active().server_capabilities();
         if !capabilities.lifecycle {
             return None;
@@ -221,7 +210,7 @@ impl Foxy {
                         && overview.jobs.len() < crate::core::server::jobs::MAX_JOBS_PER_INSTANCE,
                     egui::Button::new(tr("Add maintenance job")),
                 );
-                focus_outline(ui, &add);
+                Self::focus_outline(ui, &add);
                 if add.clicked() {
                     let mut form = MaintenanceForm::new_add(Local::now());
                     form.base_revision = overview.catalog_revision;
@@ -232,7 +221,7 @@ impl Foxy {
                     self.server_view.maintenance.action_error = None;
                 }
                 let refresh = ui.add_enabled(!busy, egui::Button::new(tr("Refresh maintenance")));
-                focus_outline(ui, &refresh);
+                Self::focus_outline(ui, &refresh);
                 if refresh.clicked() {
                     self.server_view.maintenance.last_refresh = Some(Instant::now());
                     self.server_view.maintenance.notice = None;
@@ -471,7 +460,7 @@ impl Foxy {
                     } else {
                         run
                     };
-                    focus_outline(ui, &run);
+                    Self::focus_outline(ui, &run);
                     if run.clicked() {
                         self.open_maintenance_confirmation(MaintenanceConfirmation::Run {
                             job_id: job.id.clone(),
@@ -482,7 +471,7 @@ impl Foxy {
                         !busy && self.server_view.maintenance.form.is_none(),
                         egui::Button::new(tr("Edit job")),
                     );
-                    focus_outline(ui, &edit);
+                    Self::focus_outline(ui, &edit);
                     if edit.clicked() {
                         let mut form = MaintenanceForm::from_job(job, Local::now());
                         form.base_revision = overview.catalog_revision;
@@ -496,7 +485,7 @@ impl Foxy {
                         !busy && confirming.is_none(),
                         egui::Button::new(tr("Remove job")),
                     );
-                    focus_outline(ui, &remove);
+                    Self::focus_outline(ui, &remove);
                     if remove.clicked() {
                         self.open_maintenance_confirmation(MaintenanceConfirmation::Remove {
                             job_id: job.id.clone(),
@@ -508,7 +497,7 @@ impl Foxy {
                             !busy && overview.owner_running && confirming.is_none(),
                             egui::Button::new(tr("Cancel occurrence")),
                         );
-                        focus_outline(ui, &cancel);
+                        Self::focus_outline(ui, &cancel);
                         if cancel.clicked() {
                             self.open_maintenance_confirmation(MaintenanceConfirmation::Cancel {
                                 occurrence_id: open.occurrence_id.clone(),
@@ -594,15 +583,18 @@ impl Foxy {
         let mut action = None;
         ui.horizontal(|ui| {
             let apply = ui.add_enabled(!busy, egui::Button::new(tr(confirm)));
-            focus_outline(ui, &apply);
+            Self::focus_outline(ui, &apply);
             let safe = ui.button(tr(keep));
             if self.server_view.maintenance.focus_confirmation {
                 safe.request_focus();
                 safe.scroll_to_me(Some(egui::Align::Center));
                 self.server_view.maintenance.focus_confirmation = false;
             }
-            focus_outline(ui, &safe);
-            if safe.clicked() {
+            Self::focus_outline(ui, &safe);
+            if safe.clicked()
+                || (!busy
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)))
+            {
                 self.server_view.maintenance.confirmation = None;
                 self.server_view.pending_focus = Some("server-maintenance-controls");
             }
@@ -655,13 +647,15 @@ impl Foxy {
                 .strong(),
             );
             ui.horizontal(|ui| {
-                ui.label(tr("Name:"));
-                let name = ui.add(
-                    egui::TextEdit::singleline(&mut form.name)
-                        .id(egui::Id::unique(("server-maintenance-name", id.as_str())))
-                        .char_limit(48)
-                        .desired_width(240.0),
-                );
+                let caption = ui.label(tr("Name:"));
+                let name = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut form.name)
+                            .id(egui::Id::unique(("server-maintenance-name", id.as_str())))
+                            .char_limit(48)
+                            .desired_width(240.0),
+                    )
+                    .labelled_by(caption.id);
                 if self.server_view.maintenance.focus_form {
                     name.request_focus();
                     name.scroll_to_me(Some(egui::Align::Center));
@@ -714,24 +708,31 @@ impl Foxy {
                 ScheduleKind::Once => {
                     ui.horizontal(|ui| {
                         ui.label(tr("Date:"));
-                        ui.add(egui::DragValue::new(&mut form.year).range(2024..=2100));
+                        ui.add(egui::DragValue::new(&mut form.year).range(2024..=2100))
+                            .accessible_name(tr("Year"));
                         ui.label("-");
-                        ui.add(egui::DragValue::new(&mut form.month).range(1..=12));
+                        ui.add(egui::DragValue::new(&mut form.month).range(1..=12))
+                            .accessible_name(tr("Month"));
                         ui.label("-");
-                        ui.add(egui::DragValue::new(&mut form.day).range(1..=31));
+                        ui.add(egui::DragValue::new(&mut form.day).range(1..=31))
+                            .accessible_name(tr("Day"));
                         ui.add_space(12.0);
                         ui.label(tr("Time:"));
-                        ui.add(egui::DragValue::new(&mut form.hour).range(0..=23));
+                        ui.add(egui::DragValue::new(&mut form.hour).range(0..=23))
+                            .accessible_name(tr("Hour"));
                         ui.label(":");
-                        ui.add(egui::DragValue::new(&mut form.minute).range(0..=59));
+                        ui.add(egui::DragValue::new(&mut form.minute).range(0..=59))
+                            .accessible_name(tr("Minute"));
                     });
                 }
                 ScheduleKind::Recurring => {
                     ui.horizontal(|ui| {
                         ui.label(tr("Time:"));
-                        ui.add(egui::DragValue::new(&mut form.hour).range(0..=23));
+                        ui.add(egui::DragValue::new(&mut form.hour).range(0..=23))
+                            .accessible_name(tr("Hour"));
                         ui.label(":");
-                        ui.add(egui::DragValue::new(&mut form.minute).range(0..=59));
+                        ui.add(egui::DragValue::new(&mut form.minute).range(0..=59))
+                            .accessible_name(tr("Minute"));
                     });
                     ui.horizontal_wrapped(|ui| {
                         ui.label(tr("Days:"));
@@ -758,20 +759,25 @@ impl Foxy {
             egui::Grid::new(("server-maintenance-policy", id.as_str()))
                 .num_columns(2)
                 .show(ui, |ui| {
-                    ui.label(tr("Missed-run grace (minutes)"));
-                    ui.add(egui::DragValue::new(&mut form.grace_minutes).range(0..=1440));
+                    let grace_label = ui.label(tr("Missed-run grace (minutes)"));
+                    ui.add(egui::DragValue::new(&mut form.grace_minutes).range(0..=1440))
+                        .labelled_by(grace_label.id);
                     ui.end_row();
-                    ui.label(tr("Deferral limit (minutes)"));
-                    ui.add(egui::DragValue::new(&mut form.max_defer_minutes).range(0..=720));
+                    let defer_label = ui.label(tr("Deferral limit (minutes)"));
+                    ui.add(egui::DragValue::new(&mut form.max_defer_minutes).range(0..=720))
+                        .labelled_by(defer_label.id);
                     ui.end_row();
-                    ui.label(tr("Attempts"));
-                    ui.add(egui::DragValue::new(&mut form.max_attempts).range(1..=5));
+                    let attempts_label = ui.label(tr("Attempts"));
+                    ui.add(egui::DragValue::new(&mut form.max_attempts).range(1..=5))
+                        .labelled_by(attempts_label.id);
                     ui.end_row();
-                    ui.label(tr("Retry delay (seconds)"));
-                    ui.add(egui::DragValue::new(&mut form.retry_delay_seconds).range(10..=3600));
+                    let retry_label = ui.label(tr("Retry delay (seconds)"));
+                    ui.add(egui::DragValue::new(&mut form.retry_delay_seconds).range(10..=3600))
+                        .labelled_by(retry_label.id);
                     ui.end_row();
-                    ui.label(tr("Stop timeout (seconds)"));
-                    ui.add(egui::DragValue::new(&mut form.stop_timeout_seconds).range(5..=120));
+                    let stop_label = ui.label(tr("Stop timeout (seconds)"));
+                    ui.add(egui::DragValue::new(&mut form.stop_timeout_seconds).range(5..=120))
+                        .labelled_by(stop_label.id);
                     ui.end_row();
                 });
             if capabilities.arma_administration {
@@ -786,28 +792,32 @@ impl Foxy {
                         ui.label(tr(
                             "When a message is entered and RCon is configured, send it before restarting the server or rotating the mission.",
                         ));
-                        ui.label(tr("Announcement (optional, up to 256 bytes)"));
+                        let announce_label =
+                            ui.label(tr("Announcement (optional, up to 256 bytes)"));
                         ui.add(
                             egui::TextEdit::multiline(&mut form.announcement)
                                 .desired_rows(2)
                                 .char_limit(256),
-                        );
+                        )
+                        .labelled_by(announce_label.id);
                         ui.horizontal(|ui| {
-                            ui.label(tr("Announcement delay (seconds)"));
+                            let delay_label = ui.label(tr("Announcement delay (seconds)"));
                             ui.add(
                                 egui::DragValue::new(&mut form.announcement_delay_seconds)
                                     .range(0..=300),
-                            );
+                            )
+                            .labelled_by(delay_label.id);
                         });
                     }
                 }
                 if form.action == MaintenanceAction::RotateMission {
-                    ui.label(tr("Mission template"));
+                    let template_label = ui.label(tr("Mission template"));
                     ui.add(
                         egui::TextEdit::singleline(&mut form.mission_template)
                             .char_limit(256)
                             .desired_width(320.0),
-                    );
+                    )
+                    .labelled_by(template_label.id);
                 }
                 ui.checkbox(
                     &mut form.require_backup,
@@ -838,11 +848,15 @@ impl Foxy {
             }
             ui.horizontal(|ui| {
                 let save_button = ui.add_enabled(!busy, egui::Button::new(tr("Save job")));
-                focus_outline(ui, &save_button);
+                Self::focus_outline(ui, &save_button);
                 save = save_button.clicked();
                 let cancel_button = ui.button(tr("Cancel"));
-                focus_outline(ui, &cancel_button);
-                cancel = cancel_button.clicked();
+                Self::focus_outline(ui, &cancel_button);
+                cancel = cancel_button.clicked()
+                    || (!busy
+                        && ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                        }));
             });
         });
         if cancel {

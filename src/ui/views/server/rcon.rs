@@ -14,16 +14,6 @@ use crate::ui::i18n::{tr, tr_fmt};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-fn focus_outline(ui: &Ui, response: &Response) {
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect,
-            2.0,
-            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
 
 fn connection_text(connection: RconConnection) -> String {
     tr(match connection {
@@ -57,7 +47,7 @@ fn local_time(unix_ms: i64) -> String {
 
 impl Foxy {
     /// Returns the section's focus anchor for restoring focus after an RCon task.
-    pub(super) fn render_server_rcon(&mut self, ui: &mut Ui) -> Option<Response> {
+    pub(in crate::ui::views) fn render_server_rcon(&mut self, ui: &mut Ui) -> Option<Response> {
         let capabilities = crate::core::game::registry().active().server_capabilities();
         if !capabilities.lifecycle {
             return None;
@@ -153,7 +143,7 @@ impl Foxy {
                         "Configure RCon"
                     })),
                 );
-                focus_outline(ui, &configure);
+                Self::focus_outline(ui, &configure);
                 if configure.clicked() {
                     self.server_view.rcon.form = Some(RconForm::open(&snapshot));
                     self.server_view.rcon.focus_form = true;
@@ -167,7 +157,7 @@ impl Foxy {
                         !busy && self.server_view.rcon.password.is_none(),
                         egui::Button::new(tr("Set RCon password")),
                     );
-                    focus_outline(ui, &password);
+                    Self::focus_outline(ui, &password);
                     if password.clicked() {
                         self.server_view.rcon.password = Some(RconPasswordEntry {
                             base_revision: snapshot.draft_revision,
@@ -181,7 +171,7 @@ impl Foxy {
                         self.server_view.rcon.action_error = None;
                     }
                     let remove = ui.add_enabled(!busy, egui::Button::new(tr("Remove RCon")));
-                    focus_outline(ui, &remove);
+                    Self::focus_outline(ui, &remove);
                     if remove.clicked() {
                         self.server_view.rcon.confirmation = Some(RconConfirmation::Disable {
                             revision: snapshot.draft_revision,
@@ -192,7 +182,7 @@ impl Foxy {
                     }
                 }
                 let refresh = ui.add_enabled(!busy, egui::Button::new(tr("Refresh RCon")));
-                focus_outline(ui, &refresh);
+                Self::focus_outline(ui, &refresh);
                 if refresh.clicked() {
                     self.server_view.rcon.last_refresh = Some(Instant::now());
                     self.server_view.rcon.notice = None;
@@ -296,8 +286,10 @@ impl Foxy {
         ui.group(|ui| {
             ui.label(RichText::new(tr("RCon settings")).strong());
             ui.horizontal(|ui| {
-                ui.label(tr("Port"));
-                let port = ui.add(egui::DragValue::new(&mut form.port).range(1..=65535));
+                let caption = ui.label(tr("Port"));
+                let port = ui
+                    .add(egui::DragValue::new(&mut form.port).range(1..=65535))
+                    .labelled_by(caption.id);
                 if self.server_view.rcon.focus_form {
                     port.request_focus();
                     self.server_view.rcon.focus_form = false;
@@ -307,8 +299,9 @@ impl Foxy {
                 ui.label(tr("For Arma, keep the RCon port outside the game port range (game port to game port + 4). BattlEye must be on."));
             }
             ui.horizontal(|ui| {
-                ui.label(tr("Listen address"));
-                ui.add(egui::TextEdit::singleline(&mut form.address).desired_width(140.0));
+                let caption = ui.label(tr("Listen address"));
+                ui.add(egui::TextEdit::singleline(&mut form.address).desired_width(140.0))
+                    .labelled_by(caption.id);
             });
             if form.reforger {
                 ui.horizontal(|ui| {
@@ -317,8 +310,9 @@ impl Foxy {
                     ui.radio_value(&mut form.permission, ReforgerRconPermission::Admin, tr("Admin"));
                 });
                 ui.horizontal(|ui| {
-                    ui.label(tr("Maximum RCon clients (0 uses the engine default)"));
-                    ui.add(egui::DragValue::new(&mut form.max_clients).range(0..=16));
+                    let caption = ui.label(tr("Maximum RCon clients (0 uses the engine default)"));
+                    ui.add(egui::DragValue::new(&mut form.max_clients).range(0..=16))
+                        .labelled_by(caption.id);
                 });
             }
             if let Some(error) = &form.error {
@@ -326,9 +320,9 @@ impl Foxy {
             }
             ui.horizontal(|ui| {
                 let save = ui.add_enabled(!busy, egui::Button::new(tr("Save RCon settings")));
-                focus_outline(ui, &save);
+                Self::focus_outline(ui, &save);
                 let cancel = ui.button(tr("Cancel"));
-                focus_outline(ui, &cancel);
+                Self::focus_outline(ui, &cancel);
                 if save.clicked() {
                     match form.build() {
                         Ok(input) => {
@@ -342,7 +336,12 @@ impl Foxy {
                         Err(message) => form.error = Some(message.into()),
                     }
                 }
-                if cancel.clicked() {
+                if cancel.clicked()
+                    || (!busy
+                        && ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                        }))
+                {
                     close = true;
                 }
             });
@@ -368,15 +367,17 @@ impl Foxy {
         let error_color = self.color_text_error();
         let entry = self.server_view.rcon.password.as_mut()?;
         ui.group(|ui| {
-            ui.label(RichText::new(tr("New RCon password")).strong());
+            let caption = ui.label(RichText::new(tr("New RCon password")).strong());
             ui.label(tr(
                 "Use 3 to 64 visible characters without spaces. The password is never shown again.",
             ));
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut *entry.value)
-                    .password(true)
-                    .desired_width(220.0),
-            );
+            let field = ui
+                .add(
+                    egui::TextEdit::singleline(&mut *entry.value)
+                        .password(true)
+                        .desired_width(220.0),
+                )
+                .labelled_by(caption.id);
             if focus {
                 field.request_focus();
             }
@@ -385,9 +386,9 @@ impl Foxy {
             }
             ui.horizontal(|ui| {
                 let save = ui.add_enabled(!busy, egui::Button::new(tr("Save RCon password")));
-                focus_outline(ui, &save);
+                Self::focus_outline(ui, &save);
                 let cancel = ui.button(tr("Cancel"));
-                focus_outline(ui, &cancel);
+                Self::focus_outline(ui, &cancel);
                 if save.clicked() {
                     match RconPassword::new(entry.value.to_string()) {
                         Ok(password) => {
@@ -401,7 +402,12 @@ impl Foxy {
                         Err(message) => entry.error = Some(message.into()),
                     }
                 }
-                if cancel.clicked() {
+                if cancel.clicked()
+                    || (!busy
+                        && ui.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                        }))
+                {
                     close = true;
                 }
             });
@@ -434,15 +440,18 @@ impl Foxy {
         let mut action = None;
         ui.horizontal(|ui| {
             let apply = ui.add_enabled(!busy, egui::Button::new(tr(confirm)));
-            focus_outline(ui, &apply);
+            Self::focus_outline(ui, &apply);
             let safe = ui.button(tr("Cancel"));
             if self.server_view.rcon.focus_confirmation {
                 safe.request_focus();
                 safe.scroll_to_me(Some(egui::Align::Center));
                 self.server_view.rcon.focus_confirmation = false;
             }
-            focus_outline(ui, &safe);
-            if safe.clicked() {
+            Self::focus_outline(ui, &safe);
+            if safe.clicked()
+                || (!busy
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)))
+            {
                 self.server_view.rcon.confirmation = None;
                 self.server_view.pending_focus = Some("server-rcon-controls");
             }
@@ -508,7 +517,7 @@ impl Foxy {
                 !busy && connected && run_generation.is_some(),
                 egui::Button::new(tr("Test RCon connection")),
             );
-            focus_outline(ui, &test);
+            Self::focus_outline(ui, &test);
             if test.clicked()
                 && let Some(run_generation) = run_generation
             {
@@ -521,12 +530,13 @@ impl Foxy {
             }
         });
         ui.horizontal(|ui| {
-            ui.label(tr("Command"));
+            let caption = ui.label(tr("Command"));
             ui.add_enabled(
                 connected,
                 egui::TextEdit::singleline(&mut self.server_view.rcon.command_text)
                     .desired_width(320.0),
-            );
+            )
+            .labelled_by(caption.id);
             let text = self.server_view.rcon.command_text.trim().to_owned();
             let send = ui.add_enabled(
                 !busy
@@ -536,7 +546,7 @@ impl Foxy {
                     && !crate::core::server::rcon::carries_secret(&text),
                 egui::Button::new(tr("Send command...")),
             );
-            focus_outline(ui, &send);
+            Self::focus_outline(ui, &send);
             if send.clicked()
                 && let Some(run_generation) = run_generation
             {

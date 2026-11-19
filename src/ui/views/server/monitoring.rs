@@ -71,12 +71,8 @@ impl Foxy {
     }
 }
 
-fn render_health(ui: &mut Ui, monitoring: &InstanceMonitoring, paused: bool) {
-    if monitoring.observation_unavailable {
-        ui.label(tr("Cached monitoring could not be validated. Process status remains independently available."));
-    }
-    let status = &monitoring.status;
-    ui.label(tr_fmt(
+pub(super) fn render_query_status(ui: &mut Ui, monitoring: &InstanceMonitoring) {
+    let message = tr_fmt(
         "Monitoring health: {health}; query state: {query}; query readiness: {ready}",
         &[
             ("health", health_label(monitoring.health)),
@@ -97,20 +93,30 @@ fn render_health(ui: &mut Ui, monitoring: &InstanceMonitoring, paused: bool) {
                 },
             ),
         ],
+    );
+    let response = ui.label(&message);
+    super::workspace::server_live_status(ui, &response, &message);
+    ui.label(tr_fmt(
+        "Observation age: {observation}; last successful query age: {query}",
+        &[
+            ("observation", age_label(monitoring.observation_age_ms)),
+            ("query", age_label(monitoring.query_age_ms)),
+        ],
     ));
+}
+
+fn render_health(ui: &mut Ui, monitoring: &InstanceMonitoring, paused: bool) {
+    if monitoring.observation_unavailable {
+        ui.label(tr("Cached monitoring could not be validated. Process status remains independently available."));
+    }
+    let status = &monitoring.status;
+    render_query_status(ui, monitoring);
     ui.label(tr_fmt(
         "Current owner: {owner}; run generation: {run}; observed process: {process}",
         &[
             ("owner", status.owner_id.clone()),
             ("run", status.run_generation.to_string()),
             ("process", status.process_exists.to_string()),
-        ],
-    ));
-    ui.label(tr_fmt(
-        "Observation age: {observation}; last successful query age: {query}",
-        &[
-            ("observation", age_label(monitoring.observation_age_ms)),
-            ("query", age_label(monitoring.query_age_ms)),
         ],
     ));
     if paused {

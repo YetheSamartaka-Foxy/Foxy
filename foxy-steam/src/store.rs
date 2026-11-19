@@ -737,4 +737,16 @@ mod tests {
         assert!(fs::read_dir(&outside).unwrap().next().is_none());
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn example_native_steam_session_record_parses() {
+        let record: Record = serde_json::from_str(include_str!(
+            "../../examples/json/server_backend/native_steam_session_record.json"
+        ))
+        .expect("parse example Steam session record");
+        assert_eq!(record.schema, SCHEMA);
+        assert!(!record.context.is_empty());
+        assert!(!record.alias.is_empty());
+        assert!(!record.ciphertext.is_empty());
+    }
 }

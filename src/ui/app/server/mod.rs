@@ -9,11 +9,15 @@ mod sessions;
 mod state;
 mod steam_auth;
 mod tasks;
+mod workspace;
 
+#[cfg(test)]
+pub(crate) use maintenance::MaintenanceSnapshot;
 pub(crate) use maintenance::{MaintenanceConfirmation, MaintenanceForm, MaintenanceNotice};
 pub(crate) use rcon::{RconConfirmation, RconForm, RconNotice, RconPasswordEntry, RconSnapshot};
 pub(crate) use state::{ServerDialog, ServerViewState};
 pub(crate) use tasks::ServerTaskAction;
+pub(crate) use workspace::{ServerPage, ServerProfileEditor};
 
 use crate::core::game::{registry, spaces};
 use crate::core::server::{ContentStageControl, ContentStagePhase, DraftChange, ServerStoreError};
@@ -578,15 +582,10 @@ impl Foxy {
             self.server_view.content_plan = None;
             self.server_view.content_bindings_plan = None;
         }
-        if matches!(&action, ServerTaskAction::LoadContentSources) {
-            self.server_view.content_sources = None;
-            self.server_view.content_bindings.clear();
-            self.server_view.saved_content_bindings = None;
-            self.server_view.content_bindings_plan = None;
-        }
         if matches!(&action, ServerTaskAction::ReloadContentBindings(_)) {
             self.server_view.content_sources = None;
             self.server_view.saved_content_bindings = None;
+            self.server_view.content_bindings_load_requested = false;
             self.server_view.content_bindings_plan = None;
             self.server_view.content_plan = None;
         }

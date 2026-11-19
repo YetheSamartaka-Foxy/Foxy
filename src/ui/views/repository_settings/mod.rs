@@ -158,6 +158,10 @@ impl Foxy {
     }
 
     pub fn render_repository_settings_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render_repository_settings_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_repository_settings_contents(&mut self, ui: &mut Ui) {
         if self.selected_repository_for_settings.is_none() {
             self.restore_last_view_or_default();
             return;
@@ -214,15 +218,18 @@ impl Foxy {
                 });
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let close_button = ui.add_sized(
-                        close_btn_size,
-                        Button::new(
-                            RichText::new("X")
-                                .color(self.color_text_normal())
-                                .size(close_icon_size),
+                    let close_fill = self.color_main_bg();
+                    let close_button = ui
+                        .add_sized(
+                            close_btn_size,
+                            Button::new(
+                                RichText::new("X")
+                                    .color(self.color_text_on(close_fill))
+                                    .size(close_icon_size),
+                            )
+                            .fill(close_fill),
                         )
-                        .fill(self.color_main_bg()),
-                    );
+                        .accessible_name(tr("Close"));
                     if close_button.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
@@ -355,9 +362,12 @@ impl Foxy {
                         ui.scope(|ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
                             ui.horizontal_wrapped(|ui| {
-                            ui.label(tr("Profile:"));
+                            let profile_label = ui.label(tr("Profile:"));
 
-                            let combo = egui::ComboBox::from_label("")
+                            let combo = egui::ComboBox::from_id_salt((
+                                "repo_settings_profile",
+                                repo_index,
+                            ))
                                 .selected_text(
                                     repo.selected_profile
                                         .clone()
@@ -386,7 +396,7 @@ impl Foxy {
                                         }
                                     }
                                 });
-                            if combo.response.hovered() {
+                            if combo.response.labelled_by(profile_label.id).hovered() {
                                 ui.ctx()
                                     .output_mut(Foxy::set_pointing_cursor_output);
                             }

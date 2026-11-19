@@ -442,6 +442,10 @@ impl Foxy {
                 ctx.request_repaint_after(Duration::from_millis(25));
                 return;
             }
+            self.hash_evidence_state = None;
+            self.hash_evidence_notice_open = false;
+            self.backend_progress_rx = None;
+            self.clear_progress_event_history();
         }
         self.launch_owner_transition(
             requested,

@@ -68,6 +68,7 @@ impl Foxy {
                                     RichText::new("\u{2699}").size(GAME_SPACE_SETTINGS_ICON_SIZE),
                                 ),
                             )
+                            .accessible_name(tr("Game space settings"))
                             .on_hover_text(tr("Game space settings"));
                         if settings_button.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
@@ -111,7 +112,11 @@ impl Foxy {
                                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                             }
                             if logo.clicked() {
-                                self.open_game_space_overview();
+                                if self.current_view == FoxyView::ServerInstances {
+                                    self.server_view.page = crate::ui::app::server::ServerPage::Overview;
+                                } else {
+                                    self.open_game_space_overview();
+                                }
                             }
                         });
                     },
@@ -156,6 +161,10 @@ impl Foxy {
     }
 
     pub fn render_game_spaces_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render_game_spaces_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_game_spaces_contents(&mut self, ui: &mut Ui) {
         let margin = Margin {
             left: 15,
             right: 15,
@@ -183,15 +192,18 @@ impl Foxy {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let close_icon_size =
                     self.settings_view_state.font_sizes.settings_view.close_icon as f32;
-                let close_button = ui.add_sized(
-                    Self::modal_icon_button_size(close_icon_size),
-                    Button::new(
-                        RichText::new("X")
-                            .color(self.color_text_normal())
-                            .size(close_icon_size),
+                let close_button = ui
+                    .add_sized(
+                        Self::modal_icon_button_size(close_icon_size),
+                        Button::new(
+                            RichText::new("X")
+                                .color(self.color_text_normal())
+                                .size(close_icon_size),
+                        )
+                        .fill(self.color_main_bg()),
                     )
-                    .fill(self.color_main_bg()),
-                );
+                    .accessible_name(tr("Close"));
+                Self::focus_outline(ui, &close_button);
                 if close_button.hovered() {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
@@ -352,6 +364,7 @@ impl Foxy {
 
                                         let settings_button = ui
                                             .button("\u{2699}")
+                                            .accessible_name(tr("Game space settings"))
                                             .on_hover_text(tr("Game space settings"));
                                         if settings_button.hovered() {
                                             ui.ctx().output_mut(
@@ -384,6 +397,14 @@ impl Foxy {
                             ui.make_persistent_id(("game_space_row", &entry.id)),
                             egui::Sense::click(),
                         );
+                        Self::focus_outline(ui, &row_response);
+                        row_response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Button,
+                                true,
+                                entry.display_name.as_str(),
+                            )
+                        });
                         if row_response.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
@@ -541,7 +562,8 @@ impl Foxy {
         let Some(entry) = self.game_spaces_view_state.pending_remove.clone() else {
             return;
         };
-        let (confirm_key, cancel_key) = Self::game_space_modal_keys(ui);
+        let (_, cancel_key) = Self::game_space_modal_keys(ui);
+        let confirm_key = false;
         let payload_preview = spaces::private_payload_preview(&entry.id);
         let preserve_id = egui::Id::unique(("preserve_game_space_payloads", entry.id.as_str()));
         let mut preserve_payloads = ui
@@ -666,7 +688,7 @@ impl Foxy {
             .default_width(420.0)
             .show(ui.ctx(), |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(tr("Game"));
+                    let game_label = ui.label(tr("Game"));
                     let selected_label = crate::core::game::registry()
                         .get(&self.game_spaces_view_state.create_game_id)
                         .map(|module| module.display_name().to_string())
@@ -681,16 +703,20 @@ impl Foxy {
                                     module.display_name().to_string(),
                                 );
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(game_label.id);
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(tr("Name"));
-                    let name_edit = ui.add(
-                        TextEdit::singleline(&mut self.game_spaces_view_state.create_name)
-                            .id_salt("game_space_create_name")
-                            .desired_width(260.0),
-                    );
+                    let name_label = ui.label(tr("Name"));
+                    let name_edit = ui
+                        .add(
+                            TextEdit::singleline(&mut self.game_spaces_view_state.create_name)
+                                .id_salt("game_space_create_name")
+                                .desired_width(260.0),
+                        )
+                        .labelled_by(name_label.id);
                     if self.game_spaces_view_state.focus_create_name {
                         name_edit.request_focus();
                         self.game_spaces_view_state.focus_create_name = false;

@@ -13,18 +13,17 @@ impl Foxy {
             arma3::clear_edit_buffers(ctx);
         }
     }
-    pub(super) fn render_server_editor(&mut self, ui: &mut Ui) {
+    pub(in crate::ui::views) fn render_server_editor(&mut self, ui: &mut Ui) {
         let Some(mut editor) = self.server_view.editor.take() else {
             ui.label(self.t("Select a server draft to edit its configuration."));
             return;
         };
         ui.horizontal_wrapped(|ui| {
-            ui.heading(&editor.draft.display_name);
-            ui.label(editor.draft.id.as_str());
             ui.label(self.t_fmt(
                 "Revision: {revision}",
                 &[("revision", editor.draft.revision.to_string())],
-            ));
+            ))
+            .on_hover_text(editor.draft.id.as_str());
         });
         ui.label(self.t("Draft validation does not establish deployment or launch readiness."));
         let invalid = arma3::has_invalid_edits(ui.ctx(), editor.field_scope());
@@ -75,6 +74,19 @@ impl Foxy {
             .configuration_import
             .as_ref()
             .is_some_and(|imported| !imported.files.is_empty());
+        let headless_profiles = arma3::HeadlessProfiles {
+            registered: self
+                .server_view
+                .content_sources
+                .as_ref()
+                .map(|snapshot| &snapshot.sources),
+            reviewed: self
+                .server_view
+                .saved_content_bindings
+                .as_ref()
+                .filter(|snapshot| snapshot.review_current)
+                .and_then(|snapshot| snapshot.document.as_ref()),
+        };
         if operator_owned {
             ui.label(tr("Operator-owned files are authoritative. Import a replacement or explicitly convert them to managed configuration to edit their fields."));
             if let ServerDefinition::Arma3(settings) = &mut editor.draft.definition {
@@ -96,6 +108,7 @@ impl Foxy {
                             &mut editor.next_row_key,
                             field_scope,
                             headless_clients,
+                            headless_profiles,
                         );
                         ui.label(tr(
                             "Use configuration import for operator files and protected password binding.",
@@ -111,6 +124,7 @@ impl Foxy {
                 }
             });
         });
+        editor.invalid_input = arma3::has_invalid_edits(ui.ctx(), field_scope);
         self.server_view.editor = Some(editor);
         if discard {
             arma3::clear_edit_buffers(ui.ctx());
@@ -127,18 +141,42 @@ impl Foxy {
 
 fn text(ui: &mut Ui, key: &str, id: egui::Id, value: &mut String) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(tr(key));
+        let label = ui.label(tr(key));
         ui.add(
             egui::TextEdit::singleline(value)
                 .id(id)
                 .desired_width(300.0),
-        );
+        )
+        .labelled_by(label.id);
     });
 }
 
 fn number(ui: &mut Ui, key: &str, value: &mut u16, max: u16) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(tr(key));
-        ui.add(egui::DragValue::new(value).range(1..=max));
+        let label = ui.label(tr(key));
+        let value = ui
+            .add(egui::DragValue::new(value).range(1..=max))
+            .labelled_by(label.id);
+        match key {
+            "Game port" => {
+                value.on_hover_text(tr(
+                    "UDP port number used by clients to reach the game server. The engine may use neighboring ports too.",
+                ));
+            }
+            "Bind port" => {
+                value.on_hover_text(tr("UDP port number for Reforger game traffic."));
+            }
+            "A2S query port" => {
+                value.on_hover_text(tr(
+                    "UDP port number for the separate server information query endpoint.",
+                ));
+            }
+            "Maximum players" => {
+                value.on_hover_text(tr(
+                    "Maximum number of player slots advertised and accepted by the server.",
+                ));
+            }
+            _ => {}
+        }
     });
 }

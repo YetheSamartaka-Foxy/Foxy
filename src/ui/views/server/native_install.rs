@@ -282,7 +282,7 @@ impl Foxy {
             maintenance_anchor.unwrap_or(review)
         });
         if confirm {
-            self.server_view.dialog = Some(ServerDialog::NativeInstall);
+            self.server_view.open_dialog(ServerDialog::NativeInstall);
         }
         if let Some(action) = action {
             self.start_server_task(action);

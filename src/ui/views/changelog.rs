@@ -54,6 +54,10 @@ static PARSED_CHANGELOG: std::sync::LazyLock<Vec<ChangelogElement>> =
 
 impl Foxy {
     pub fn render_changelog_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render_changelog_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_changelog_contents(&mut self, ui: &mut Ui) {
         let fonts = self.settings_view_state.font_sizes.about_view.clone();
         let changelog_margin = Margin {
             left: 15,
@@ -69,11 +73,14 @@ impl Foxy {
                     ui.heading(self.t("Changelog"));
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let close_button = ui.add_sized(
-                            Vec2::new(30.0, 30.0),
-                            Button::new(RichText::new("X").color(self.color_text_normal()))
-                                .fill(self.color_main_bg()),
-                        );
+                        let close_fill = self.color_main_bg();
+                        let close_button = ui
+                            .add_sized(
+                                Vec2::new(30.0, 30.0),
+                                Button::new(RichText::new("X").color(self.color_text_on(close_fill)))
+                                    .fill(close_fill),
+                            )
+                            .accessible_name(self.t("Close"));
                         if close_button.hovered() {
                             ui.ctx()
                                 .output_mut(|o| o.cursor_icon = CursorIcon::PointingHand);

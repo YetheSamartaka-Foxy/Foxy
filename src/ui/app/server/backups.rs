@@ -9,7 +9,6 @@ pub(crate) struct ServerBackupViewState {
     pub live_mode: bool,
     pub keep_last_input: String,
     pub max_bytes_input: String,
-    pub focus_prune_cancel: bool,
     pub plan: Option<Box<ServerBackupPlan>>,
     pub outcome: Option<Box<ServerBackupOutcome>>,
     pub listing: Option<Box<ServerBackupListing>>,
@@ -25,7 +24,6 @@ pub(crate) struct ServerBackupViewState {
 
 impl ServerBackupViewState {
     pub fn reset_for_instance(&mut self) {
-        self.focus_prune_cancel = false;
         self.plan = None;
         self.outcome = None;
         self.listing = None;

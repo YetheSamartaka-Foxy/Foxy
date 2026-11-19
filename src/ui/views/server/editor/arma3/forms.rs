@@ -168,6 +168,9 @@ pub(super) fn render_configuration(
             let toggle = ui
                 .checkbox(&mut present, tr(label))
                 .on_hover_text(tr("Leave unchecked to keep the engine default."));
+            if label == "Server profile name" {
+                toggle.clone().on_hover_text(tr("Names this instance's Arma engine profile directory for server configuration and difficulty. It is not a Foxy content profile or addon set."));
+            }
             if field.is_none() {
                 ui.weak(tr_fmt("Default: {name}", &[("name", default.to_owned())]));
             }

@@ -72,11 +72,14 @@ impl Foxy {
             ui.heading(title);
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let close_btn = ui.add_sized(
-                    Vec2::new(30.0, 30.0),
-                    Button::new(RichText::new("X").color(self.color_text_normal()))
-                        .fill(self.color_main_bg()),
-                );
+                let close_fill = self.color_main_bg();
+                let close_btn = ui
+                    .add_sized(
+                        Vec2::new(30.0, 30.0),
+                        Button::new(RichText::new("X").color(self.color_text_on(close_fill)))
+                            .fill(close_fill),
+                    )
+                    .accessible_name(self.t("Close"));
                 if close_btn.hovered() {
                     ui.ctx()
                         .output_mut(|o| o.cursor_icon = CursorIcon::PointingHand);

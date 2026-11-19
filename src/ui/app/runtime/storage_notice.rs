@@ -9,7 +9,6 @@ use crate::core::utils::storage_compat::{
     StorageIssue, StorageIssueCode, StorageIssueSeverity, WINDOWS_MAX_PATH_CHARS,
 };
 use crate::ui::app::Foxy;
-use crate::ui::palette;
 
 const NOTICE_LOCATION_LIMIT: usize = 3;
 
@@ -217,8 +216,8 @@ impl Foxy {
     fn render_storage_notice_row(&self, ui: &mut egui::Ui, row: &StorageNoticeRow) {
         let issue = &row.issue;
         let (tag, color) = match issue.severity {
-            StorageIssueSeverity::Blocking => (self.t("Unsafe"), palette::ERROR),
-            _ => (self.t("Warning"), palette::WARN),
+            StorageIssueSeverity::Blocking => (self.t("Unsafe"), self.color_error()),
+            _ => (self.t("Warning"), self.color_warn()),
         };
         egui::Frame::NONE
             .stroke(egui::Stroke::new(1.0, color))

@@ -102,6 +102,48 @@ fn the_same_url_at_different_local_paths_remains_two_instances() {
 }
 
 #[test]
+fn named_local_profiles_can_share_a_folder_with_distinct_ordered_addons() {
+    let root = tempfile::tempdir().unwrap();
+    let mut sources = ContentSources::default();
+    sources
+        .add_folder("shared", &root.path().join("mods"))
+        .unwrap();
+    let mut first = profile(
+        AddonSupply::AlreadyPresent,
+        &root.path().join("mods"),
+        "shared",
+    );
+    first.remote_url.clear();
+    first.addons = vec!["@mod_02".into(), "@mod_01".into()];
+    sources.add_profile(first.clone()).unwrap();
+    let mut second = first.clone();
+    second.name = "LocalBeta".into();
+    second.addons = vec!["@mod_01".into()];
+    sources.add_profile(second).unwrap();
+    assert_eq!(sources.profiles[0].addons, ["@mod_02", "@mod_01"]);
+    assert_eq!(
+        sources.resolve("RepoAlpha").unwrap().addon_paths,
+        [
+            root.path().join("mods/@mod_02"),
+            root.path().join("mods/@mod_01"),
+        ]
+    );
+    assert_eq!(sources.add_profile(first), Err(SourceError::DuplicateName));
+}
+
+#[test]
+fn addon_candidate_scan_lists_only_safe_immediate_directories() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("@mod_02")).unwrap();
+    std::fs::create_dir(root.path().join("@mod_01")).unwrap();
+    std::fs::write(root.path().join("readme.txt"), b"file").unwrap();
+    assert_eq!(
+        ContentSources::addon_candidates(root.path()).unwrap(),
+        ["@mod_01", "@mod_02"]
+    );
+}
+
+#[test]
 fn hand_edited_registries_are_validated_without_repairing_bytes() {
     let root = tempfile::tempdir().unwrap();
     let valid = sources(root.path());

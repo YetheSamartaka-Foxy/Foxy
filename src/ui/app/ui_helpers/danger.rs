@@ -91,14 +91,18 @@ impl Foxy {
             .vertical_centered_justified(|ui| {
                 ui.add_enabled(
                     enabled,
-                    Button::new(RichText::new(label).strong().color(palette::ON_STRONG_FILL))
-                        .fill(fill)
-                        .stroke(Stroke::new(1.0, stroke))
-                        .corner_radius(CornerRadius::same(6))
-                        .min_size(egui::vec2(
-                            0.0,
-                            Self::adaptive_button_height(body_size, 40.0),
-                        )),
+                    Button::new(
+                        RichText::new(label)
+                            .strong()
+                            .color(palette::contrast_text_on(fill)),
+                    )
+                    .fill(fill)
+                    .stroke(Stroke::new(1.0, stroke))
+                    .corner_radius(CornerRadius::same(6))
+                    .min_size(egui::vec2(
+                        0.0,
+                        Self::adaptive_button_height(body_size, 40.0),
+                    )),
                 )
             })
             .inner;
@@ -114,6 +118,7 @@ impl Foxy {
     pub(crate) fn add_secondary_prompt_button(&self, ui: &mut Ui, label: String) -> Response {
         let response =
             ui.add(Button::new(RichText::new(label).color(self.color_text_dim())).frame(false));
+        Self::focus_outline(ui, &response);
         if response.hovered() {
             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
         }
@@ -133,7 +138,7 @@ impl Foxy {
             egui::Align2::CENTER_BOTTOM,
             "!",
             egui::FontId::proportional(size * 0.62),
-            palette::ON_STRONG_FILL,
+            palette::contrast_text_on(color),
         );
     }
 }

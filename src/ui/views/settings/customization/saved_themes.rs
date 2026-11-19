@@ -113,10 +113,14 @@ impl Foxy {
                 .on_hover_text(tr(
                     "Overwrite the selected theme with the current font sizes and colors.",
                 ));
+            let delete_fill = self.color_action_destructive();
             let delete = ui
                 .add_enabled(
                     has_selection,
-                    Button::new(tr("Delete theme")).fill(self.color_action_destructive()),
+                    Button::new(
+                        RichText::new(tr("Delete theme")).color(self.color_text_on(delete_fill)),
+                    )
+                    .fill(delete_fill),
                 )
                 .on_hover_text(tr("Delete the selected saved theme."));
             for response in [&add_new, &load, &overwrite, &delete] {

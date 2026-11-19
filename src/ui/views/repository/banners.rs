@@ -70,7 +70,13 @@ impl Foxy {
                 egui::FontId::proportional(icon_size),
                 fg_color,
             );
+            Self::focus_outline(ui, &response);
         }
+
+        let accessible_label = tooltip.lines().next().unwrap_or(tooltip).trim();
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, enabled, accessible_label)
+        });
 
         if !enabled && response.hovered() {
             ui.ctx()

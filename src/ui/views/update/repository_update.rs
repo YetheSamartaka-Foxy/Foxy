@@ -97,16 +97,19 @@ impl Foxy {
                         self.settings_view_state.font_sizes.update_view.page_title as f32,
                     ));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let close_button = ui.add_enabled(
-                            !in_cancel_stage,
-                            Button::new(
-                                RichText::new("X")
-                                    .color(self.color_text_normal())
-                                    .size(close_icon_size),
+                        let close_fill = self.color_main_bg();
+                        let close_button = ui
+                            .add_enabled(
+                                !in_cancel_stage,
+                                Button::new(
+                                    RichText::new("X")
+                                        .color(self.color_text_on(close_fill))
+                                        .size(close_icon_size),
+                                )
+                                .min_size(Self::modal_icon_button_size(close_icon_size))
+                                .fill(close_fill),
                             )
-                            .min_size(Self::modal_icon_button_size(close_icon_size))
-                            .fill(self.color_main_bg()),
-                        );
+                            .accessible_name(self.t("Close"));
                         if close_button.hovered() && !in_cancel_stage {
                             ui.ctx().output_mut(|o| {
                                 Foxy::set_pointing_cursor_output(o);
@@ -417,6 +420,7 @@ impl Foxy {
                                                                     )
                                                                     .frame(false),
                                                                 );
+                                                                Self::focus_outline(ui, &response);
                                                                 if response.hovered() {
                                                                     ui.ctx().output_mut(
                                                                         Foxy::set_pointing_cursor_output,
@@ -635,7 +639,7 @@ impl Foxy {
                                                     );
                                                     let response = ui.add(
                                                         ActivityBar::new(Some(0.0))
-                                                            .fill(self.color_text_error()),
+                                                            .fill(self.color_action_destructive()),
                                                     );
                                                     paint_update_progress_bar_text_left(
                                                         ui,
@@ -880,6 +884,10 @@ impl Foxy {
                         text_color,
                     );
                 }
+                Self::focus_outline(ui, &response);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, !start_disabled, text.as_str())
+                });
 
                 if response.hovered() && !start_disabled {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);

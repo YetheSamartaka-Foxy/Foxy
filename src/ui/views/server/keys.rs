@@ -29,7 +29,7 @@ impl Foxy {
             ui.label(tr("Save the server draft before reviewing trusted keys."));
         }
 
-        ui.label(tr("Selected content stage"));
+        let stage_label = ui.label(tr("Selected content stage"));
         let stage_ids = self
             .server_view
             .content_stage_list
@@ -38,7 +38,7 @@ impl Foxy {
             .unwrap_or_default();
         let selected_stage = self.server_view.content_stage_selection.clone();
         ui.add_enabled_ui(!busy, |ui| {
-            egui::ComboBox::from_id_salt(("server-key-stage", instance_id.clone()))
+            let combo = egui::ComboBox::from_id_salt(("server-key-stage", instance_id.clone()))
                 .selected_text(
                     selected_stage
                         .as_deref()
@@ -59,6 +59,7 @@ impl Foxy {
                         );
                     }
                 });
+            combo.response.labelled_by(stage_label.id);
         });
         if self.server_view.content_stage_selection != selected_stage {
             self.server_view.key_review = None;

@@ -1,5 +1,17 @@
 [workspace]
 members = [".", "foxy-formats", "foxy-sol", "foxy-supervisor", "foxy-steam", "foxy-server-backend-cli", "testkit/mutator", "testkit/runner", "testkit/oracle"]
+exclude = ["vendor/epaint"]
+
+[patch.crates-io]
+# egui 0.37.0 backport of emilk/egui#8577 with bidi shaping, cursor and selection fixes.
+egui = { git = "https://github.com/richerfu/egui", rev = "f7e89e23a1639cc4fdf232edd6f9270f167711e5" }
+epaint_default_fonts = { git = "https://github.com/richerfu/egui", rev = "f7e89e23a1639cc4fdf232edd6f9270f167711e5" }
+ecolor = { git = "https://github.com/richerfu/egui", rev = "f7e89e23a1639cc4fdf232edd6f9270f167711e5" }
+emath = { git = "https://github.com/richerfu/egui", rev = "f7e89e23a1639cc4fdf232edd6f9270f167711e5" }
+epaint = { path = "vendor/epaint" }
+
+[patch."https://github.com/richerfu/egui"]
+epaint = { path = "vendor/epaint" }
 
 [package]
 name = "Foxy"

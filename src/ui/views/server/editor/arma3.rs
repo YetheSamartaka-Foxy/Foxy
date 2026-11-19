@@ -8,6 +8,12 @@ use eframe::egui::{self, Ui};
 mod forms;
 mod headless;
 
+#[derive(Clone, Copy)]
+pub(super) struct HeadlessProfiles<'a> {
+    pub registered: Option<&'a crate::core::server::ContentSources>,
+    pub reviewed: Option<&'a crate::core::server::ContentBindingsDocument>,
+}
+
 pub(super) fn has_invalid_edits(ctx: &egui::Context, scope: egui::Id) -> bool {
     forms::has_invalid_edits(ctx, scope)
 }
@@ -23,34 +29,51 @@ pub(super) fn render(
     next_key: &mut u64,
     field_scope: egui::Id,
     headless_clients: bool,
+    profiles: HeadlessProfiles<'_>,
 ) {
     let form = forms::Form { root: field_scope };
-    super::text(
-        ui,
-        "Server hostname",
-        field_scope.with("hostname"),
-        &mut settings.hostname,
-    );
-    super::number(ui, "Game port", &mut settings.game_port, u16::MAX);
-    super::number(ui, "Maximum players", &mut settings.max_players, u16::MAX);
-    ui.checkbox(&mut settings.persistent, tr("Persistent mission"));
-    ui.checkbox(
-        &mut settings.auto_init,
-        tr("Initialize mission automatically"),
-    );
-    ui.checkbox(&mut settings.battleye, tr("Enable BattlEye"));
-    let mut signatures = settings.verify_signatures == SignatureVerification::V2;
-    if ui
-        .checkbox(&mut signatures, tr("Verify addon signatures (v2)"))
-        .changed()
-    {
-        settings.verify_signatures = if signatures {
-            SignatureVerification::V2
-        } else {
-            SignatureVerification::Disabled
-        };
-    }
-    ui.heading(tr("Mission cycle"));
+    ui.group(|ui| {
+        ui.set_min_width(ui.available_width());
+        ui.heading(tr("Identity and network"));
+        super::text(
+            ui,
+            "Server hostname",
+            field_scope.with("hostname"),
+            &mut settings.hostname,
+        );
+        super::number(ui, "Game port", &mut settings.game_port, u16::MAX);
+        ui.label(tr("The game port is the main client connection port."));
+        super::number(ui, "Maximum players", &mut settings.max_players, u16::MAX);
+        ui.checkbox(&mut settings.battleye, tr("Enable BattlEye"))
+            .on_hover_text(tr(
+                "Enables the engine's BattlEye protection for this server.",
+            ));
+        let mut signatures = settings.verify_signatures == SignatureVerification::V2;
+        if ui
+            .checkbox(&mut signatures, tr("Verify addon signatures (v2)"))
+            .on_hover_text(tr(
+                "Checks loaded addons against their signing keys when clients connect.",
+            ))
+            .changed()
+        {
+            settings.verify_signatures = if signatures {
+                SignatureVerification::V2
+            } else {
+                SignatureVerification::Disabled
+            };
+        }
+    });
+    ui.add_space(6.0);
+    ui.group(|ui| {
+        ui.set_min_width(ui.available_width());
+        ui.heading(tr("Mission cycle"));
+        ui.checkbox(&mut settings.persistent, tr("Persistent mission"))
+            .on_hover_text(tr("Keeps the current mission running instead of advancing the cycle."));
+        ui.checkbox(
+            &mut settings.auto_init,
+            tr("Initialize mission automatically"),
+        )
+        .on_hover_text(tr("Starts mission initialization automatically when the server launches."));
     let mission_count = settings.mission_cycle.len();
     let mut remove = None;
     let mut move_mission = None;
@@ -68,7 +91,7 @@ pub(super) fn render(
                     Some(Arma3MissionSource::AddonClass) => tr("Addon class mission").to_owned(),
                     None => tr("File mission template").to_owned(),
                 };
-                ui.label(source_label);
+                ui.label(source_label).on_hover_text(tr("Library missions use a saved library revision; file templates and addon class missions use their respective local or addon-provided mission source."));
                 if !matches!(mission.source, Some(Arma3MissionSource::Library { .. })) {
                     let mut addon_class =
                         matches!(mission.source, Some(Arma3MissionSource::AddonClass));
@@ -142,18 +165,25 @@ pub(super) fn render(
         keys.push(*next_key);
         *next_key += 1;
     }
+    });
     if headless_clients {
-        ui.separator();
-        headless::render(
-            ui,
-            form,
-            &mut settings.headless_clients,
-            field_scope.with("headless"),
-        );
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            headless::render(
+                ui,
+                form,
+                &mut settings.headless_clients,
+                field_scope.with("headless"),
+                profiles,
+            );
+        });
     }
 
-    ui.separator();
+    ui.add_space(6.0);
+    ui.collapsing(tr("Advanced configuration"), |ui| {
     ui.heading(tr("Configuration files"));
+        ui.label(tr("The server profile name selects this instance's Arma settings and difficulty directory. Foxy content profiles are named addon sets."));
     ui.label(tr(
         "Unchecked settings are omitted from the generated files, so the engine keeps its own defaults.",
     ));
@@ -188,6 +218,7 @@ pub(super) fn render(
             &mut settings.difficulty,
             field_scope.with("difficulty"),
         );
+    });
     });
 }
 

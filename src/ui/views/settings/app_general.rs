@@ -85,7 +85,7 @@ impl Foxy {
 
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
-            ui.label(tr("Language"));
+            let language_label = ui.label(tr("Language"));
             ui.add_space(horizontal_padding);
 
             let languages: &[(&str, &str, &str)] = &[
@@ -153,15 +153,17 @@ impl Foxy {
                 .trim()
                 .to_ascii_lowercase();
 
-            let locale_combo = egui::ComboBox::from_label("")
+            let locale_combo = egui::ComboBox::from_id_salt("settings_locale_selector")
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .selected_text(selected_language)
                 .show_ui(ui, |ui| {
                     ui.set_min_width(320.0);
-                    let _search_response = ui.add(
-                        TextEdit::singleline(&mut self.settings_view_state.language_filter)
-                            .hint_text(tr("Search...")),
-                    );
+                    let _search_response = ui
+                        .add(
+                            TextEdit::singleline(&mut self.settings_view_state.language_filter)
+                                .hint_text(tr("Search...")),
+                        )
+                        .accessible_name(tr("Filter languages"));
                     ui.separator();
 
                     let filtered_languages: Vec<(&str, &str, &str)> = languages
@@ -196,7 +198,7 @@ impl Foxy {
                             }
                         });
                 });
-            if locale_combo.response.hovered() {
+            if locale_combo.response.labelled_by(language_label.id).hovered() {
                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
             }
             ui.add_space(horizontal_padding);
@@ -205,7 +207,7 @@ impl Foxy {
 
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
-            ui.label(tr("Download Speed Limit"));
+            let speed_limit_label = ui.label(tr("Download Speed Limit"));
 
             let mut unlimited = self.settings_view_state.download_speed_limit_mbps.is_none();
             let unlimited_checkbox = Self::ui_state_checkbox(ui, &mut unlimited, tr("Unlimited"));
@@ -226,11 +228,13 @@ impl Foxy {
                 if *limit_mbps == 0 {
                     *limit_mbps = 1;
                 }
-                let speed_limit_input = ui.add(
-                    egui::DragValue::new(limit_mbps)
-                        .range(1..=u32::MAX)
-                        .suffix(format!(" {}", tr("Mbps"))),
-                );
+                let speed_limit_input = ui
+                    .add(
+                        egui::DragValue::new(limit_mbps)
+                            .range(1..=u32::MAX)
+                            .suffix(format!(" {}", tr("Mbps"))),
+                    )
+                    .labelled_by(speed_limit_label.id);
                 if speed_limit_input.changed() {
                     *changed = true;
                 }
@@ -251,7 +255,7 @@ impl Foxy {
 
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
-            ui.label(tr("Hashing profile"));
+            let hashing_label = ui.label(tr("Hashing profile"));
 
             let profile_label = |profile: HashIoProfilePreference| -> String {
                 match profile {
@@ -295,7 +299,7 @@ impl Foxy {
                         }
                     }
                 });
-            if combo.response.hovered() {
+            if combo.response.labelled_by(hashing_label.id).hovered() {
                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
             }
             ui.add_space(horizontal_padding);
@@ -304,7 +308,7 @@ impl Foxy {
 
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
-            ui.label(tr("Renderer"));
+            let renderer_label_widget = ui.label(tr("Renderer"));
 
             let renderer_label = |renderer: UiRendererPreference| -> String {
                 match renderer {
@@ -345,6 +349,7 @@ impl Foxy {
                 });
             if combo
                 .response
+                .labelled_by(renderer_label_widget.id)
                 .on_hover_text(tr(
                     "Select the graphics renderer used by the Foxy UI. Changes take effect after restart.",
                 ))
@@ -637,10 +642,13 @@ impl Foxy {
             let sync_active = self.repository_sync_active();
             let wipe_button = ui
                 .add_enabled_ui(!sync_active && self.client_db_admission.allows(), |ui| {
+                    let wipe_fill = self.color_success_muted();
                     ui.add_sized(
                         Vec2::new(button_width, 30.0),
-                        Button::new(RichText::new(tr("Wipe Database")).color(crate::ui::palette::ON_STRONG_FILL))
-                            .fill(self.color_success_muted()),
+                        Button::new(
+                            RichText::new(tr("Wipe Database")).color(self.color_text_on(wipe_fill)),
+                        )
+                        .fill(wipe_fill),
                     ).on_hover_text(tr("Remove all cached repository data from the database. Use this only as a last resort."))
                 })
                 .inner;

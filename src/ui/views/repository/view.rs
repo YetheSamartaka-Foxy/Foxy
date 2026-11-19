@@ -56,6 +56,10 @@ impl Foxy {
     }
 
     pub fn render_repository_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render_repository_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_repository_contents(&mut self, ui: &mut Ui) {
         self.handle_repository_view_keyboard_navigation(ui.ctx());
 
         self.render_repository_sidebar(ui);
@@ -195,14 +199,18 @@ impl Foxy {
                                             .size()
                                             .x
                                             .min(heading_max_width);
-                                        ui.allocate_ui_with_layout(
+                                            ui.allocate_ui_with_layout(
                                             Vec2::new(name_slot, ui.spacing().interact_size.y),
                                             Layout::left_to_right(Align::Center),
                                             |ui| {
                                                 ui.set_max_width(name_slot);
                                                 ui.add(
                                                     egui::Label::new(
-                                                        RichText::new(&repo.name).text_style(TextStyle::Heading),
+                                                        RichText::new(&repo.name)
+                                                            .text_style(TextStyle::Heading)
+                                                            .color(palette::contrast_text_on(
+                                                                color_primary_accent,
+                                                            )),
                                                     )
                                                     .truncate(),
                                                 );
@@ -256,7 +264,10 @@ impl Foxy {
                                                     }
                                                 }
                                             });
-                                        let combo_response = combo.response.on_hover_text(profile_combo_tooltip.clone());
+                                        let combo_response = combo
+                                            .response
+                                            .accessible_name(tr("Launch profile"))
+                                            .on_hover_text(profile_combo_tooltip.clone());
                                         if combo_response.hovered() {
                                             ui.ctx().output_mut(|o| {
                                                 Foxy::set_pointing_cursor_output(o)
@@ -345,7 +356,10 @@ impl Foxy {
                                                 }
                                             }
                                         });
-                                        let a3combo_response = a3combo.response.on_hover_text(arma3_profile_combo_tooltip.clone());
+                                        let a3combo_response = a3combo
+                                            .response
+                                            .accessible_name(tr("Arma 3 Profile"))
+                                            .on_hover_text(arma3_profile_combo_tooltip.clone());
                                         if a3combo_response.hovered() {
                                             ui.ctx().output_mut(|o| {
                                                 Foxy::set_pointing_cursor_output(o)
@@ -529,7 +543,7 @@ impl Foxy {
                             ui,
                             &self.t("Legacy Protocol (MD5)"),
                             &self.t("This repository is using the old Swifty protocol (MD5) and should be migrated to the Foxy protocol (BLAKE3). Contact your server administrator to perform the migration - hybrid mode is supported for a smooth transition."),
-                            palette::WARN,
+                            self.color_warn(),
                             None,
                             None,
                             None,

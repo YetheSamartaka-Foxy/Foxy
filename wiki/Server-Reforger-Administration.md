@@ -2,6 +2,10 @@
 
 This page covers typed administration for a running native Reforger instance and its scenario-end policy. These operations require a compatible native runtime and an owner-managed foreground run.
 
+In the desktop app, select the Reforger instance from the Server sidebar and open **Operations** for typed administration and RCon. Reforger save-session selection is available from the related **Setup** workflow. The workspace map and navigation are in the [Server Admin Guide](Server-Admin-Guide.md#finding-your-way-around-server-mode).
+
+The Server **Addons** page shows Reforger's native addon review and lock status. Use its **Setup** link to edit desired addon intent. This review does not imply that addon content has been acquired or activated.
+
 ## Typed RCon administration
 
 The main Foxy binary exposes typed Reforger operations through the authenticated server owner. Read-only `players` and `bans` need a running owner. Ban pages are one-based. Mutations require `--yes` and the exact `--expected-run-generation` from current instance status. `--dry-run` validates command arguments without contacting an owner or writing records.
@@ -28,9 +32,13 @@ Some Reforger builds buffer scenario and world log output until process shutdown
 
 ## Scheduled Reforger scenario reload
 
-Reforger scheduled maintenance can use `reload-scenario` to reload the currently committed scenario in the same process. It is separate from Arma's `rotate-mission`, which selects another deployed mission. No broadcast, save, or ad hoc mission-selection action is implied. Update and backup jobs remain blocked until their adapters exist.
+Reforger scheduled maintenance can use `reload-scenario` to reload the currently committed scenario in the same process, or `backup` to create a self-verifying server backup. Backup jobs use stopped consistency by default; `--live-backup` explicitly permits best-effort capture while running. The `update` action remains recorded as blocked because unattended installation updates are unavailable. Scenario reload is separate from Arma's `rotate-mission`, which selects another deployed mission. No broadcast, save, or ad hoc mission-selection action is implied.
 
-The [maintenance jobs example](../examples/json/server_backend/server_reforger_maintenance_jobs.json) uses a disabled recurring reload job and omits Arma-only announcement, rotation, and backup options. Jobs run only while the game-space server owner is running. The job action has no guarantee of saved-game durability.
+The [maintenance jobs example](../examples/json/server_backend/server_reforger_maintenance_jobs.json) uses a disabled recurring reload job and omits Arma-only announcement and rotation options. Jobs run only while the game-space server owner is running. A verified archive protects the included local save/profile files, but does not establish that the engine can resume or preserve a playthrough.
+
+## Reforger session intent
+
+`server session list|plan|apply <instance-id>` inspects recognized local save metadata and reviews the next launch's session selection. Plan choices are `configured`, `latest`, `selected` (requires `--save-id`) or `new`; apply requires the reviewed `--expected-generation`, `--expected-plan-fingerprint` and `--yes`, and refuses while writers are active. `--dry-run` validates the plan without changing intent or contacting an owner. This changes only saved next-launch intent: it does not start or stop the server, request a save, convert data, or guarantee that the engine restores the selected playthrough. External persistence providers are outside local backup coverage unless the backup report explicitly lists them as covered.
 
 ## Reforger scenario end behavior
 
@@ -42,6 +50,6 @@ The Reforger draft `settings.scenario_end` is a tagged enum. If omitted, it defa
 {"mode":"disabled"}
 ```
 
-Committed native runtime manifests freeze this policy in optional `reforger_scenario_end`; older manifests without it behave as shutdown. Natural engine exit does not cause Foxy to restart the process or adopt child processes. Existing foreground containment retains and cleans its descendants. Backup and save-durability guarantees remain gated.
+Committed native runtime manifests freeze this policy in optional `reforger_scenario_end`; older manifests without it behave as shutdown. Natural engine exit does not cause Foxy to restart the process or adopt child processes. Existing foreground containment retains and cleans its descendants. Local backup support does not guarantee engine save durability or successful playthrough restoration.
 
 The [scenario-end examples](../examples/json/server_backend/reforger_scenario_end.json) illustrate only serialized policy shapes and grant no runtime authority.

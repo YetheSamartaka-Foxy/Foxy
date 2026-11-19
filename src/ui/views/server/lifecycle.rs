@@ -6,15 +6,30 @@ use eframe::egui::{self, Ui};
 use std::time::{Duration, Instant};
 
 impl Foxy {
-    pub(crate) fn render_server_lifecycle(&mut self, ui: &mut Ui) -> Option<egui::Response> {
-        if !crate::core::game::registry()
-            .active()
-            .server_capabilities()
-            .lifecycle
+    pub(super) fn observed_server_status(
+        &self,
+        id: &crate::core::server::ServerInstanceId,
+    ) -> Option<&crate::core::server::InstanceRuntimeStatus> {
+        let owner = self.mode_ownership.owner.as_ref()?.attachment.scope();
+        self.server_view.lifecycle_status.as_ref().filter(|status| {
+            &status.instance_id == id
+                && status.owner_id == owner.owner_id
+                && status.owner_generation == owner.generation
+        })
+    }
+
+    pub(super) fn poll_server_workspace_runtime(&mut self, ui: &Ui) {
+        if self.mode_ownership.owner.is_none()
+            || !crate::core::game::registry()
+                .active()
+                .server_capabilities()
+                .lifecycle
         {
-            return None;
+            return;
         }
-        let id = self.server_view.selected.clone()?;
+        let Some(id) = self.server_view.selected.clone() else {
+            return;
+        };
         if let (Some(monitoring), Some(last)) = (
             self.server_view.lifecycle_monitoring.as_mut(),
             self.server_view.monitoring_last_received,
@@ -48,6 +63,121 @@ impl Foxy {
             self.server_view.monitoring_paused = false;
             self.server_view.monitoring_auto_scroll = true;
         }
+        let process_exists = self
+            .observed_server_status(&id)
+            .is_some_and(|status| status.process_exists);
+        if process_exists || self.server_view.monitoring_last_refresh.is_none() {
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            let refresh_due = self
+                .server_view
+                .monitoring_last_refresh
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(3));
+            if !self.server_view.busy() && refresh_due {
+                self.server_view.monitoring_last_refresh = Some(Instant::now());
+                self.start_server_task(ServerTaskAction::PollInstanceMonitoring(id));
+            }
+        }
+    }
+
+    pub(super) fn render_server_runtime_refresh(&mut self, ui: &mut Ui) -> Option<egui::Response> {
+        if !crate::core::game::registry()
+            .active()
+            .server_capabilities()
+            .lifecycle
+        {
+            return None;
+        }
+        let id = self.server_view.selected.clone()?;
+        let response = ui.add_enabled(
+            !self.server_view.controls_busy() && !self.server_view.dirty(),
+            egui::Button::new(tr("Refresh runtime status")),
+        );
+        Self::focus_outline(ui, &response);
+        if response.clicked() {
+            self.server_view.monitoring_paused = false;
+            self.server_view.monitoring_last_refresh = Some(Instant::now());
+            self.start_server_task(ServerTaskAction::InspectInstanceRuntime(id));
+        }
+        Some(response)
+    }
+
+    pub(super) fn render_server_owner_tools(&mut self, ui: &mut Ui) {
+        self.render_owner_status(ui);
+        if !crate::core::game::registry()
+            .active()
+            .server_capabilities()
+            .lifecycle
+        {
+            return;
+        }
+        let busy = self.server_view.controls_busy();
+        let dirty = self.server_view.dirty();
+        ui.heading(tr("Server lifecycle"));
+        if self
+            .mode_ownership
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| {
+                snapshot.lifetime == crate::core::server::owner::OwnerLifetime::Detached
+            })
+        {
+            ui.label(tr("The detached owner remains supervised when this window closes. Its database and process claims stay held."));
+        } else {
+            ui.label(tr("Starting accepts this foreground lifetime policy: closing its owner requests shutdown, waits five seconds, then force-cleans remaining server trees. Forced cleanup may lose saves. Closing an attached window leaves its external owner running."));
+        }
+        if let Some(snapshot) = self.mode_ownership.snapshot.as_ref() {
+            ui.label(tr_fmt(
+                "Owner lifetime: {lifetime}",
+                &[(
+                    "lifetime",
+                    tr(match snapshot.lifetime {
+                        crate::core::server::owner::OwnerLifetime::Foreground => "Foreground",
+                        crate::core::server::owner::OwnerLifetime::ParentBound => "Parent-bound",
+                        crate::core::server::owner::OwnerLifetime::Detached => {
+                            "Detached; server remains supervised after Foxy closes"
+                        }
+                    }),
+                )],
+            ));
+        }
+        if crate::core::game::registry()
+            .active()
+            .server_capabilities()
+            .durable_owner
+            && self
+                .mode_ownership
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.is_owned())
+        {
+            ui.label(tr("Detach owner keeps the server running after this Foxy window closes. The detached owner retains database and process claims until explicitly stopped."));
+            if ui
+                .add_enabled(
+                    !busy && !dirty,
+                    egui::Button::new(tr("Detach owner and keep server running")),
+                )
+                .clicked()
+            {
+                self.detach_server_owner();
+            }
+        }
+        if ui
+            .add_enabled(!busy, egui::Button::new(tr("Reconnect to server owner")))
+            .clicked()
+        {
+            self.reconnect_server_owner();
+        }
+    }
+
+    pub(crate) fn render_server_lifecycle(&mut self, ui: &mut Ui) -> Option<egui::Response> {
+        if !crate::core::game::registry()
+            .active()
+            .server_capabilities()
+            .lifecycle
+        {
+            return None;
+        }
+        let id = self.server_view.selected.clone()?;
         let busy = self.server_view.controls_busy();
         let dirty = self.server_view.dirty();
         if self
@@ -63,12 +193,7 @@ impl Foxy {
             .lifecycle_plan
             .as_ref()
             .is_some_and(|plan| plan.instance_id == id);
-        let status = self
-            .server_view
-            .lifecycle_status
-            .as_ref()
-            .filter(|status| status.instance_id == id)
-            .cloned();
+        let status = self.observed_server_status(&id).cloned();
         let can_start = status.as_ref().is_some_and(|status| {
             status.phase == InstanceRuntimePhase::NotOwned
                 || (status.phase == InstanceRuntimePhase::Exited && status.cleanup_verified)
@@ -82,72 +207,45 @@ impl Foxy {
         ui.separator();
         Some(ui.push_id("server.lifecycle-controls", |ui| {
             ui.heading(tr("Server lifecycle"));
-            if self
-                .mode_ownership
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| {
-                    snapshot.lifetime == crate::core::server::owner::OwnerLifetime::Detached
-                })
-            {
-                ui.label(tr("The detached owner remains supervised when this window closes. Its database and process claims stay held."));
-            } else {
-                ui.label(tr("Starting accepts this foreground lifetime policy: closing its owner requests shutdown, waits five seconds, then force-cleans remaining server trees. Forced cleanup may lose saves. Closing an attached window leaves its external owner running."));
-            }
-            if let Some(snapshot) = self.mode_ownership.snapshot.as_ref() {
-                ui.label(tr_fmt(
-                    "Owner lifetime: {lifetime}",
-                    &[("lifetime", tr(match snapshot.lifetime {
-                        crate::core::server::owner::OwnerLifetime::Foreground => "Foreground",
-                        crate::core::server::owner::OwnerLifetime::ParentBound => "Parent-bound",
-                        crate::core::server::owner::OwnerLifetime::Detached => "Detached; server remains supervised after Foxy closes",
-                    }))],
-                ));
-            }
-            if crate::core::game::registry()
-                .active()
-                .server_capabilities()
-                .durable_owner
-                && self.mode_ownership.owner.as_ref().is_some_and(|owner| owner.is_owned())
-            {
-                ui.label(tr("Detach owner keeps the server running after this Foxy window closes. The detached owner retains database and process claims until explicitly stopped."));
-                if ui.add_enabled(!busy && !dirty, egui::Button::new(tr("Detach owner and keep server running"))).clicked() {
-                    self.detach_server_owner();
-                }
-            }
-            if ui.add_enabled(!busy, egui::Button::new(tr("Reconnect to server owner"))).clicked() {
-                self.reconnect_server_owner();
-            }
             if dirty {
                 ui.label(tr("Save or discard draft edits before planning or changing the running server."));
             }
-            let status_button = ui.add_enabled(!busy, egui::Button::new(tr("Refresh runtime status")));
-            if status_button.clicked() {
-                self.server_view.monitoring_paused = false;
-                self.server_view.monitoring_last_refresh = Some(Instant::now());
-                self.start_server_task(ServerTaskAction::InspectInstanceRuntime(id.clone()));
-            }
+            let status_button = self.render_server_runtime_refresh(ui);
             if let Some(status) = status.as_ref() {
-                ui.label(tr_fmt(
+                let phase = tr_fmt(
                     "Runtime phase: {phase}; owner: {owner}; run generation: {generation}",
                     &[
                         ("phase", runtime_phase_label(status.phase)),
                         ("owner", status.owner_id.clone()),
                         ("generation", status.run_generation.to_string()),
                     ],
-                ));
+                );
+                let response = ui.label(&phase);
+                super::workspace::server_live_status(ui, &response, &phase);
                 ui.label(tr_fmt(
                     "Process observed: {exists}; readiness verified: {ready}; cleanup verified: {cleanup}",
                     &[
-                        ("exists", status.process_exists.to_string()),
-                        ("ready", status.readiness_verified.to_string()),
-                        ("cleanup", status.cleanup_verified.to_string()),
+                        ("exists", tr(if status.process_exists { "Yes" } else { "No" })),
+                        ("ready", tr(if status.readiness_verified { "Yes" } else { "No" })),
+                        ("cleanup", tr(if status.cleanup_verified { "Yes" } else { "No" })),
                     ],
                 ));
                 if status.stop_timed_out {
                     ui.label(tr("Stop timed out. The owner retains the process and cleanup responsibility."));
                 }
-                if status.phase == InstanceRuntimePhase::Running && !status.readiness_verified {
+                let query_status = self.server_view.lifecycle_monitoring.as_ref().filter(|monitoring| {
+                    status.process_exists
+                        && monitoring.status.instance_id == status.instance_id
+                        && monitoring.status.owner_id == status.owner_id
+                        && monitoring.status.owner_generation == status.owner_generation
+                        && monitoring.status.run_generation == status.run_generation
+                });
+                if let Some(monitoring) = query_status {
+                    super::monitoring::render_query_status(ui, monitoring);
+                }
+                if status.phase == InstanceRuntimePhase::Running && !status.readiness_verified
+                    && !query_status.is_some_and(|monitoring| monitoring.query_ready)
+                {
                     ui.label(tr("A running process was observed, but readiness was not verified."));
                 }
                 if status.phase == InstanceRuntimePhase::CleanupUncertain {
@@ -185,22 +283,30 @@ impl Foxy {
                             ],
                         ));
                         ui.label(tr("Review the committed runtime and fingerprint before starting. A process ID alone does not verify readiness."));
+                        if self.mode_ownership.snapshot.as_ref().is_some_and(|snapshot| {
+                            snapshot.lifetime == crate::core::server::owner::OwnerLifetime::Detached
+                        }) {
+                            ui.label(tr("The detached owner remains supervised when this window closes. Its database and process claims stay held."));
+                        } else {
+                            ui.label(tr("Starting accepts this foreground lifetime policy: closing its owner requests shutdown, waits five seconds, then force-cleans remaining server trees. Forced cleanup may lose saves. Closing an attached window leaves its external owner running."));
+                        }
                         if !plan.launch.headless.is_empty() {
-                            ui.label(tr_fmt(
+                            egui::CollapsingHeader::new(tr_fmt(
                                 "Headless clients in this plan: {count}",
                                 &[("count", plan.launch.headless.len().to_string())],
-                            ));
-                            for client in &plan.launch.headless {
-                                ui.label(format!(
-                                    "{} ({}): {}",
-                                    client.name,
-                                    client.id,
-                                    client.arguments.join(" ")
-                                ));
-                            }
-                            if plan.launch.headless.iter().any(|client| client.join_password) {
-                                ui.label(tr("Headless clients read the join password from a private parameter file, not the command line."));
-                            }
+                            )).id_salt("server-headless-start-plan").show(ui, |ui| {
+                                for client in &plan.launch.headless {
+                                    ui.label(format!(
+                                        "{} ({}): {}",
+                                        client.name,
+                                        client.id,
+                                        client.arguments.join(" ")
+                                    ));
+                                }
+                                if plan.launch.headless.iter().any(|client| client.join_password) {
+                                    ui.label(tr("Headless clients read the join password from a private parameter file, not the command line."));
+                                }
+                            });
                         }
                     });
                 if ui
@@ -302,30 +408,12 @@ impl Foxy {
                     ui.label(message);
                 }
             }
-            let process_exists = self
-                .server_view
-                .lifecycle_status
-                .as_ref()
-                .filter(|status| status.instance_id == id)
-                .is_some_and(|status| status.process_exists);
-            if process_exists {
-                ui.ctx().request_repaint_after(Duration::from_secs(1));
-                let refresh_due = self
-                    .server_view
-                    .monitoring_last_refresh
-                    .is_none_or(|last| last.elapsed() >= Duration::from_secs(3));
-                if !self.server_view.busy() && refresh_due {
-                    self.server_view.monitoring_last_refresh = Some(Instant::now());
-                    self.start_server_task(ServerTaskAction::PollInstanceMonitoring(id.clone()));
-                }
-            }
-            self.render_server_monitoring(ui);
             status_button
-        }).inner)
+        }).inner).flatten()
     }
 }
 
-fn runtime_phase_label(phase: InstanceRuntimePhase) -> String {
+pub(super) fn runtime_phase_label(phase: InstanceRuntimePhase) -> String {
     tr(match phase {
         InstanceRuntimePhase::NotOwned => "Not owned",
         InstanceRuntimePhase::Starting => "Starting",

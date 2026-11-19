@@ -6,17 +6,6 @@ use crate::ui::i18n::{tr, tr_fmt};
 use eframe::egui::{self, Ui};
 use std::collections::BTreeSet;
 
-fn focus_outline(ui: &Ui, response: &egui::Response) {
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect,
-            2.0,
-            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-            egui::StrokeKind::Inside,
-        );
-    }
-}
-
 impl Foxy {
     pub(crate) fn render_server_player_publication(
         &mut self,
@@ -60,6 +49,7 @@ impl Foxy {
             ));
             let response =
                 ui.add_enabled(!busy, egui::Button::new(tr("Refresh deployment records")));
+            Self::focus_outline(ui, &response);
             if response.clicked() {
                 self.start_server_task(ServerTaskAction::ListDeploymentRecords(instance_id));
             }
@@ -81,7 +71,7 @@ impl Foxy {
                         .hint_text(tr("Absolute folder path")),
                 )
                 .labelled_by(caption.id);
-            focus_outline(ui, &response);
+            Self::focus_outline(ui, &response);
         });
         if is_arma {
             let repo_name_id =
@@ -94,13 +84,13 @@ impl Foxy {
                             .id(repo_name_id),
                     )
                     .labelled_by(caption.id);
-                focus_outline(ui, &response);
+                Self::focus_outline(ui, &response);
             });
             let keys = ui.checkbox(
                 &mut publication.include_public_keys,
                 tr("Include public addon keys"),
             );
-            focus_outline(ui, &keys);
+            Self::focus_outline(ui, &keys);
         }
 
         let output = std::path::Path::new(publication.output.trim());
@@ -129,7 +119,7 @@ impl Foxy {
         let request_valid = output.is_absolute() && !request.repository_name.is_empty() && !busy;
         let plan_button =
             ui.add_enabled(request_valid, egui::Button::new(tr("Plan player content")));
-        focus_outline(ui, &plan_button);
+        Self::focus_outline(ui, &plan_button);
         if plan_button.clicked() {
             publication.plan = None;
             publication.outcome = None;
@@ -189,7 +179,7 @@ impl Foxy {
                                     &[("profile", addon.profile.clone())],
                                 ),
                             );
-                            focus_outline(ui, &check);
+                            Self::focus_outline(ui, &check);
                             if check.changed() {
                                 publication.arma_permission = false;
                                 if selected {
@@ -210,7 +200,7 @@ impl Foxy {
                             tr("I confirm I have permission to redistribute these Arma addons."),
                         ),
                     );
-                    focus_outline(ui, &permission);
+                    Self::focus_outline(ui, &permission);
                 }
                 crate::core::server::ServerDefinitionKind::Reforger => {
                     if let Some(review) = &plan.reforger {
@@ -266,7 +256,7 @@ impl Foxy {
                     && publication.outcome.is_none(),
                 egui::Button::new(tr("Publish player content")),
             );
-            focus_outline(ui, &publish);
+            Self::focus_outline(ui, &publish);
             if publish.clicked() {
                 action = Some(ServerTaskAction::ApplyPlayerPublication(Box::new(
                     plan.clone(),
@@ -278,7 +268,7 @@ impl Foxy {
                     && (plan.destination_exists || publication.outcome.is_some()),
                 egui::Button::new(tr("Verify published player content")),
             );
-            focus_outline(ui, &verify);
+            Self::focus_outline(ui, &verify);
             if verify.clicked() {
                 action = Some(ServerTaskAction::VerifyPlayerPublication(Box::new(
                     plan.clone(),

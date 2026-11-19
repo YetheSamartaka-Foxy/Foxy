@@ -376,11 +376,13 @@ impl Foxy {
                 - ui.spacing().item_spacing.x
                 - 2.0 * horizontal_padding)
                 .max(0.0);
-            let response = ui.add(
-                TextEdit::singleline(&mut self.game_space_settings_view_state.rename_input)
-                    .id_salt("game_space_rename_input")
-                    .desired_width(field_width),
-            );
+            let response = ui
+                .add(
+                    TextEdit::singleline(&mut self.game_space_settings_view_state.rename_input)
+                        .id_salt("game_space_rename_input")
+                        .desired_width(field_width),
+                )
+                .accessible_name(tr("Game space name"));
             if response.hovered() {
                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
             }
@@ -432,21 +434,26 @@ impl Foxy {
             );
             return;
         }
-        ui.horizontal(|ui| {
-            ui.add_space(horizontal_padding);
-            ui.label(tr(setting.label));
-            ui.add_space(horizontal_padding);
-        });
+        let text_label_id = ui
+            .horizontal(|ui| {
+                ui.add_space(horizontal_padding);
+                let label = ui.label(tr(setting.label));
+                ui.add_space(horizontal_padding);
+                label.id
+            })
+            .inner;
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
             let field = text_field_mut(self.edited_game_space_settings_mut(), setting.id)
                 .expect("binding checked above");
-            let response = ui.add(
-                TextEdit::singleline(field)
-                    .hint_text(setting.placeholder)
-                    .desired_width(width),
-            );
+            let response = ui
+                .add(
+                    TextEdit::singleline(field)
+                        .hint_text(setting.placeholder)
+                        .desired_width(width),
+                )
+                .labelled_by(text_label_id);
             if response.changed() {
                 change_flags.settings = true;
             }
@@ -489,11 +496,14 @@ impl Foxy {
             flags.profiles |= binding.refreshes_profiles;
         };
 
-        ui.horizontal(|ui| {
-            ui.add_space(horizontal_padding);
-            ui.label(tr(setting.label));
-            ui.add_space(horizontal_padding);
-        });
+        let dir_label_id = ui
+            .horizontal(|ui| {
+                ui.add_space(horizontal_padding);
+                let label = ui.label(tr(setting.label));
+                ui.add_space(horizontal_padding);
+                label.id
+            })
+            .inner;
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let browse_label = tr("Browse");
@@ -512,7 +522,9 @@ impl Foxy {
 
             let field = directory_field_mut(self.edited_game_space_settings_mut(), setting.id)
                 .expect("binding checked above");
-            let directory_edit = ui.add(TextEdit::singleline(field).desired_width(text_edit_width));
+            let directory_edit = ui
+                .add(TextEdit::singleline(field).desired_width(text_edit_width))
+                .labelled_by(dir_label_id);
             if directory_edit.changed() {
                 mark_changed(change_flags);
             }

@@ -125,7 +125,7 @@ pub enum CliCommand {
         #[command(subcommand)]
         command: SteamHelperCommand,
     },
-    /// Inspect Arma 3 server metadata.
+    /// Manage dedicated servers and inspect server metadata.
     Server {
         #[command(subcommand)]
         command: ServerCommand,
@@ -2197,7 +2197,7 @@ pub enum ServerCommand {
     Context(ServerContextArgs),
     /// Report implemented server operations for an existing game space.
     Capabilities(ServerContextArgs),
-    /// Inspect and edit saved server drafts without installing or launching a server.
+    /// Manage saved server instances, review launches and control their lifecycle.
     Instance {
         #[command(flatten)]
         context: ServerContextArgs,

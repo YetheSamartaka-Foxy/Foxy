@@ -150,12 +150,14 @@ impl Foxy {
 
                         ui.scope(|ui| {
                             ui.set_max_width(heading_max_width);
+                            let space_header_fill = self.color_primary_accent();
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(
                                         Self::repository_space_display_name(&space),
                                     )
-                                    .text_style(TextStyle::Heading),
+                                    .text_style(TextStyle::Heading)
+                                    .color(self.color_text_on(space_header_fill)),
                                 )
                                 .truncate(),
                             );

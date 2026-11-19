@@ -17,9 +17,7 @@ impl Foxy {
         addr_changed: &mut bool,
     ) {
         let original_instance = Self::repo_instance_key(&repo.address, &repo.path);
-        ui.horizontal(|ui| {
-            ui.label(tr("Name"));
-        });
+        let name_label_id = ui.horizontal(|ui| ui.label(tr("Name")).id).inner;
         ui.horizontal(|ui| {
             let w = ui.available_width() - 2.0 * pad_f32;
             if ui
@@ -28,6 +26,7 @@ impl Foxy {
                         .desired_width(w)
                         .char_limit(100),
                 )
+                .labelled_by(name_label_id)
                 .changed()
             {
                 *changed = true;
@@ -35,17 +34,17 @@ impl Foxy {
         });
         ui.separator();
 
-        ui.horizontal(|ui| {
-            ui.label(tr("Address"));
-        });
+        let address_label_id = ui.horizontal(|ui| ui.label(tr("Address")).id).inner;
         ui.horizontal(|ui| {
             let w = ui.available_width() - 2.0 * pad_f32;
-            let r = ui.add_enabled(
-                !identity_locked,
-                TextEdit::singleline(&mut repo.address)
-                    .desired_width(w)
-                    .char_limit(500),
-            );
+            let r = ui
+                .add_enabled(
+                    !identity_locked,
+                    TextEdit::singleline(&mut repo.address)
+                        .desired_width(w)
+                        .char_limit(500),
+                )
+                .labelled_by(address_label_id);
             if r.changed() {
                 *changed = true;
                 *addr_changed = true;
@@ -59,9 +58,7 @@ impl Foxy {
         ));
         ui.separator();
 
-        ui.horizontal(|ui| {
-            ui.label(tr("Local Path"));
-        });
+        let local_path_label_id = ui.horizontal(|ui| ui.label(tr("Local Path")).id).inner;
         if let Some((space_name, shared_path)) = inherited_space
             && (repo.path.trim().is_empty() || repo.path == *shared_path)
         {
@@ -76,10 +73,12 @@ impl Foxy {
         ui.horizontal(|ui| {
             let default_button_width = if inherited_space.is_some() { 80.0 } else { 0.0 };
             let w = ui.available_width() - 120.0 - default_button_width;
-            let r = ui.add_enabled(
-                !identity_locked,
-                TextEdit::singleline(&mut repo.path).desired_width(w.max(100.0)),
-            );
+            let r = ui
+                .add_enabled(
+                    !identity_locked,
+                    TextEdit::singleline(&mut repo.path).desired_width(w.max(100.0)),
+                )
+                .labelled_by(local_path_label_id);
             if r.changed() {
                 *changed = true;
             }

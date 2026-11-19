@@ -113,8 +113,10 @@ impl Foxy {
         match rx.try_recv() {
             Ok(report) => {
                 self.pending_low_space_notice = report.low_space;
-                if !self
-                    .previewing_debug_modal(crate::ui::app::debug_modals::DebugModal::StorageCheck)
+                if self.client_db_admission.allows()
+                    && !self.previewing_debug_modal(
+                        crate::ui::app::debug_modals::DebugModal::StorageCheck,
+                    )
                 {
                     self.storage_compat_notice =
                         self.build_storage_compat_notice(report.storage_issues);

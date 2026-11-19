@@ -1,5 +1,8 @@
 #![cfg(all(target_arch = "x86_64", any(windows, target_os = "linux")))]
 
+#[path = "server_service_native/load.rs"]
+mod load;
+
 use serde_json::Value;
 use std::fs::File;
 use std::io::{self, Read};
@@ -515,6 +518,13 @@ fn native_exported_foreground_service_owns_and_drains_native_server() -> io::Res
         ));
     }
     assert_update_blocked(&config, &space, true)?;
+    let load_report = if std::env::var("FOXY_SERVICE_LOAD_ACCEPTANCE").as_deref() == Ok("1") {
+        Some(load::poll_owner_and_monitor(
+            &config, &space, &instance, &owner, &run, &ready,
+        )?)
+    } else {
+        None
+    };
 
     #[cfg(target_os = "linux")]
     if manager_unit.is_none() {
@@ -643,6 +653,7 @@ fn native_exported_foreground_service_owns_and_drains_native_server() -> io::Res
             "start_plan": start_plan,
             "start": started,
             "ready": ready,
+            "owner_monitor_load": load_report,
             "rcon_test": rcon_test,
             "stop_result": stop_result,
             "owner_exit": owner_exit,

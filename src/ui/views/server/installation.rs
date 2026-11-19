@@ -33,8 +33,16 @@ impl Foxy {
         ui.add_enabled_ui(!dirty, |ui| {
             if capabilities.installation_adoption {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(tr("Dedicated installation directory"));
-                    if ui.add(egui::TextEdit::singleline(&mut self.server_view.installation_directory).id(field_scope.with("installation-directory")).desired_width(350.0)).changed() {
+                    let dir_label = ui.label(tr("Dedicated installation directory"));
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.server_view.installation_directory)
+                                .id(field_scope.with("installation-directory"))
+                                .desired_width(350.0),
+                        )
+                        .labelled_by(dir_label.id)
+                        .changed()
+                    {
                         self.server_view.inspection = None;
                         self.server_view.inspection_build = None;
                     }
@@ -70,8 +78,8 @@ impl Foxy {
                 }
                 let installations = self.server_view.catalog.as_ref().map(|catalog| catalog.installations.clone()).unwrap_or_default();
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(tr("Recorded installation"));
-                    egui::ComboBox::from_id_salt(field_scope.with("installation-choice"))
+                    let choice_label = ui.label(tr("Recorded installation"));
+                    let combo = egui::ComboBox::from_id_salt(field_scope.with("installation-choice"))
                         .selected_text(installations.iter().find(|item| Some(&item.id) == self.server_view.installation_choice.as_ref()).map(|item| item.directory.file_name().unwrap_or_default().to_string_lossy().into_owned()).unwrap_or_else(|| tr("No installation")))
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.server_view.installation_choice, None, tr("No installation"));
@@ -79,6 +87,7 @@ impl Foxy {
                                 ui.selectable_value(&mut self.server_view.installation_choice, Some(installation.id.clone()), installation.directory.display().to_string()).on_hover_text(installation.id.as_str());
                             }
                         });
+                    combo.response.labelled_by(choice_label.id);
                     if ui.add_enabled(binding != self.server_view.installation_choice, egui::Button::new(tr("Apply installation binding"))).clicked() {
                         action = Some(ServerTaskAction::Catalog(Some(DraftChange::Bind { id: id.clone(), expected_revision, installation_id: self.server_view.installation_choice.clone() })));
                     }

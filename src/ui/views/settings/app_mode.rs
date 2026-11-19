@@ -77,7 +77,7 @@ impl Foxy {
         }
         self.render_owner_status(ui);
         ui.label(tr(
-            "Server mode is a preview. Switching modes does not install or start a dedicated server.",
+            "Switching to Server mode opens the dedicated-server workspace and starts or attaches to a foreground owner; it does not install or launch a server automatically.",
         ));
     }
 }

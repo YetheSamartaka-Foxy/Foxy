@@ -2845,6 +2845,7 @@ impl Foxy {
         value["consumer_recovery_confirmation"] =
             json!(self.server_view.consumer_recovery_confirmation);
         value["lifecycle_status"] = json!(self.server_view.lifecycle_status);
+        value["workspace_page"] = json!(self.server_view.page.label());
         value["arma_admin"] = json!({
             "action": format!("{:?}", self.server_view.arma_admin.action),
             "confirmation": self.server_view.arma_admin.confirmation.as_ref().map(|review| json!({
@@ -3971,6 +3972,14 @@ impl Foxy {
         }
         if normalized_target.starts_with("server-") {
             self.current_view = FoxyView::ServerInstances;
+            use crate::ui::app::server::ServerPage;
+            self.server_view.page = match normalized_target {
+                "server-new-name" => ServerPage::Add,
+                "server-hostname" | "server-scenario" => ServerPage::Setup,
+                "server-installation-directory" | "server-native-install-directory" => ServerPage::Installation,
+                "server-mission-import-path" => ServerPage::Content,
+                _ => self.server_view.page,
+            };
         }
     }
 

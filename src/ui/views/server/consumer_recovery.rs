@@ -146,14 +146,7 @@ impl Foxy {
                 ui.horizontal(|ui| {
                     let apply =
                         ui.add_enabled(can_apply, egui::Button::new(tr("Apply reviewed cleanup")));
-                    if apply.has_focus() {
-                        ui.painter().rect_stroke(
-                            apply.rect,
-                            2.0,
-                            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
+                    Self::focus_outline(ui, &apply);
                     if apply.clicked() {
                         let fingerprint = plan.fingerprint.clone();
                         self.server_view.consumer_recovery_confirmation = false;
@@ -169,15 +162,10 @@ impl Foxy {
                         cancel.scroll_to_me(Some(egui::Align::Center));
                         self.server_view.pending_focus = None;
                     }
-                    if cancel.has_focus() {
-                        ui.painter().rect_stroke(
-                            cancel.rect,
-                            2.0,
-                            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                    if cancel.clicked() {
+                    Self::focus_outline(ui, &cancel);
+                    if cancel.clicked()
+                        || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                    {
                         self.server_view.consumer_recovery_confirmation = false;
                     }
                 });

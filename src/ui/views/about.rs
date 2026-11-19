@@ -146,6 +146,10 @@ fn markdown_job(
 
 impl Foxy {
     pub fn render_about_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render_about_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_about_contents(&mut self, ui: &mut Ui) {
         let fonts = self.settings_view_state.font_sizes.about_view.clone();
         let about_margin = Margin {
             left: 15,
@@ -161,11 +165,14 @@ impl Foxy {
                     ui.heading(self.t("About"));
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let close_button = ui.add_sized(
-                            Vec2::new(30.0, 30.0),
-                            Button::new(RichText::new("X").color(self.color_text_normal()))
-                                .fill(self.color_main_bg()),
-                        );
+                        let close_fill = self.color_main_bg();
+                        let close_button = ui
+                            .add_sized(
+                                Vec2::new(30.0, 30.0),
+                                Button::new(RichText::new("X").color(self.color_text_on(close_fill)))
+                                    .fill(close_fill),
+                            )
+                            .accessible_name(self.t("Close"));
                         if close_button.hovered() {
                             ui.ctx()
                                 .output_mut(|o| o.cursor_icon = CursorIcon::PointingHand);
@@ -226,9 +233,10 @@ impl Foxy {
                 let tab_button = ui.add(
                     Button::new(
                         RichText::new(self.t(tab.as_str()))
-                            .color(self.color_text_normal())
+                            .color(self.color_text_on(color))
                             .size(fonts.body as f32),
                     )
+                    .selected(is_selected)
                     .fill(color),
                 );
 

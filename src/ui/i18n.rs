@@ -942,11 +942,9 @@ pub struct I18n {
 
 impl I18n {
     pub fn new(language: impl AsRef<str>) -> Self {
-        let mut i18n = Self {
-            language: "en".to_string(),
-        };
-        i18n.set_language(language.as_ref());
-        i18n
+        Self {
+            language: normalize_language(language.as_ref()),
+        }
     }
 
     pub fn set_language(&mut self, language: &str) {

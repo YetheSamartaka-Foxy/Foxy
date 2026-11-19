@@ -14,6 +14,10 @@ impl Foxy {
         ui: &mut Ui,
         _frame: &mut eframe::Frame,
     ) {
+        self.render_repository_space_settings_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_repository_space_settings_contents(&mut self, ui: &mut Ui) {
         if self.repository_space_settings_state.is_none() {
             if let Some(space_id) = self.selected_repository_space_id.clone() {
                 self.open_repository_space_settings(&space_id);
@@ -70,15 +74,18 @@ impl Foxy {
                         );
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let close_button = ui.add_sized(
-                                Self::modal_icon_button_size(close_icon_size),
-                                Button::new(
-                                    RichText::new("X")
-                                        .color(self.color_text_normal())
-                                        .size(close_icon_size),
+                            let close_button = ui
+                                .add_sized(
+                                    Self::modal_icon_button_size(close_icon_size),
+                                    Button::new(
+                                        RichText::new("X")
+                                            .color(self.color_text_normal())
+                                            .size(close_icon_size),
+                                    )
+                                    .fill(self.color_main_bg()),
                                 )
-                                .fill(self.color_main_bg()),
-                            );
+                                .accessible_name(self.t("Close"));
+                            Self::focus_outline(ui, &close_button);
                             if close_button.hovered() {
                                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                             }
@@ -105,34 +112,40 @@ impl Foxy {
                         .corner_radius(egui::CornerRadius::same(10))
                         .inner_margin(Margin::same(15))
                         .show(ui, |ui| {
-                            ui.label(self.t("Address"));
-                            let address_input = ui.add(
-                                TextEdit::singleline(&mut settings.source_address_buffer)
-                                    .desired_width(ui.available_width())
-                                    .char_limit(500),
-                            );
+                            let address_label = ui.label(self.t("Address"));
+                            let address_input = ui
+                                .add(
+                                    TextEdit::singleline(&mut settings.source_address_buffer)
+                                        .desired_width(ui.available_width())
+                                        .char_limit(500),
+                                )
+                                .labelled_by(address_label.id);
                             if address_input.hovered() {
                                 ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Text);
                             }
 
                             ui.add_space(8.0);
-                            ui.label(self.t("Local name"));
-                            let name_input = ui.add(
-                                TextEdit::singleline(&mut settings.local_name_buffer)
-                                    .desired_width(ui.available_width())
-                                    .char_limit(100),
-                            );
+                            let name_label = ui.label(self.t("Local name"));
+                            let name_input = ui
+                                .add(
+                                    TextEdit::singleline(&mut settings.local_name_buffer)
+                                        .desired_width(ui.available_width())
+                                        .char_limit(100),
+                                )
+                                .labelled_by(name_label.id);
                             if name_input.hovered() {
                                 ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Text);
                             }
 
                             ui.add_space(8.0);
-                            ui.label(self.t("Shared path"));
+                            let path_label = ui.label(self.t("Shared path"));
                             ui.horizontal(|ui| {
-                                let path_input = ui.add(
-                                    TextEdit::singleline(&mut settings.shared_path_buffer)
-                                        .desired_width((ui.available_width() - 110.0).max(120.0)),
-                                );
+                                let path_input = ui
+                                    .add(
+                                        TextEdit::singleline(&mut settings.shared_path_buffer)
+                                            .desired_width((ui.available_width() - 110.0).max(120.0)),
+                                    )
+                                    .labelled_by(path_label.id);
                                 if path_input.hovered() {
                                     ui.ctx().output_mut(|o| o.cursor_icon = CursorIcon::Text);
                                 }

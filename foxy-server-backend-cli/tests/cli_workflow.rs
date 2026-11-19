@@ -481,3 +481,45 @@ fn custom_game_refuses_mod_line_files() {
         result["error"]
     );
 }
+
+#[test]
+fn example_backend_configs_and_manifests_parse() {
+    use foxy_server_backend_cli::types::{RepoConfig, RepoGame};
+    let _space: foxy_server_backend_cli::space::SpaceConfig = serde_json::from_str(include_str!(
+        "../../examples/json/server_backend/space.json"
+    ))
+    .expect("parse space.json");
+    let reforger: RepoConfig = serde_json::from_str(include_str!(
+        "../../examples/json/server_backend/reforger_config.json"
+    ))
+    .expect("parse reforger_config.json");
+    assert_eq!(reforger.game, RepoGame::Reforger);
+    let generic: RepoConfig = serde_json::from_str(include_str!(
+        "../../examples/json/server_backend/generic_config.json"
+    ))
+    .expect("parse generic_config.json");
+    assert_eq!(generic.game, RepoGame::Generic);
+
+    let generated = foxy_server_backend_cli::reforger_addon_fragment(&[
+        foxy_server_backend_cli::ReforgerModReference {
+            id: "ABCDEF1234567890".into(),
+            name: Some("MyReforgerMod".into()),
+            version: None,
+            required: None,
+        },
+    ])
+    .unwrap();
+    let expected: Value = serde_json::from_str(include_str!(
+        "../../examples/json/server_backend/reforger_server_mods.json"
+    ))
+    .expect("parse reforger_server_mods.json");
+    let actual: Value = serde_json::from_slice(&generated).unwrap();
+    assert_eq!(actual, expected);
+
+    let repo: Value = serde_json::from_str(include_str!(
+        "../../examples/json/remote_repositories/repo.json"
+    ))
+    .expect("parse repo.json");
+    assert!(repo["repoName"].is_string());
+    assert!(repo["requiredMods"].is_array());
+}

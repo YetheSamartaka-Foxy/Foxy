@@ -65,7 +65,7 @@ Name: "deleteuserdata"; Description: "Delete all existing Foxy user data (settin
 Source: "{#SourceDir}\Foxy.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\foxy.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; Required by the Workshop helper's delayed Steamworks import.
-Source: "{#SourceDir}\steam_api64.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SourceDir}\steam_api64.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Foxy"; Filename: "{app}\Foxy.exe"; IconFilename: "{app}\foxy.ico"; Tasks: startmenu; Comment: "Foxy - Arma 3 mod updater"
@@ -81,9 +81,6 @@ Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags
 ; ShellExecute honors a user-set elevation flag and prompts for consent.
 Filename: "{app}\Foxy.exe"; Description: "Launch Foxy"; Flags: nowait postinstall skipifsilent shellexec
 Filename: "{app}\Foxy.exe"; Flags: nowait skipifnotsilent shellexec
-
-[UninstallDelete]
-Type: filesandordirs; Name: "{app}"
 
 [Code]
 const

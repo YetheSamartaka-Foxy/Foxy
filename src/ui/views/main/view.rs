@@ -85,6 +85,10 @@ impl Foxy {
     }
 
     pub fn render_main_view(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.render_main_contents(ui);
+    }
+
+    pub(in crate::ui::views) fn render_main_contents(&mut self, ui: &mut Ui) {
         let mut top_bar_frame = egui::containers::Frame::side_top_panel(&ui.ctx().global_style());
         top_bar_frame.fill = self.color_primary_accent();
         top_bar_frame.inner_margin = Margin {
@@ -121,7 +125,7 @@ impl Foxy {
                 let top_bar_resp = ui.interact(
                     drag_area,
                     Id::unique("top_bar_drag_area"),
-                    Sense::click_and_drag(),
+                    Sense::CLICK | Sense::DRAG,
                 );
                 if use_custom_window_chrome && !is_minimized && top_bar_resp.double_clicked() {
                     info!("Toggling window maximized state from top bar double click");
@@ -162,11 +166,14 @@ impl Foxy {
                     let version_button_width =
                         (version_text.chars().count() as f32 * (footer_text_size * 0.75)).max(44.0)
                             + 8.0;
-                    let version_button = ui.add_sized(
-                        Vec2::new(version_button_width, footer_icon_button_size.y),
-                        Button::new(RichText::new(version_text).size(footer_text_size))
-                            .frame(false),
-                    );
+                    let version_button = ui
+                        .add_sized(
+                            Vec2::new(version_button_width, footer_icon_button_size.y),
+                            Button::new(RichText::new(version_text).size(footer_text_size))
+                                .frame(false),
+                        )
+                        .accessible_name(self.t("Open changelog"));
+                    Self::focus_outline(ui, &version_button);
                     if version_button.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
@@ -183,14 +190,15 @@ impl Foxy {
                         crate::core::tasks::app_update::UpdateCheckStatus::Available(_)
                     ) {
                         ui.add_space(4.0);
+                        let update_fill = self.color_action_destructive();
                         let update_btn = ui.add(
                             Button::new(
                                 RichText::new(format!("\u{2B06} {}", self.t("Update")))
                                     .size(footer_text_size)
                                     .strong()
-                                    .color(crate::ui::palette::ON_STRONG_FILL),
+                                    .color(self.color_text_on(update_fill)),
                             )
-                            .fill(self.color_action_destructive())
+                            .fill(update_fill)
                             .stroke(egui::Stroke::new(1.0, self.color_error()))
                             .corner_radius(egui::CornerRadius::same(6))
                             .min_size(Vec2::new(0.0, footer_icon_button_size.y - 4.0)),
@@ -210,10 +218,14 @@ impl Foxy {
 
                     ui.separator();
 
-                    let about_button = ui.add_sized(
-                        footer_icon_button_size,
-                        Button::new(RichText::new("\u{2139}").size(footer_icon_size)).frame(false),
-                    );
+                    let about_button = ui
+                        .add_sized(
+                            footer_icon_button_size,
+                            Button::new(RichText::new("\u{2139}").size(footer_icon_size))
+                                .frame(false),
+                        )
+                        .accessible_name(self.t("Open about"));
+                    Self::focus_outline(ui, &about_button);
                     if about_button.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
@@ -224,10 +236,14 @@ impl Foxy {
 
                     ui.separator();
 
-                    let help_button = ui.add_sized(
-                        footer_icon_button_size,
-                        Button::new(RichText::new("\u{1F4D6}").size(footer_icon_size)).frame(false),
-                    );
+                    let help_button = ui
+                        .add_sized(
+                            footer_icon_button_size,
+                            Button::new(RichText::new("\u{1F4D6}").size(footer_icon_size))
+                                .frame(false),
+                        )
+                        .accessible_name(self.t("Open help"));
+                    Self::focus_outline(ui, &help_button);
                     if help_button.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
@@ -270,19 +286,22 @@ impl Foxy {
                             ui.separator();
                         }
 
-                        let toggle_log_button = ui.add_sized(
-                            toggle_button_size,
-                            Button::new(
-                                RichText::new("\u{1F4DD}").size(
-                                    self.settings_view_state
-                                        .font_sizes
-                                        .main_view
-                                        .activity_log_toggle_icon
-                                        as f32,
-                                ),
+                        let toggle_log_button = ui
+                            .add_sized(
+                                toggle_button_size,
+                                Button::new(
+                                    RichText::new("\u{1F4DD}").size(
+                                        self.settings_view_state
+                                            .font_sizes
+                                            .main_view
+                                            .activity_log_toggle_icon
+                                            as f32,
+                                    ),
+                                )
+                                .frame(false),
                             )
-                            .frame(false),
-                        );
+                            .accessible_name(self.t("Show activity log"));
+                        Self::focus_outline(ui, &toggle_log_button);
                         if toggle_log_button.hovered() {
                             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                         }
@@ -318,19 +337,22 @@ impl Foxy {
                         if self.settings_view_state.show_memory_diagnostics_icon {
                             ui.separator();
 
-                            let toggle_memory_button = ui.add_sized(
-                                toggle_button_size,
-                                Button::new(
-                                    RichText::new("\u{2665}").size(
-                                        self.settings_view_state
-                                            .font_sizes
-                                            .main_view
-                                            .activity_log_toggle_icon
-                                            as f32,
-                                    ),
+                            let toggle_memory_button = ui
+                                .add_sized(
+                                    toggle_button_size,
+                                    Button::new(
+                                        RichText::new("\u{2665}").size(
+                                            self.settings_view_state
+                                                .font_sizes
+                                                .main_view
+                                                .activity_log_toggle_icon
+                                                as f32,
+                                        ),
+                                    )
+                                    .frame(false),
                                 )
-                                .frame(false),
-                            );
+                                .accessible_name(self.t("Open memory diagnostics"));
+                            Self::focus_outline(ui, &toggle_memory_button);
                             if toggle_memory_button.hovered() {
                                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                             }

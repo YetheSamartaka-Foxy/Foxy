@@ -181,32 +181,7 @@ pub fn run_from_env() -> CliExecution {
     if !cli.wipe_db
         && matches!(
             cli.command.as_ref(),
-            Some(
-                CliCommand::Version
-                    | CliCommand::Server {
-                        command: args::ServerCommand::Owner(_)
-                            | args::ServerCommand::Supervise(_)
-                            | args::ServerCommand::Service { .. }
-                            | args::ServerCommand::Publish { .. }
-                            | args::ServerCommand::Context(_)
-                            | args::ServerCommand::Capabilities(_)
-                            | args::ServerCommand::Instance { .. }
-                            | args::ServerCommand::Installation { .. }
-                            | args::ServerCommand::Configuration { .. }
-                            | args::ServerCommand::Content { .. }
-                            | args::ServerCommand::Mission { .. }
-                            | args::ServerCommand::Keys { .. }
-                            | args::ServerCommand::Deploy { .. }
-                            | args::ServerCommand::Steam { .. }
-                            | args::ServerCommand::Workshop { .. }
-                            | args::ServerCommand::Headless { .. }
-                            | args::ServerCommand::Maintenance { .. }
-                            | args::ServerCommand::Rcon { .. }
-                            | args::ServerCommand::Admin { .. }
-                            | args::ServerCommand::ReforgerAdmin { .. }
-                            | args::ServerCommand::ReforgerAddons { .. }
-                    }
-            )
+            Some(CliCommand::Version | CliCommand::Server { .. })
         )
     {
         let streamed = server_monitor_stream(&cli);
@@ -226,38 +201,12 @@ pub fn run_from_env() -> CliExecution {
         }
     }
 
-    if cli.wipe_db
-        && matches!(
-            cli.command.as_ref(),
-            Some(CliCommand::Server {
-                command: args::ServerCommand::Owner(_)
-                    | args::ServerCommand::Supervise(_)
-                    | args::ServerCommand::Service { .. }
-                    | args::ServerCommand::Publish { .. }
-                    | args::ServerCommand::Context(_)
-                    | args::ServerCommand::Capabilities(_)
-                    | args::ServerCommand::Instance { .. }
-                    | args::ServerCommand::Installation { .. }
-                    | args::ServerCommand::Configuration { .. }
-                    | args::ServerCommand::Content { .. }
-                    | args::ServerCommand::Mission { .. }
-                    | args::ServerCommand::Keys { .. }
-                    | args::ServerCommand::Deploy { .. }
-                    | args::ServerCommand::Steam { .. }
-                    | args::ServerCommand::Workshop { .. }
-                    | args::ServerCommand::Headless { .. }
-                    | args::ServerCommand::Maintenance { .. }
-                    | args::ServerCommand::Rcon { .. }
-                    | args::ServerCommand::Admin { .. }
-                    | args::ServerCommand::ReforgerAdmin { .. },
-            })
-        )
-    {
+    if cli.wipe_db && matches!(cli.command.as_ref(), Some(CliCommand::Server { .. })) {
         emit_error(
             &output,
             CommandError {
                 action: "server".to_string(),
-                message: "Server draft commands cannot be combined with --wipe-db".to_string(),
+                message: "Server commands cannot be combined with --wipe-db".to_string(),
                 code: exit_codes::VALIDATION_ERROR,
             },
         );
@@ -887,6 +836,35 @@ mod tests {
     fn env_flag_enabled_rejects_falsey_or_unknown_values() {
         for value in ["", "0", "false", "off", "maybe"] {
             assert!(!env_flag_enabled(value));
+        }
+    }
+
+    #[test]
+    fn all_server_subcommands_avoid_db_use() {
+        let samples = [
+            vec!["foxy", "server", "context"],
+            vec!["foxy", "server", "capabilities"],
+            vec!["foxy", "server", "backup", "list", "srv_a"],
+            vec!["foxy", "server", "restore", "status", "srv_a"],
+            vec!["foxy", "server", "session", "list", "srv_a"],
+            vec!["foxy", "server", "reforger-addons", "list", "srv_a"],
+            vec![
+                "foxy",
+                "server",
+                "inspect-addons",
+                "--address",
+                "127.0.0.1",
+                "--port",
+                "2302",
+            ],
+            vec!["foxy", "server", "service", "export"],
+        ];
+        for argv in samples {
+            let cli = CliArgs::try_parse_from(&argv).unwrap();
+            assert!(
+                !command_uses_database(cli.command.as_ref(), false),
+                "{argv:?}"
+            );
         }
     }
 }

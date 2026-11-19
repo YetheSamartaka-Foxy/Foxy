@@ -175,7 +175,8 @@ impl Foxy {
                 TextEdit::singleline(&mut self.benchmarks_view.search)
                     .hint_text(tr("Search benchmarks"))
                     .desired_width(220.0),
-            );
+            )
+            .accessible_name(tr("Search benchmarks"));
             egui::ComboBox::from_id_salt("benchmarks_sort")
                 .width(140.0)
                 .selected_text(tr(self.benchmarks_view.sort.label()))
@@ -183,7 +184,9 @@ impl Foxy {
                     for sort in BenchmarkSort::ALL {
                         ui.selectable_value(&mut self.benchmarks_view.sort, sort, tr(sort.label()));
                     }
-                });
+                })
+                .response
+                .accessible_name(tr("Sort benchmarks"));
             let kind_text = self
                 .benchmarks_view
                 .kind_filter
@@ -204,7 +207,9 @@ impl Foxy {
                             tr(kind.label()),
                         );
                     }
-                });
+                })
+                .response
+                .accessible_name(tr("Filter by action"));
         });
         ui.horizontal_wrapped(|ui| {
             let repositories = self.benchmarks_view.repositories();
@@ -230,7 +235,9 @@ impl Foxy {
                             name,
                         );
                     }
-                });
+                })
+                .response
+                .accessible_name(tr("Filter by repository"));
             let outcome_text = match self.benchmarks_view.outcome_filter {
                 BenchmarkOutcomeFilter::All => tr("All outcomes"),
                 BenchmarkOutcomeFilter::Success => tr("Success"),
@@ -255,7 +262,9 @@ impl Foxy {
                         BenchmarkOutcomeFilter::Failed,
                         tr("Failed"),
                     );
-                });
+                })
+                .response
+                .accessible_name(tr("Filter by outcome"));
             Self::ui_state_checkbox(
                 ui,
                 &mut self.benchmarks_view.favourites_only,
@@ -313,11 +322,12 @@ impl Foxy {
                     )
                     .on_hover_text(name);
                 });
-                if ui
+                let clear_btn = ui
                     .add(Button::new(RichText::new("\u{00D7}").size(scale.body)).frame(false))
-                    .on_hover_text(tr("Clear selection"))
-                    .clicked()
-                {
+                    .accessible_name(tr("Clear selection"))
+                    .on_hover_text(tr("Clear selection"));
+                Self::focus_outline(ui, &clear_btn);
+                if clear_btn.clicked() {
                     self.benchmarks_view.toggle_selected(id);
                 }
             }
@@ -384,6 +394,10 @@ impl Foxy {
                 ui.make_persistent_id(("benchmark_row_header", id)),
                 Sense::click(),
             );
+            header.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, record.name.as_str())
+            });
+            Self::focus_outline(ui, &header);
             if self.benchmarks_view.focus_request.as_deref() == Some(id) {
                 header.request_focus();
                 self.benchmarks_view.focus_request = None;
@@ -577,11 +591,12 @@ impl Foxy {
             }
             return action;
         }
-        if ui
+        let remove_btn = ui
             .add(icon_button(RichText::new("\u{1F5D1}")))
-            .on_hover_text(self.t("Remove benchmark"))
-            .clicked()
-        {
+            .accessible_name(self.t("Remove benchmark"))
+            .on_hover_text(self.t("Remove benchmark"));
+        Self::focus_outline(ui, &remove_btn);
+        if remove_btn.clicked() {
             action = Some(RowAction::Remove);
         }
         if ui
@@ -600,11 +615,12 @@ impl Foxy {
         } else {
             ("\u{1F6AB}", self.t("Hide benchmark"))
         };
-        if ui
+        let hide_btn = ui
             .add(icon_button(RichText::new(hide_icon)))
-            .on_hover_text(hide_hover)
-            .clicked()
-        {
+            .accessible_name(hide_hover.clone())
+            .on_hover_text(hide_hover);
+        Self::focus_outline(ui, &hide_btn);
+        if hide_btn.clicked() {
             action = Some(RowAction::ToggleHidden);
         }
         let star = if record.favourite {
@@ -612,11 +628,17 @@ impl Foxy {
         } else {
             RichText::new("\u{2606}")
         };
-        if ui
+        let fav_label = self.t(if record.favourite {
+            "Unfavourite"
+        } else {
+            "Favourite"
+        });
+        let fav_btn = ui
             .add(icon_button(star))
-            .on_hover_text(self.t("Favourite"))
-            .clicked()
-        {
+            .accessible_name(fav_label)
+            .on_hover_text(self.t("Favourite"));
+        Self::focus_outline(ui, &fav_btn);
+        if fav_btn.clicked() {
             action = Some(RowAction::ToggleFavourite);
         }
         ui.add_space(6.0);

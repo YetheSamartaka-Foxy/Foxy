@@ -166,16 +166,16 @@ pub fn builtin_presets() -> Vec<ThemePreset> {
                 card_bg: rgb(58, 58, 58),
                 server_offline_bg: rgb(47, 47, 47),
                 text_normal: rgb(245, 245, 245),
-                text_gray: rgb(190, 190, 190),
-                text_dim: rgb(155, 155, 155),
-                text_error: rgb(242, 48, 28),
-                error: rgb(242, 48, 28),
+                text_gray: rgb(196, 196, 196),
+                text_dim: rgb(172, 172, 172),
+                text_error: rgb(255, 134, 124),
+                error: rgb(255, 134, 124),
                 warn: rgb(235, 176, 70),
-                debug: rgb(100, 170, 220),
-                success: rgb(101, 166, 121),
+                debug: rgb(118, 176, 228),
+                success: rgb(124, 204, 148),
                 success_muted: rgb(40, 99, 59),
                 action_info: rgb(40, 99, 59),
-                action_destructive: rgb(242, 48, 28),
+                action_destructive: rgb(194, 44, 32),
             },
         },
         ThemePreset {
@@ -187,16 +187,16 @@ pub fn builtin_presets() -> Vec<ThemePreset> {
                 card_bg: rgb(35, 30, 31),
                 server_offline_bg: rgb(29, 25, 26),
                 text_normal: rgb(246, 244, 244),
-                text_gray: rgb(188, 176, 176),
-                text_dim: rgb(151, 139, 139),
-                text_error: rgb(242, 88, 82),
-                error: rgb(242, 88, 82),
+                text_gray: rgb(196, 184, 184),
+                text_dim: rgb(174, 162, 162),
+                text_error: rgb(255, 134, 130),
+                error: rgb(255, 134, 130),
                 warn: rgb(229, 166, 67),
-                debug: rgb(111, 151, 217),
-                success: rgb(91, 176, 99),
+                debug: rgb(124, 164, 230),
+                success: rgb(96, 184, 104),
                 success_muted: rgb(50, 126, 63),
                 action_info: rgb(170, 72, 82),
-                action_destructive: rgb(210, 70, 64),
+                action_destructive: rgb(194, 52, 48),
             },
         },
         ThemePreset {
@@ -210,14 +210,14 @@ pub fn builtin_presets() -> Vec<ThemePreset> {
                 text_normal: rgb(250, 246, 238),
                 text_gray: rgb(230, 218, 202),
                 text_dim: rgb(199, 181, 159),
-                text_error: rgb(239, 108, 84),
-                error: rgb(239, 108, 84),
+                text_error: rgb(255, 148, 128),
+                error: rgb(255, 148, 128),
                 warn: rgb(229, 171, 84),
-                debug: rgb(130, 157, 204),
-                success: rgb(116, 174, 101),
-                success_muted: rgb(75, 135, 73),
+                debug: rgb(154, 180, 226),
+                success: rgb(138, 200, 124),
+                success_muted: rgb(52, 116, 52),
                 action_info: rgb(178, 126, 82),
-                action_destructive: rgb(198, 89, 68),
+                action_destructive: rgb(184, 64, 46),
             },
         },
         ThemePreset {
@@ -230,15 +230,15 @@ pub fn builtin_presets() -> Vec<ThemePreset> {
                 server_offline_bg: rgb(33, 28, 43),
                 text_normal: rgb(244, 241, 248),
                 text_gray: rgb(199, 190, 211),
-                text_dim: rgb(162, 150, 178),
-                text_error: rgb(238, 100, 126),
-                error: rgb(238, 100, 126),
+                text_dim: rgb(174, 162, 190),
+                text_error: rgb(255, 136, 160),
+                error: rgb(255, 136, 160),
                 warn: rgb(231, 176, 79),
                 debug: rgb(132, 171, 238),
-                success: rgb(100, 184, 128),
-                success_muted: rgb(61, 136, 91),
-                action_info: rgb(130, 104, 215),
-                action_destructive: rgb(202, 81, 116),
+                success: rgb(104, 190, 132),
+                success_muted: rgb(42, 118, 74),
+                action_info: rgb(106, 80, 192),
+                action_destructive: rgb(182, 54, 90),
             },
         },
         ThemePreset {
@@ -250,13 +250,13 @@ pub fn builtin_presets() -> Vec<ThemePreset> {
                 card_bg: rgb(236, 239, 243),
                 server_offline_bg: rgb(212, 217, 224),
                 text_normal: rgb(29, 34, 41),
-                text_gray: rgb(82, 90, 101),
-                text_dim: rgb(110, 118, 130),
-                text_error: rgb(148, 43, 41),
-                error: rgb(185, 55, 51),
-                warn: rgb(151, 96, 10),
-                debug: rgb(43, 101, 170),
-                success: rgb(39, 133, 66),
+                text_gray: rgb(64, 72, 82),
+                text_dim: rgb(82, 90, 102),
+                text_error: rgb(156, 30, 30),
+                error: rgb(164, 34, 34),
+                warn: rgb(130, 74, 0),
+                debug: rgb(28, 86, 158),
+                success: rgb(22, 104, 44),
                 success_muted: rgb(29, 107, 54),
                 action_info: rgb(43, 101, 170),
                 action_destructive: rgb(185, 58, 53),
@@ -292,15 +292,15 @@ pub fn builtin_presets() -> Vec<ThemePreset> {
                 card_bg: rgb(59, 66, 82),
                 server_offline_bg: rgb(38, 43, 54),
                 text_normal: rgb(236, 239, 244),
-                text_gray: rgb(171, 178, 191),
-                text_dim: rgb(143, 150, 165),
-                text_error: rgb(191, 97, 106),
-                error: rgb(191, 97, 106),
+                text_gray: rgb(194, 202, 214),
+                text_dim: rgb(182, 190, 204),
+                text_error: rgb(255, 166, 170),
+                error: rgb(255, 166, 170),
                 warn: rgb(235, 203, 139),
-                debug: rgb(129, 161, 193),
-                success: rgb(163, 190, 140),
+                debug: rgb(162, 194, 232),
+                success: rgb(172, 202, 148),
                 success_muted: rgb(133, 160, 110),
-                action_info: rgb(94, 129, 172),
+                action_info: rgb(74, 110, 152),
                 action_destructive: rgb(191, 97, 106),
             },
         },
@@ -308,21 +308,21 @@ pub fn builtin_presets() -> Vec<ThemePreset> {
             name: "Solarized Dark",
             palette: PaletteColors {
                 primary_accent: rgb(38, 139, 210),
-                widget_bg: rgb(88, 110, 117),
+                widget_bg: rgb(18, 68, 82),
                 main_bg: rgb(0, 43, 54),
                 card_bg: rgb(7, 54, 66),
                 server_offline_bg: rgb(0, 33, 43),
                 text_normal: rgb(238, 238, 238),
                 text_gray: rgb(202, 210, 211),
-                text_dim: rgb(160, 176, 180),
-                text_error: rgb(220, 50, 47),
-                error: rgb(220, 50, 47),
-                warn: rgb(181, 137, 0),
-                debug: rgb(38, 139, 210),
-                success: rgb(133, 153, 0),
-                success_muted: rgb(100, 115, 0),
-                action_info: rgb(38, 139, 210),
-                action_destructive: rgb(220, 50, 47),
+                text_dim: rgb(168, 184, 188),
+                text_error: rgb(255, 136, 126),
+                error: rgb(255, 136, 126),
+                warn: rgb(224, 178, 36),
+                debug: rgb(114, 184, 240),
+                success: rgb(168, 192, 40),
+                success_muted: rgb(78, 112, 0),
+                action_info: rgb(28, 110, 176),
+                action_destructive: rgb(194, 46, 44),
             },
         },
     ]
@@ -407,5 +407,67 @@ mod tests {
             let parsed = Theme::from_json(&json).expect("parse preset");
             assert_eq!(parsed.palette_colors, preset.palette);
         }
+    }
+
+    #[test]
+    fn builtin_presets_meet_wcag_aa_contrast() {
+        use crate::ui::palette::{contrast_ratio, contrast_text_on};
+
+        let mut failures = Vec::new();
+        for preset in builtin_presets() {
+            let p = &preset.palette;
+            let surfaces = [
+                ("main_bg", p.main_bg.to_color32()),
+                ("card_bg", p.card_bg.to_color32()),
+                ("widget_bg", p.widget_bg.to_color32()),
+                ("server_offline_bg", p.server_offline_bg.to_color32()),
+            ];
+            let fg_tokens = [
+                ("text_normal", p.text_normal.to_color32()),
+                ("text_gray", p.text_gray.to_color32()),
+                ("text_dim", p.text_dim.to_color32()),
+                ("text_error", p.text_error.to_color32()),
+                ("error", p.error.to_color32()),
+                ("warn", p.warn.to_color32()),
+                ("debug", p.debug.to_color32()),
+                ("success", p.success.to_color32()),
+            ];
+            for (surface_name, bg) in surfaces {
+                for (fg_name, fg) in fg_tokens {
+                    let ratio = contrast_ratio(fg, bg);
+                    if ratio < 4.5 {
+                        failures.push(format!(
+                            "{}: {fg_name} {:?} on {surface_name} {:?} = {ratio:.2}:1 (< 4.5:1)",
+                            preset.name,
+                            (fg.r(), fg.g(), fg.b()),
+                            (bg.r(), bg.g(), bg.b()),
+                        ));
+                    }
+                }
+            }
+            let button_fills = [
+                ("primary_accent", p.primary_accent.to_color32()),
+                ("action_info", p.action_info.to_color32()),
+                ("action_destructive", p.action_destructive.to_color32()),
+                ("success_muted", p.success_muted.to_color32()),
+            ];
+            for (fill_name, fill) in button_fills {
+                let ink = contrast_text_on(fill);
+                let ratio = contrast_ratio(ink, fill);
+                if ratio < 4.5 {
+                    failures.push(format!(
+                        "{}: contrast ink {:?} on {fill_name} {:?} = {ratio:.2}:1 (< 4.5:1)",
+                        preset.name,
+                        (ink.r(), ink.g(), ink.b()),
+                        (fill.r(), fill.g(), fill.b()),
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "WCAG AA contrast failures:\n{}",
+            failures.join("\n")
+        );
     }
 }

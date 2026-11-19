@@ -12,6 +12,7 @@ pub const CONTENT_SOURCES_FILE: &str = "server/content-sources.json";
 const SCHEMA_VERSION: u32 = 1;
 const MAX_SOURCE_RECORDS: usize = 1024;
 const MAX_PROFILE_ADDONS: usize = 4096;
+const MAX_FOLDER_ENTRIES: usize = 65_536;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ContentSourceSnapshot {
@@ -101,6 +102,48 @@ impl std::fmt::Display for SourceError {
 }
 
 impl ContentSources {
+    pub fn addon_candidates(path: &Path) -> Result<Vec<String>, String> {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|_| "The selected content folder could not be inspected.".to_string())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("Choose an ordinary local folder without a symbolic link.".into());
+        }
+        let entries = std::fs::read_dir(path)
+            .map_err(|_| "The selected content folder could not be read.".to_string())?;
+        let mut addons = Vec::new();
+        for (index, entry) in entries.enumerate() {
+            if index >= MAX_FOLDER_ENTRIES {
+                return Err(
+                    "The selected content folder has too many entries to scan safely.".into(),
+                );
+            }
+            let entry =
+                entry.map_err(|_| "The selected content folder could not be read.".to_string())?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !is_addon_name(&name) {
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(entry.path())
+                .map_err(|_| "A content folder entry could not be inspected.".to_string())?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                if addons.len() >= MAX_PROFILE_ADDONS {
+                    return Err(
+                        "The selected content folder has too many addon directories.".into(),
+                    );
+                }
+                addons.push(name);
+            }
+        }
+        addons.sort_by(|left, right| {
+            left.to_ascii_lowercase()
+                .cmp(&right.to_ascii_lowercase())
+                .then_with(|| left.cmp(right))
+        });
+        Ok(addons)
+    }
+
     pub fn load(space_dir: &Path) -> Result<Self, String> {
         Self::read_snapshot(space_dir)
             .map(|snapshot| snapshot.sources)
@@ -232,6 +275,10 @@ impl ContentSources {
         if self.profiles.iter().any(|existing| {
             existing.remote_url == profile.remote_url
                 && same_path(&existing.local_path, &profile.local_path)
+                && !(existing.remote_url.is_empty()
+                    && profile.remote_url.is_empty()
+                    && existing.supply == AddonSupply::AlreadyPresent
+                    && profile.supply == AddonSupply::AlreadyPresent)
         }) {
             return Err(SourceError::DuplicateProfile);
         }

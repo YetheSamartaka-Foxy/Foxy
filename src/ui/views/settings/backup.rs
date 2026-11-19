@@ -193,15 +193,18 @@ impl Foxy {
 
                 ui.horizontal(|ui| {
                     ui.add_space(horizontal_padding);
-                    ui.label(tr("Keep latest backups per addon"))
+                    let retention_label = ui
+                        .label(tr("Keep latest backups per addon"))
                         .on_hover_text(tr("Keep this many most recent backups per addon. Set to 0 to keep all backups."));
                     ui.add_space(10.0);
-                    let retention_response = ui.add(
-                        egui::DragValue::new(
-                            &mut self.settings_view_state.backup_keep_latest_per_addon,
+                    let retention_response = ui
+                        .add(
+                            egui::DragValue::new(
+                                &mut self.settings_view_state.backup_keep_latest_per_addon,
+                            )
+                            .range(0..=100),
                         )
-                        .range(0..=100),
-                    );
+                        .labelled_by(retention_label.id);
                     if retention_response.changed() {
                         changed = true;
                     }
@@ -240,11 +243,13 @@ impl Foxy {
                         if *max_age_days == 0 {
                             *max_age_days = 30;
                         }
-                        let days_response = ui.add(
-                            egui::DragValue::new(max_age_days)
-                                .range(1..=3650)
-                                .suffix(format!(" {}", tr("days"))),
-                        );
+                        let days_response = ui
+                            .add(
+                                egui::DragValue::new(max_age_days)
+                                    .range(1..=3650)
+                                    .suffix(format!(" {}", tr("days"))),
+                            )
+                            .labelled_by(max_age_checkbox.id);
                         if days_response.changed() {
                             changed = true;
                         }
@@ -267,13 +272,15 @@ impl Foxy {
 
                 ui.horizontal(|ui| {
                     ui.add_space(horizontal_padding);
-                    ui.label(tr("Filter:"));
+                    let filter_label = ui.label(tr("Filter:"));
                     ui.add_space(horizontal_padding);
                     let text_edit_width = (ui.available_width() - 2.0 * horizontal_padding).max(0.0);
-                    let filter_edit = ui.add(
-                        TextEdit::singleline(&mut self.backup_manager_filter)
-                            .desired_width(text_edit_width),
-                    );
+                    let filter_edit = ui
+                        .add(
+                            TextEdit::singleline(&mut self.backup_manager_filter)
+                                .desired_width(text_edit_width),
+                        )
+                        .labelled_by(filter_label.id);
                     if filter_edit.hovered() {
                         ui.ctx()
                             .output_mut(Foxy::set_pointing_cursor_output);

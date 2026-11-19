@@ -36,11 +36,14 @@ impl Foxy {
         default_temp_path: &str,
         change_flags: &mut ApplicationPathChangeFlags,
     ) {
-        ui.horizontal(|ui| {
-            ui.add_space(horizontal_padding);
-            ui.label(tr("Steam Directory"));
-            ui.add_space(horizontal_padding);
-        });
+        let steam_label_id = ui
+            .horizontal(|ui| {
+                ui.add_space(horizontal_padding);
+                let label = ui.label(tr("Steam Directory"));
+                ui.add_space(horizontal_padding);
+                label.id
+            })
+            .inner;
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let browse_label = tr("Browse");
@@ -54,10 +57,12 @@ impl Foxy {
                 - auto_detect_button_width
                 - 2.0 * ui.spacing().item_spacing.x)
                 .max(0.0);
-            let steam_edit = ui.add(
-                TextEdit::singleline(&mut self.settings_view_state.steam_directory)
-                    .desired_width(text_edit_width),
-            );
+            let steam_edit = ui
+                .add(
+                    TextEdit::singleline(&mut self.settings_view_state.steam_directory)
+                        .desired_width(text_edit_width),
+                )
+                .labelled_by(steam_label_id);
             if steam_edit.changed() {
                 change_flags.settings = true;
                 change_flags.addons = true;
@@ -112,11 +117,14 @@ impl Foxy {
         });
         ui.separator();
 
-        ui.horizontal(|ui| {
-            ui.add_space(horizontal_padding);
-            ui.label(tr("Temporary Directory"));
-            ui.add_space(horizontal_padding);
-        });
+        let temp_label_id = ui
+            .horizontal(|ui| {
+                ui.add_space(horizontal_padding);
+                let label = ui.label(tr("Temporary Directory"));
+                ui.add_space(horizontal_padding);
+                label.id
+            })
+            .inner;
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let browse_label = tr("Browse");
@@ -126,11 +134,13 @@ impl Foxy {
                 - browse_button_width
                 - ui.spacing().item_spacing.x)
                 .max(0.0);
-            let temp_dir_edit = ui.add(
-                TextEdit::singleline(&mut self.settings_view_state.temp_directory)
-                    .hint_text(default_temp_path)
-                    .desired_width(text_edit_width),
-            );
+            let temp_dir_edit = ui
+                .add(
+                    TextEdit::singleline(&mut self.settings_view_state.temp_directory)
+                        .hint_text(default_temp_path)
+                        .desired_width(text_edit_width),
+                )
+                .labelled_by(temp_label_id);
             if temp_dir_edit.changed() {
                 change_flags.settings = true;
             }
@@ -176,11 +186,14 @@ impl Foxy {
         );
         ui.separator();
 
-        ui.horizontal(|ui| {
-            ui.add_space(horizontal_padding);
-            ui.label(tr("Addon Backup Directory"));
-            ui.add_space(horizontal_padding);
-        });
+        let backup_label_id = ui
+            .horizontal(|ui| {
+                ui.add_space(horizontal_padding);
+                let label = ui.label(tr("Addon Backup Directory"));
+                ui.add_space(horizontal_padding);
+                label.id
+            })
+            .inner;
         ui.horizontal(|ui| {
             ui.add_space(horizontal_padding);
             let browse_label = tr("Browse");
@@ -190,11 +203,13 @@ impl Foxy {
                 - browse_button_width
                 - ui.spacing().item_spacing.x)
                 .max(0.0);
-            let backup_dir_edit = ui.add(
-                TextEdit::singleline(&mut self.settings_view_state.backup_directory)
-                    .hint_text(default_backup_path)
-                    .desired_width(text_edit_width),
-            );
+            let backup_dir_edit = ui
+                .add(
+                    TextEdit::singleline(&mut self.settings_view_state.backup_directory)
+                        .hint_text(default_backup_path)
+                        .desired_width(text_edit_width),
+                )
+                .labelled_by(backup_label_id);
             if backup_dir_edit.changed() {
                 self.invalidate_backup_manager_inventory();
                 change_flags.settings = true;

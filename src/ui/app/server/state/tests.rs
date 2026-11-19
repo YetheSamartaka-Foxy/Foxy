@@ -400,6 +400,44 @@ fn a_prior_visit_result_cannot_replace_the_newer_editor() {
 }
 
 #[test]
+fn add_server_opens_setup_only_after_a_current_catalog_save() {
+    use crate::ui::app::server::ServerPage;
+
+    let instance = ServerInstance::draft("alpha", ServerDefinitionKind::Arma3, "MainServer")
+        .expect("valid server draft");
+    let current = scope("new-draft");
+    let result = |scope, saved| ServerTaskResult {
+        scope,
+        output: ServerTaskOutput::Catalog {
+            catalog: ServerCatalog {
+                schema_version: 1,
+                game_space_id: "alpha".into(),
+                game_id: "arma3".into(),
+                revision: 1,
+                installations: vec![],
+                instances: vec![instance.clone()],
+            },
+            selected: Some(instance.id.clone()),
+            saved,
+            migration_pending: false,
+        },
+    };
+    let mut state = ServerViewState {
+        page: ServerPage::Add,
+        new_name: instance.display_name.clone(),
+        ..Default::default()
+    };
+    assert!(!state.finish(&current, Ok(result(scope("prior-draft"), true))));
+    assert!(state.finish(&current, Ok(result(current.clone(), false))));
+    assert_eq!(state.page, ServerPage::Add);
+    assert_eq!(state.new_name, instance.display_name);
+    assert!(state.finish(&current, Ok(result(current.clone(), true))));
+    assert_eq!(state.page, ServerPage::Setup);
+    assert_eq!(state.selected, Some(instance.id));
+    assert!(state.new_name.is_empty());
+}
+
+#[test]
 fn read_only_results_retain_entered_fields_and_the_loaded_catalog() {
     let instance =
         ServerInstance::draft("alpha", ServerDefinitionKind::Arma3, "MainServer").unwrap();
@@ -512,25 +550,38 @@ fn selecting_another_instance_clears_loaded_sources_bindings_and_preview() {
 }
 
 #[test]
-fn refreshing_sources_discards_old_bindings_and_preview() {
+fn refreshing_sources_preserves_bindings_and_marks_source_drift_stale() {
     let instance =
         ServerInstance::draft("alpha", ServerDefinitionKind::Arma3, "MainServer").unwrap();
+    let binding = ServerAddonBinding {
+        source_id: "RepoAlpha".into(),
+        role: crate::core::server::ServerAddonRole::Required,
+        order: 0,
+    };
+    let saved_fingerprint = "binding-fingerprint".to_string();
     let mut state = ServerViewState {
         editor: Some(ServerEditor::new(instance.clone())),
-        content_plan: Some(content_plan(instance.id)),
+        content_plan: Some(content_plan(instance.id.clone())),
         saved_content_bindings: Some(ContentBindingsSnapshot {
-            document: None,
-            fingerprint: None,
-            review_current: false,
+            document: Some(crate::core::server::ContentBindingsDocument {
+                schema_version: 1,
+                game_space_id: "alpha".into(),
+                game_id: "arma3".into(),
+                instance_id: instance.id.clone(),
+                generation: 1,
+                instance_revision: 1,
+                catalog_revision: 1,
+                catalog_fingerprint: "catalog-fingerprint".into(),
+                content_sources_fingerprint: Some("old-fingerprint".into()),
+                bindings: vec![],
+            }),
+            fingerprint: Some(saved_fingerprint.clone()),
+            review_current: true,
             issues: vec![],
         }),
         ..Default::default()
     };
-    state.content_bindings.push(ServerAddonBinding {
-        source_id: "RepoAlpha".into(),
-        role: crate::core::server::ServerAddonRole::Required,
-        order: 0,
-    });
+    state.content_bindings.push(binding.clone());
     let task_scope = scope("refresh");
 
     assert!(state.finish(
@@ -543,9 +594,17 @@ fn refreshing_sources_discards_old_bindings_and_preview() {
             }),
         }),
     ));
-    assert!(state.content_bindings.is_empty());
+    assert_eq!(state.content_bindings, [binding]);
     assert!(state.content_plan.is_none());
-    assert!(state.saved_content_bindings.is_none());
+    let saved = state.saved_content_bindings.as_ref().unwrap();
+    assert_eq!(
+        saved.fingerprint.as_deref(),
+        Some(saved_fingerprint.as_str())
+    );
+    assert!(!saved.review_current);
+    assert!(saved.issues.contains(
+        &"Content source registrations changed since these bindings were reviewed. Review their identities and paths again."
+    ));
 }
 
 #[test]

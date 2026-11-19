@@ -96,13 +96,14 @@ impl Foxy {
             ui.separator();
 
             ui.horizontal(|ui| {
-                ui.label(tr("Filter:"));
+                let filter_label = ui.label(tr("Filter:"));
                 self.filter_help_icon(ui, &tr("addon_filter_help"));
                 ui.add_space(horizontal_padding);
 
                 let text_edit_width = ui.available_width() - 150.0 - 2.0 * horizontal_padding;
-                let filter_edit =
-                    ui.add(TextEdit::singleline(filter).desired_width(text_edit_width));
+                let filter_edit = ui
+                    .add(TextEdit::singleline(filter).desired_width(text_edit_width))
+                    .labelled_by(filter_label.id);
                 if filter_edit.changed() {
                     ui_state_changed = true;
                 }
@@ -111,7 +112,7 @@ impl Foxy {
                 }
                 ui.add_space(10.0);
 
-                let combo_box_response = egui::ComboBox::from_label("")
+                let combo_box_response = egui::ComboBox::from_id_salt("repository_addons_state_filter_plain")
                     .selected_text(match addon_state_filter.as_str() {
                         "Enabled" => tr("Enabled"),
                         "Disabled" => tr("Disabled"),
@@ -149,7 +150,11 @@ impl Foxy {
                         }
                     });
 
-                if combo_box_response.response.hovered() {
+                if combo_box_response
+                    .response
+                    .accessible_name(tr("Filter by state"))
+                    .hovered()
+                {
                     ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                 }
             });
@@ -257,7 +262,8 @@ impl Foxy {
                                             ),
                                         );
 
-                                        let chk = Self::ui_state_checkbox(ui, enabled, "");
+                                        let chk = Self::ui_state_checkbox(ui, enabled, "")
+                                            .accessible_name(name.as_str());
                                         if chk.changed() {
                                             repo_data_changed = true;
                                         }

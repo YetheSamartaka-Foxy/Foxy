@@ -26,6 +26,7 @@ pub(crate) struct ServerEditor {
     pub mission_keys: Vec<u64>,
     pub addon_keys: Vec<u64>,
     pub next_row_key: u64,
+    pub invalid_input: bool,
 }
 
 impl ServerEditor {
@@ -42,11 +43,12 @@ impl ServerEditor {
             mission_keys: (0..missions as u64).collect(),
             addon_keys: (0..addons as u64).collect(),
             next_row_key: (missions + addons) as u64,
+            invalid_input: false,
         }
     }
 
     pub fn dirty(&self) -> bool {
-        self.baseline != self.draft
+        self.invalid_input || self.baseline != self.draft
     }
 
     pub fn field_scope(&self) -> egui::Id {
@@ -77,6 +79,11 @@ pub(crate) enum ServerDialog {
 
 #[derive(Default)]
 pub(crate) struct ServerViewState {
+    pub page: super::ServerPage,
+    pub profile_editor: super::ServerProfileEditor,
+    pub instance_filter: String,
+    pub pending_sidebar_selection: Option<ServerInstanceId>,
+    pub focus_add_name: bool,
     pub arma_admin: super::arma_admin::ArmaAdminViewState,
     pub reforger_admin: super::reforger_admin::ReforgerAdminViewState,
     pub steam_auth: super::steam_auth::ServerSteamState,
@@ -148,14 +155,17 @@ pub(crate) struct ServerViewState {
     pub new_name: String,
     pub dialog: Option<ServerDialog>,
     pub dialog_name: String,
+    pub focus_dialog_cancel: bool,
     pub task: Option<ServerTask>,
     pub queued_action: Option<Box<ServerTaskAction>>,
     pub loaded: bool,
     pub show_client_progress: bool,
     pub content_sources: Option<ContentSourceSnapshot>,
+    pub addon_candidates: Option<(std::path::PathBuf, Vec<String>)>,
     pub content_bindings: Vec<ServerAddonBinding>,
     pub content_plan: Option<Box<ContentDeploymentPlan>>,
     pub saved_content_bindings: Option<ContentBindingsSnapshot>,
+    pub content_bindings_load_requested: bool,
     pub content_bindings_plan: Option<Box<ContentBindingsPlan>>,
     pub content_stage_plan: Option<Box<ContentStagePlan>>,
     pub content_stage_report: Option<ContentStageReport>,
@@ -206,6 +216,30 @@ pub(crate) struct ServerViewState {
 }
 
 impl ServerViewState {
+    fn update_content_binding_source_review(&mut self, fingerprint: &Option<String>) {
+        const STALE_SOURCES: &str = "Content source registrations changed since these bindings were reviewed. Review their identities and paths again.";
+        let Some(saved) = &mut self.saved_content_bindings else {
+            return;
+        };
+        let Some(document) = &saved.document else {
+            return;
+        };
+        if document.content_sources_fingerprint.as_ref() != fingerprint.as_ref() {
+            saved.review_current = false;
+            if !saved.issues.contains(&STALE_SOURCES) {
+                saved.issues.push(STALE_SOURCES);
+            }
+        } else {
+            saved.issues.retain(|issue| *issue != STALE_SOURCES);
+            saved.review_current = saved.issues.is_empty();
+        }
+    }
+
+    pub fn open_dialog(&mut self, dialog: ServerDialog) {
+        self.dialog = Some(dialog);
+        self.focus_dialog_cancel = true;
+    }
+
     fn update_monitoring(&mut self, mut monitoring: crate::core::server::InstanceMonitoring) {
         self.monitoring_last_received = Some(Instant::now());
         let changed_run = self.lifecycle_monitoring.as_ref().is_some_and(|previous| {
@@ -352,9 +386,11 @@ impl ServerViewState {
         self.configuration_verification = None;
         self.configuration_rollback = None;
         self.content_sources = None;
+        self.addon_candidates = None;
         self.content_bindings.clear();
         self.content_plan = None;
         self.saved_content_bindings = None;
+        self.content_bindings_load_requested = false;
         self.content_bindings_plan = None;
         self.acquisition_plan = None;
         self.acquisition_outcome = None;
@@ -770,13 +806,39 @@ impl ServerViewState {
                 ..
             }) => {
                 self.invalidate_content_acquisition_plan();
+                self.invalidate_content_stage();
+                self.update_content_binding_source_review(&sources.fingerprint);
                 self.content_sources = Some(sources);
-                self.content_bindings.clear();
+                self.addon_candidates = None;
                 self.content_plan = None;
-                self.saved_content_bindings = None;
                 self.content_bindings_plan = None;
                 self.error = None;
                 self.status = Some("Server content sources loaded. Select profiles to preview.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::ContentSourcesSaved(sources),
+                ..
+            }) => {
+                self.profile_editor = super::ServerProfileEditor::default();
+                self.invalidate_content_acquisition_plan();
+                self.invalidate_content_stage();
+                self.update_content_binding_source_review(&sources.fingerprint);
+                self.content_sources = Some(sources);
+                self.content_plan = None;
+                self.content_bindings_plan = None;
+                self.addon_candidates = None;
+                self.content_consumers = None;
+                self.error = None;
+                self.status =
+                    Some("Content profile registry saved. Existing server bindings were retained.");
+            }
+            Ok(ServerTaskResult {
+                output: ServerTaskOutput::AddonCandidates { folder, names },
+                ..
+            }) => {
+                self.addon_candidates = Some((folder, names));
+                self.error = None;
+                self.status = Some("Local addon folders scanned.");
             }
             Ok(ServerTaskResult {
                 output: ServerTaskOutput::ContentPlan(plan),
@@ -1351,15 +1413,21 @@ impl ServerViewState {
                 self.selected = None;
                 self.editor = None;
                 self.content_sources = None;
+                self.addon_candidates = None;
                 self.content_bindings.clear();
                 self.content_plan = None;
                 self.saved_content_bindings = None;
+                self.content_bindings_load_requested = false;
                 self.content_bindings_plan = None;
                 self.invalidate_reforger_addon_acquisition();
                 self.reforger_addon_lock = None;
                 self.reforger_addon_lock_loaded = false;
                 if let Some(selected) = selected {
                     self.select(&selected);
+                    if saved && self.page == super::ServerPage::Add {
+                        self.page = super::ServerPage::Setup;
+                        self.new_name.clear();
+                    }
                 }
                 self.status = Some(if saved {
                     "Server draft saved."

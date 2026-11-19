@@ -179,7 +179,7 @@ impl Foxy {
             review
         });
         if confirm {
-            self.server_view.dialog = Some(ServerDialog::AcquireWorkshop);
+            self.server_view.open_dialog(ServerDialog::AcquireWorkshop);
         }
         if let Some(action) = action {
             self.start_server_task(action);

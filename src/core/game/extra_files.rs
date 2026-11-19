@@ -1063,4 +1063,23 @@ mod tests {
         assert!(!store.entries[0].enabled);
         assert!(set_entry_enabled(space.path(), "missing", true).is_err());
     }
+
+    #[test]
+    fn example_extra_files_and_activations_parse() {
+        for raw in [
+            include_str!("../../../examples/json/appdata/games/arma3/extra_files.json"),
+            include_str!("../../../examples/json/appdata/games/twwh3/extra_files.json"),
+            include_str!("../../../examples/json/appdata/games/reforger/extra_files.json"),
+            include_str!("../../../examples/json/appdata/games/generic/extra_files.json"),
+        ] {
+            let store: ExtraFilesFile = serde_json::from_str(raw).expect("parse extra_files.json");
+            let _ = store.entries.len();
+        }
+        let activations: ActivationState = serde_json::from_str(include_str!(
+            "../../../examples/json/appdata/games/arma3/extra_file_activations.json"
+        ))
+        .expect("parse extra_file_activations.json");
+        assert!(activations.entries.is_empty());
+        assert!(activations.reviewed_layer_signature.is_none());
+    }
 }
