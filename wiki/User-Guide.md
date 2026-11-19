@@ -465,7 +465,7 @@ If you choose a different Launch or Join action while one is waiting for that sa
 If extra files cannot be prepared, choose **Retry**, **Continue for this launch**, or **Cancel**. If a frozen Workshop copy is missing, Foxy asks before using the live files: **Use live copies for this launch** can change that launch's mod versions and leaves your saved pins unchanged. On the command line, `--allow-incomplete-preparation` and `--allow-live-fallback` give the same consent for one `foxy launch` or `foxy game launch`.
 
 When you join an Arma 3 server, Foxy reads what the server reports and can:
-- warn when the server needs addons that you have locally but disabled for this launch, and
+- warn when the server needs addons that you have locally but disabled for this launch, and offer **Save enabled addons for future launches** (checked by default when disabled required addons are listed) so re-enabling them persists to your active profile, and
 - offer to **match the server's Creator DLCs**: enable the Creator DLCs the server requires and disable enabled ones it does not use, for that launch only.
 
 ### How each game launches

@@ -173,6 +173,16 @@ impl Foxy {
             left.origin == right.origin && left.addon_name.eq_ignore_ascii_case(&right.addon_name)
         });
 
+        let save_local_addon_selections = suggestions
+            .iter()
+            .any(|suggestion| suggestion.origin == JoinPreflightAddonOrigin::Required)
+            || ambiguous.iter().any(|group| {
+                group
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.origin == JoinPreflightAddonOrigin::Required)
+            });
+
         Some(PendingJoinPreflightState {
             repo_name: repo_name.to_string(),
             server: server.clone(),
@@ -195,6 +205,7 @@ impl Foxy {
             final_facts_refreshed: false,
             final_confirmation_choice: None,
             final_query_error: None,
+            save_local_addon_selections,
         })
     }
 
@@ -407,6 +418,119 @@ impl Foxy {
             set_creator_dlc_enabled(&mut repository, dlc.code, false);
         }
         repository
+    }
+
+    /// Persist user-approved local addon enables back into a repository and its
+    /// active profile when "Save enabled addons for future launches" is checked.
+    pub(crate) fn apply_saved_local_join_preflight_selections(
+        repository: &mut Repository,
+        pending: &PendingJoinPreflightState,
+    ) -> bool {
+        if !pending.save_local_addon_selections {
+            return false;
+        }
+
+        let selected_suggestions: Vec<&JoinPreflightAddonSuggestion> = pending
+            .suggestions
+            .iter()
+            .filter(|suggestion| suggestion.selected)
+            .chain(pending.ambiguous.iter().filter_map(|group| {
+                group
+                    .selected_candidate
+                    .and_then(|candidate_idx| group.candidates.get(candidate_idx))
+            }))
+            .collect();
+        if selected_suggestions.is_empty() {
+            return false;
+        }
+
+        let selected_profile = repository.selected_profile.clone();
+        if let Some(profile_name) = selected_profile.as_deref()
+            && let Some(profile) = repository
+                .profiles
+                .iter_mut()
+                .find(|profile| profile.name == profile_name)
+        {
+            let mut changed = false;
+            for suggestion in selected_suggestions {
+                changed |= enable_suggestion_in_profile(profile, suggestion);
+            }
+            return changed;
+        }
+
+        let mut changed = false;
+        for suggestion in selected_suggestions {
+            changed |= enable_suggestion(repository, suggestion);
+        }
+        changed
+    }
+
+    /// Update the matching configured repository in place and save when any
+    /// local preflight addon selections were marked to persist.
+    pub(crate) fn persist_saved_join_preflight_selections(
+        &mut self,
+        pending: &PendingJoinPreflightState,
+    ) {
+        if !pending.save_local_addon_selections {
+            return;
+        }
+        let target_key = Self::repo_instance_key(
+            &pending.original_repository.address,
+            &pending.original_repository.path,
+        );
+        let target_idx = self
+            .repository_view_state
+            .repositories
+            .iter()
+            .position(|repo| {
+                Self::repo_instance_key(&repo.address, &repo.path) == target_key
+                    && repo.name == pending.repo_name
+                    && repo.selected_profile == pending.original_repository.selected_profile
+            })
+            .or_else(|| {
+                self.repository_view_state
+                    .repositories
+                    .iter()
+                    .position(|repo| {
+                        Self::repo_instance_key(&repo.address, &repo.path) == target_key
+                            && repo.name == pending.repo_name
+                    })
+            })
+            .or_else(|| {
+                self.repository_view_state
+                    .repositories
+                    .iter()
+                    .position(|repo| {
+                        Self::repo_instance_key(&repo.address, &repo.path) == target_key
+                    })
+            });
+
+        let Some(target_idx) = target_idx else {
+            return;
+        };
+
+        let changed = Self::apply_saved_local_join_preflight_selections(
+            &mut self.repository_view_state.repositories[target_idx],
+            pending,
+        );
+        if !changed {
+            return;
+        }
+
+        if self.repository_addons_list_cache.repo_index == Some(target_idx) {
+            self.repository_addons_list_cache.repo_index = None;
+        }
+        if self.repository_optional_addons_list_cache.repo_index == Some(target_idx) {
+            self.repository_optional_addons_list_cache.repo_index = None;
+        }
+        if self.repository_external_addons_list_cache.repo_index == Some(target_idx) {
+            self.repository_external_addons_list_cache.repo_index = None;
+        }
+        info!(
+            "Saved join preflight local addon selection changes for repository {}",
+            pending.repo_name
+        );
+        self.save_repositories();
     }
 
     /// Creator DLCs to enable (the server runs them, the repository does not)
@@ -1386,21 +1510,80 @@ fn addon_acronym_keys(name: &str) -> Vec<String> {
     keys
 }
 
-fn enable_suggestion(repository: &mut Repository, suggestion: &JoinPreflightAddonSuggestion) {
+fn enable_suggestion_in_lists(
+    addons: &mut [(String, bool)],
+    optional_addons: &mut [(String, bool)],
+    external_addons: &mut [(String, bool, String)],
+    suggestion: &JoinPreflightAddonSuggestion,
+) -> bool {
     match suggestion.origin {
-        JoinPreflightAddonOrigin::Required => {
-            set_addon_enabled(&mut repository.addons, &suggestion.addon_name);
-        }
+        JoinPreflightAddonOrigin::Required => set_addon_enabled(addons, &suggestion.addon_name),
         JoinPreflightAddonOrigin::Optional => {
-            set_addon_enabled(&mut repository.optional_addons, &suggestion.addon_name);
+            set_addon_enabled(optional_addons, &suggestion.addon_name)
         }
         JoinPreflightAddonOrigin::External => {
-            for (name, enabled, _) in &mut repository.external_addons {
-                if name.eq_ignore_ascii_case(&suggestion.addon_name) {
+            let mut changed = false;
+            for (name, enabled, _) in external_addons {
+                if name.eq_ignore_ascii_case(&suggestion.addon_name) && !*enabled {
                     *enabled = true;
+                    changed = true;
                 }
             }
+            changed
         }
+    }
+}
+
+fn enable_suggestion(
+    repository: &mut Repository,
+    suggestion: &JoinPreflightAddonSuggestion,
+) -> bool {
+    enable_suggestion_in_lists(
+        &mut repository.addons,
+        &mut repository.optional_addons,
+        &mut repository.external_addons,
+        suggestion,
+    )
+}
+
+fn enable_suggestion_in_profile(
+    profile: &mut crate::ui::types::RepositoryProfile,
+    suggestion: &JoinPreflightAddonSuggestion,
+) -> bool {
+    if enable_suggestion_in_lists(
+        &mut profile.addons,
+        &mut profile.optional_addons,
+        &mut profile.external_addons,
+        suggestion,
+    ) {
+        return true;
+    }
+
+    // Profiles only require persisted disabled overrides for required addons and
+    // enabled entries for optional addons; ensure the enabled state exists when
+    // the in-memory profile list has not been expanded with a matching row yet.
+    match suggestion.origin {
+        JoinPreflightAddonOrigin::Required
+            if !profile
+                .addons
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(&suggestion.addon_name)) =>
+        {
+            profile.addons.push((suggestion.addon_name.clone(), true));
+            true
+        }
+        JoinPreflightAddonOrigin::Optional
+            if !profile
+                .optional_addons
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(&suggestion.addon_name)) =>
+        {
+            profile
+                .optional_addons
+                .push((suggestion.addon_name.clone(), true));
+            true
+        }
+        _ => false,
     }
 }
 
@@ -1450,12 +1633,15 @@ fn enable_known_remote_addon(repository: &mut Repository, remote: &JoinPreflight
     ));
 }
 
-fn set_addon_enabled(addons: &mut [(String, bool)], addon_name: &str) {
+fn set_addon_enabled(addons: &mut [(String, bool)], addon_name: &str) -> bool {
+    let mut changed = false;
     for (name, enabled) in addons {
-        if name.eq_ignore_ascii_case(addon_name) {
+        if name.eq_ignore_ascii_case(addon_name) && !*enabled {
             *enabled = true;
+            changed = true;
         }
     }
+    changed
 }
 
 fn set_addon_disabled(addons: &mut [(String, bool)], addon_name: &str) {
@@ -1643,6 +1829,7 @@ mod tests {
             final_facts_refreshed: false,
             final_confirmation_choice: None,
             final_query_error: None,
+            save_local_addon_selections: false,
         }
     }
 
@@ -3229,5 +3416,139 @@ mod tests {
         );
 
         assert!(state.is_none());
+    }
+
+    #[test]
+    fn preflight_defaults_save_to_true_only_when_required_local_addon_is_disabled() {
+        let server = RepositoryServer {
+            name: "Main".to_string(),
+            address: "127.0.0.1".to_string(),
+            port: "2302".to_string(),
+            password: String::new(),
+            battle_eye: false,
+        };
+
+        let required_repo = Repository {
+            addons: vec![("@mod_01".to_string(), false)],
+            ..Repository::default()
+        };
+        let required_state = Foxy::build_join_preflight_state(
+            &required_repo,
+            &[],
+            &server,
+            "RepoAlpha",
+            &[requirement("@mod_01")],
+            &AddonDisplayNameSnapshot::new(),
+        )
+        .expect("disabled required addon should trigger preflight");
+        assert!(required_state.save_local_addon_selections);
+
+        let optional_repo = Repository {
+            optional_addons: vec![("@mod_02".to_string(), false)],
+            ..Repository::default()
+        };
+        let optional_state = Foxy::build_join_preflight_state(
+            &optional_repo,
+            &[],
+            &server,
+            "RepoAlpha",
+            &[requirement("@mod_02")],
+            &AddonDisplayNameSnapshot::new(),
+        )
+        .expect("disabled optional addon should trigger preflight");
+        assert!(!optional_state.save_local_addon_selections);
+    }
+
+    #[test]
+    fn apply_saved_local_selections_enables_required_addon_and_clears_next_preflight() {
+        let server = RepositoryServer {
+            name: "Main".to_string(),
+            address: "127.0.0.1".to_string(),
+            port: "2302".to_string(),
+            password: String::new(),
+            battle_eye: false,
+        };
+        let mut repo = Repository {
+            name: "RepoAlpha".to_string(),
+            addons: vec![("@mod_01".to_string(), false)],
+            optional_addons: vec![("@mod_02".to_string(), false)],
+            ..Repository::default()
+        };
+        let mut state = Foxy::build_join_preflight_state(
+            &repo,
+            &[],
+            &server,
+            "RepoAlpha",
+            &[requirement("@mod_01"), requirement("@mod_02")],
+            &AddonDisplayNameSnapshot::new(),
+        )
+        .expect("disabled addons should trigger preflight");
+        assert!(state.save_local_addon_selections);
+        state.suggestions[1].selected = false;
+
+        assert!(Foxy::apply_saved_local_join_preflight_selections(
+            &mut repo, &state
+        ));
+        assert!(repo.addons[0].1);
+        assert!(!repo.optional_addons[0].1);
+
+        let next_state = Foxy::build_join_preflight_state(
+            &repo,
+            &[],
+            &server,
+            "RepoAlpha",
+            &[requirement("@mod_01")],
+            &AddonDisplayNameSnapshot::new(),
+        );
+        assert!(next_state.is_none());
+    }
+
+    #[test]
+    fn apply_saved_local_selections_updates_active_profile_and_respects_save_flag() {
+        let server = RepositoryServer {
+            name: "Main".to_string(),
+            address: "127.0.0.1".to_string(),
+            port: "2302".to_string(),
+            password: String::new(),
+            battle_eye: false,
+        };
+        let mut stored_repo = Repository {
+            name: "RepoAlpha".to_string(),
+            selected_profile: Some("Ops".to_string()),
+            addons: vec![("@mod_01".to_string(), true)],
+            profiles: vec![crate::ui::types::RepositoryProfile {
+                name: "Ops".to_string(),
+                addons: vec![("@mod_01".to_string(), false)],
+                ..crate::ui::types::RepositoryProfile::default()
+            }],
+            ..Repository::default()
+        };
+        let mut effective_repo = stored_repo.clone();
+        let active_profile = stored_repo.profiles[0].clone();
+        Foxy::apply_profile_to_repository(&mut effective_repo, &active_profile);
+
+        let mut state = Foxy::build_join_preflight_state(
+            &effective_repo,
+            &[],
+            &server,
+            "RepoAlpha",
+            &[requirement("@mod_01")],
+            &AddonDisplayNameSnapshot::new(),
+        )
+        .expect("disabled profile addon should trigger preflight");
+        state.save_local_addon_selections = false;
+        assert!(!Foxy::apply_saved_local_join_preflight_selections(
+            &mut stored_repo,
+            &state
+        ));
+        assert!(!stored_repo.profiles[0].addons[0].1);
+
+        state.save_local_addon_selections = true;
+        assert!(Foxy::apply_saved_local_join_preflight_selections(
+            &mut stored_repo,
+            &state
+        ));
+        assert!(stored_repo.profiles[0].addons[0].1);
+        assert!(Foxy::resolve_selected_mod_states(&stored_repo, None)[0].1);
     }
 }

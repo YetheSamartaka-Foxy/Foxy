@@ -509,6 +509,8 @@ pub struct PendingJoinPreflightState {
     /// The user's pending final choice: true keeps the selected suggestions.
     pub final_confirmation_choice: Option<bool>,
     pub final_query_error: Option<String>,
+    /// Whether selected local addon enables should be persisted back to the repository.
+    pub save_local_addon_selections: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -553,6 +555,7 @@ impl PendingJoinPreflightState {
             final_facts_refreshed: false,
             final_confirmation_choice: None,
             final_query_error: None,
+            save_local_addon_selections: false,
         }
     }
 

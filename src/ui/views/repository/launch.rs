@@ -851,6 +851,9 @@ impl Foxy {
                 return;
             }
         }
+        if keep_suggestions {
+            self.persist_saved_join_preflight_selections(&pending);
+        }
         let repository = if keep_suggestions {
             Self::repository_with_join_preflight_selections(&pending)
         } else {

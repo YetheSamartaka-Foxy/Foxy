@@ -1226,6 +1226,8 @@
     "Server name: {name}": "Server name: {name}",
     "Launch with selected addons": "Launch with selected addons",
     "Launch without suggested addons": "Launch without suggested addons",
+    "Save enabled addons for future launches": "Save enabled addons for future launches",
+    "When checked, enabled addons from this repository are saved to the active profile before launching.": "When checked, enabled addons from this repository are saved to the active profile before launching.",
     "Match the server's Creator DLCs?": "Match the server's Creator DLCs?",
     "The server runs different Creator DLCs than this repository has enabled.": "The server runs different Creator DLCs than this repository has enabled.",
     "Creator DLCs the server requires": "Creator DLCs the server requires",
