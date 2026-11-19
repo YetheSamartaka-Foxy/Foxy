@@ -1288,6 +1288,7 @@ pub(crate) fn db_error_message_is_retryable(message: &str) -> bool {
         || m.contains("busy")
         || m.contains("locked")
         || m.contains("no transaction is active")
+        || m.contains("snapshot is stale")
 }
 
 /// Whether a Turso error should be retried by [`db_retry_transaction`].
@@ -1491,6 +1492,12 @@ mod tests {
         assert!(db_error_message_is_retryable("Busy: database busy"));
         assert!(db_error_message_is_retryable(
             "cannot commit - no transaction is active"
+        ));
+        assert!(db_error_message_is_retryable(
+            "database snapshot is stale, rollback and retry the transaction"
+        ));
+        assert!(db_error_message_is_retryable(
+            "turso: database snapshot is stale, rollback and retry the transaction"
         ));
         assert!(!db_error_message_is_retryable(
             "UNIQUE constraint failed: repositories.remote_url"

@@ -101,5 +101,13 @@ pub(super) async fn reconcile_repository_addon_links(
             "Failed to reconcile repository_addons for {}: {}",
             repository_parent.remote_url, e
         );
+        context.mark_transient_metadata_failure();
+        let _ = db
+            .execute_retry(
+                "invalidate failed repository links",
+                "UPDATE repositories SET remote_checksum = '' WHERE id = ?",
+                params![repo_id],
+            )
+            .await;
     }
 }

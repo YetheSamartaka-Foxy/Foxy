@@ -38,12 +38,13 @@ pub(crate) fn preserve_removed_file_diffs(
     }
 }
 
-pub(super) async fn removed_managed_file_diffs(
+async fn removed_managed_file_candidates(
     context: &FoxyContext,
     repo_url: &str,
     mods: &[FoxyMod],
     enabled_overrides: Option<&HashMap<String, bool>>,
-) -> Option<HashMap<i64, Vec<FileDiffSummary>>> {
+    exclude_managed_paths: bool,
+) -> Option<Vec<(i64, String, String, String, String)>> {
     let prefix = format!("{}/", repo_url.trim_end_matches('/'));
     // The next byte after '/' bounds an indexed URL-prefix lookup.
     let upper_bound = format!("{}0", repo_url.trim_end_matches('/'));
@@ -58,7 +59,7 @@ pub(super) async fn removed_managed_file_diffs(
         .await
         .ok()?;
     if rows.is_empty() {
-        return Some(HashMap::new());
+        return Some(Vec::new());
     }
 
     let mut candidates = Vec::new();
@@ -81,21 +82,92 @@ pub(super) async fn removed_managed_file_diffs(
         };
         candidates.push((
             addon.id as i64,
+            addon.name.to_lowercase(),
             row.get_string("name").ok()?,
             local_path,
             normalized,
         ));
     }
     if candidates.is_empty() {
-        return Some(HashMap::new());
+        return Some(Vec::new());
     }
 
-    let managed_paths = load_managed_local_paths(context).await?;
-    candidates.retain(|(_, _, _, normalized)| !managed_paths.contains(normalized));
+    if exclude_managed_paths {
+        let managed_paths = load_managed_local_paths(context).await?;
+        candidates.retain(|(_, _, _, _, normalized)| !managed_paths.contains(normalized));
+    }
+    Some(candidates)
+}
+
+pub(crate) async fn removed_managed_file_mod_names(
+    context: &FoxyContext,
+    repo_url: &str,
+    enabled_overrides: Option<&HashMap<String, bool>>,
+) -> HashSet<String> {
+    let Ok(repo) = crate::core::models::repository::load_repository_by_remote_url(
+        Arc::new(context.clone()),
+        repo_url,
+    )
+    .await
+    else {
+        return HashSet::new();
+    };
+    let rows = match context
+        .db()
+        .query_all(
+            &format!(
+                "SELECT {} FROM addons a \
+                 JOIN repository_addons ra ON ra.addon_id = a.id \
+                 WHERE ra.repository_id = ?",
+                crate::core::models::modification::ADDON_COLUMNS
+            ),
+            params![repo.id as i64],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return HashSet::new(),
+    };
+    let mods: Vec<FoxyMod> = rows
+        .iter()
+        .filter_map(|row| FoxyMod::from_row(row).ok())
+        .collect();
+    let Some(candidates) =
+        removed_managed_file_candidates(context, repo_url, &mods, enabled_overrides, false).await
+    else {
+        return HashSet::new();
+    };
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
+    tokio::task::spawn_blocking(move || {
+        let mut names = HashSet::new();
+        for (_, addon_name, _, local_path, _) in candidates {
+            if matches!(std::fs::symlink_metadata(&local_path), Ok(meta) if meta.is_file()) {
+                names.insert(addon_name);
+            }
+        }
+        names
+    })
+    .await
+    .unwrap_or_default()
+}
+
+pub(super) async fn removed_managed_file_diffs(
+    context: &FoxyContext,
+    repo_url: &str,
+    mods: &[FoxyMod],
+    enabled_overrides: Option<&HashMap<String, bool>>,
+) -> Option<HashMap<i64, Vec<FileDiffSummary>>> {
+    let candidates =
+        removed_managed_file_candidates(context, repo_url, mods, enabled_overrides, true).await?;
+    if candidates.is_empty() {
+        return Some(HashMap::new());
+    }
     tokio::task::spawn_blocking(move || {
         let mut removed: HashMap<i64, Vec<FileDiffSummary>> = HashMap::new();
         let mut seen = HashSet::new();
-        for (addon_id, name, local_path, normalized) in candidates {
+        for (addon_id, _, name, local_path, normalized) in candidates {
             if !seen.insert(normalized) {
                 continue;
             }

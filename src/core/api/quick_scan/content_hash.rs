@@ -483,13 +483,7 @@ async fn refresh_content_hashes_for_tree_started(
         .iter()
         .filter_map(|index| tree.mods.get(*index))
         .filter(|addon| addon.enabled)
-        .map(|addon| {
-            if cfg!(windows) {
-                addon.name.to_lowercase()
-            } else {
-                addon.name.clone()
-            }
-        })
+        .map(|addon| addon.name.to_lowercase())
         .collect();
     let unexpected_by_mod = super::unexpected_files::collect_unexpected_files_for_repo_mods(
         context.clone(),

@@ -424,6 +424,11 @@ impl FoxyContext {
         self
     }
 
+    pub(crate) fn with_recheck_level(mut self, level: RecheckLevel) -> Self {
+        self.recheck_level = level;
+        self
+    }
+
     pub(crate) fn with_reapplied_mod_manifests(mut self, addons: HashSet<String>) -> Self {
         self.reapplied_mod_manifests = addons;
         self

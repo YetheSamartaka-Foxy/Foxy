@@ -288,30 +288,38 @@ fn classify_conflicts(
     result
 }
 
-/// Check the requested update's physical file targets against other repository
-/// instances. Known overlapping instances are refreshed before the decision.
-pub(crate) async fn check_shared_version_conflicts(
+/// Check the requested update's physical file targets and cleanup candidates
+/// against other repository instances. Known overlapping instances are refreshed
+/// before deciding whether shared files are blocked or safe to remove.
+pub(crate) async fn check_shared_version_conflicts_with_cleanup_paths(
     context: Arc<FoxyContext>,
     repo_url: &str,
     strict_members: &[(String, String)],
+    cleanup_candidate_paths: &[String],
 ) -> Result<SharedVersionConflicts> {
     let current = load_repository_by_remote_url(context.clone(), repo_url)
         .await
         .context("load repository for shared-version check")?;
     let db = context.db();
     let source = source_download_expectations(&db, current.id as i64).await?;
-    if source.is_empty() {
-        return Ok(SharedVersionConflicts::default());
-    }
-    let file_paths = source
+    let source_paths = source
         .iter()
         .map(|(path, _)| path.clone())
         .collect::<Vec<_>>();
-    let before_refresh = overlapping_expectations(&db, current.id as i64, &file_paths).await?;
+    let mut query_paths = source_paths.clone();
+    query_paths.extend(cleanup_candidate_paths.iter().cloned());
+    if query_paths.is_empty() {
+        return Ok(SharedVersionConflicts::default());
+    }
+    let before_refresh = overlapping_expectations(&db, current.id as i64, &query_paths).await?;
     let source_by_path = source
         .iter()
         .map(|(path, checksum)| (path_key(path), checksum.trim()))
         .collect::<HashMap<_, _>>();
+    let cleanup_keys = cleanup_candidate_paths
+        .iter()
+        .map(|path| path_key(path))
+        .collect::<HashSet<_>>();
     let strict = strict_member_keys(strict_members);
     let mut siblings = HashMap::new();
     let mut conflicting_addons = HashMap::<_, HashSet<String>>::new();
@@ -320,11 +328,12 @@ pub(crate) async fn check_shared_version_conflicts(
             repository_url_match_key(&sibling.repository_url),
             normalize_repository_local_path_identity(&sibling.repository_path),
         );
-        if !sibling.checksum.trim().is_empty()
+        let sibling_path_key = path_key(&sibling.file_path);
+        let file_conflict = !sibling.checksum.trim().is_empty()
             && source_by_path
-                .get(&path_key(&sibling.file_path))
-                .is_some_and(|checksum| !checksum.eq_ignore_ascii_case(sibling.checksum.trim()))
-        {
+                .get(&sibling_path_key)
+                .is_some_and(|checksum| !checksum.eq_ignore_ascii_case(sibling.checksum.trim()));
+        if file_conflict || cleanup_keys.contains(&sibling_path_key) {
             conflicting_addons
                 .entry(key.clone())
                 .or_default()
@@ -409,7 +418,10 @@ pub(crate) async fn check_shared_version_conflicts(
             );
         }
     }
-    let after_refresh = overlapping_expectations(&db, current.id as i64, &file_paths).await?;
+    if source_paths.is_empty() {
+        return Ok(SharedVersionConflicts::default());
+    }
+    let after_refresh = overlapping_expectations(&db, current.id as i64, &source_paths).await?;
     Ok(classify_conflicts(
         &source,
         &after_refresh,

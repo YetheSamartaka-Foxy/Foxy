@@ -58,7 +58,9 @@ pub(super) use readiness::{
     StartupQuickScanEligibility, batch_eligible_repos, launch_quick_scan_repo_eligible_joined,
     launch_quick_scan_repo_startup_eligibility,
 };
-pub(super) use removed_files::preserve_removed_file_diffs;
-pub(super) use unexpected_files::collect_unexpected_files_for_repo_mods;
+pub(super) use removed_files::{preserve_removed_file_diffs, removed_managed_file_mod_names};
+pub(super) use unexpected_files::{
+    collect_cleanup_conflict_candidate_paths_for_repo_mods, collect_unexpected_files_for_repo_mods,
+};
 #[cfg(test)]
 pub(super) use unexpected_files::delete_unexpected_local_files;

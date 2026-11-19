@@ -1,6 +1,7 @@
 use super::super::quick_scan::{
     PreHashedFiles, apply_download_target_estimates_to_pending_updates,
     apply_patch_plan_estimates_to_pending_updates,
+    collect_cleanup_conflict_candidate_paths_for_repo_mods,
     collect_hashable_files_with_missing_local_tree_hashes, collect_repo_download_targets,
     collect_targeted_init_content_baseline_files, collect_unexpected_files_for_repo_mods,
     format_local_path_mismatch_message, log_addon_path_disk_state, log_local_path_availability,
@@ -8,7 +9,7 @@ use super::super::quick_scan::{
     quick_local_change_diff_with_prehashed, quick_scan_preflight_for_local_check,
     refresh_content_hashes_for_file_ids, refresh_content_hashes_for_repository,
     refresh_content_hashes_for_tree_files, refresh_patch_plan_metadata_for_pending_updates,
-    summarize_local_path_availability, suspect_local_path_mismatch,
+    removed_managed_file_mod_names, summarize_local_path_availability, suspect_local_path_mismatch,
     tree_local_checksums_baseline_missing, tree_local_checksums_missing,
 };
 use super::super::*;
@@ -1067,6 +1068,215 @@ async fn load_pending_update_mods(
     }
 }
 
+async fn load_enabled_addon_names_for_repo(
+    context: &FoxyContext,
+    repo_url: &str,
+    mod_enabled_overrides: &HashMap<String, bool>,
+) -> HashSet<String> {
+    let Ok(repo) = load_repository_by_remote_url_and_local_path(
+        Arc::new(context.clone()),
+        repo_url,
+        context.target_local_path.as_deref().unwrap_or_default(),
+    )
+    .await
+    else {
+        return HashSet::new();
+    };
+    let rows = match context
+        .db()
+        .query_all(
+            "SELECT a.name, a.enabled FROM addons a \
+             JOIN repository_addons ra ON ra.addon_id = a.id \
+             WHERE ra.repository_id = ?",
+            params![repo.id as i64],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return HashSet::new(),
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let name = row.get_string("name").ok()?.to_lowercase();
+            let enabled = mod_enabled_overrides
+                .get(&name)
+                .copied()
+                .unwrap_or_else(|| row.get_bool("enabled").unwrap_or(true));
+            enabled.then_some(name)
+        })
+        .collect()
+}
+
+async fn load_addon_names_for_file_ids(db: &FoxyDb, file_ids: &HashSet<u64>) -> HashSet<String> {
+    if file_ids.is_empty() {
+        return HashSet::new();
+    }
+    let chunk_size = read_chunk_ids();
+    let mut ids: Vec<i64> = file_ids.iter().map(|id| *id as i64).collect();
+    ids.sort_unstable();
+    let mut names = HashSet::new();
+    for chunk in ids.chunks(chunk_size) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT DISTINCT a.name FROM addons a \
+             JOIN addon_files af ON af.addon_id = a.id \
+             WHERE af.file_id IN ({placeholders})"
+        );
+        let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
+        if let Ok(rows) = db.query_all(&sql, values).await {
+            names.extend(
+                rows.iter()
+                    .filter_map(|row| row.get_string("name").ok())
+                    .map(|name| name.to_lowercase()),
+            );
+        }
+    }
+    names
+}
+
+async fn collect_cleanup_scope_mods(
+    context: &FoxyContext,
+    repo_url: &str,
+    pending_mod_names: &HashSet<String>,
+    force_redownload: bool,
+    mod_enabled_overrides: &HashMap<String, bool>,
+) -> HashSet<String> {
+    let mut scope = pending_mod_names.clone();
+    scope.extend(
+        removed_managed_file_mod_names(context, repo_url, Some(mod_enabled_overrides)).await,
+    );
+    if force_redownload {
+        scope.extend(
+            load_enabled_addon_names_for_repo(context, repo_url, mod_enabled_overrides).await,
+        );
+    }
+    scope
+}
+
+struct CleanupSharedResolution {
+    unexpected_by_mod: HashMap<String, Vec<String>>,
+    conflicts: shared_conflicts::SharedVersionConflicts,
+}
+
+async fn resolve_cleanup_and_shared_conflicts(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    repository_space_members: &[(String, String)],
+    cleanup_mod_names: &HashSet<String>,
+    mod_enabled_overrides: &HashMap<String, bool>,
+) -> Result<CleanupSharedResolution, (String, &'static str)> {
+    // Refresh conflicting and candidate-shielding siblings before deciding final
+    // cleanup paths so obsolete files dropped from sibling manifests are not
+    // kept on disk by stale sibling metadata.
+    let cleanup_candidate_paths = collect_cleanup_conflict_candidate_paths_for_repo_mods(
+        context.clone(),
+        repo_url,
+        cleanup_mod_names,
+        Some(mod_enabled_overrides),
+    )
+    .await;
+    if context.hash_evidence.is_incomplete() {
+        return Err((
+            "Verification is incomplete. Resolve the reported files or retry saving the result."
+                .to_string(),
+            "failed-cleanup-preflight",
+        ));
+    }
+    let conflicts = shared_conflicts::check_shared_version_conflicts_with_cleanup_paths(
+        context.clone(),
+        repo_url,
+        repository_space_members,
+        &cleanup_candidate_paths,
+    )
+    .await
+    .map_err(|err| {
+        (
+            format!("Could not check shared addon versions: {err}"),
+            "failed-shared-version-check",
+        )
+    })?;
+    if !conflicts.blocking.is_empty() {
+        return Err((
+            format!(
+                "Shared addon versions conflict within this repository space: {}. Publish matching shared files before updating.",
+                conflicts.blocking.join(", ")
+            ),
+            "failed-shared-version-conflict",
+        ));
+    }
+    let unexpected_by_mod = collect_unexpected_files_for_repo_mods(
+        context.clone(),
+        repo_url,
+        cleanup_mod_names,
+        Some(mod_enabled_overrides),
+    )
+    .await;
+    if context.hash_evidence.is_incomplete() {
+        return Err((
+            "Verification is incomplete. Resolve the reported files or retry saving the result."
+                .to_string(),
+            "failed-cleanup-verification",
+        ));
+    }
+    Ok(CleanupSharedResolution {
+        unexpected_by_mod,
+        conflicts,
+    })
+}
+
+async fn settle_cleanup_only_addons_after_removal(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    download_file_ids: &HashSet<u64>,
+    unexpected_by_mod: &HashMap<String, Vec<String>>,
+    mod_enabled_overrides: &HashMap<String, bool>,
+    progress_tx: Option<&Sender<ProgressEvent>>,
+) -> Option<Vec<ModDiffSummary>> {
+    if unexpected_by_mod.is_empty() && !download_file_ids.is_empty() {
+        return None;
+    }
+    let db = context.db();
+    let downloaded_mod_names = load_addon_names_for_file_ids(&db, download_file_ids).await;
+    let cleanup_only_mod_names: HashSet<String> = unexpected_by_mod
+        .keys()
+        .map(|name| name.to_lowercase())
+        .filter(|name| !downloaded_mod_names.contains(name))
+        .collect();
+    if download_file_ids.is_empty() {
+        return Some(
+            quick_local_change_diff(
+                context,
+                repo_url,
+                None,
+                Some(mod_enabled_overrides),
+                progress_tx,
+                false,
+                true,
+                true,
+                None,
+            )
+            .await,
+        );
+    }
+    if cleanup_only_mod_names.is_empty() {
+        return None;
+    }
+    Some(
+        quick_local_change_diff(
+            context,
+            repo_url,
+            Some(&cleanup_only_mod_names),
+            Some(mod_enabled_overrides),
+            progress_tx,
+            false,
+            true,
+            true,
+            None,
+        )
+        .await,
+    )
+}
+
 async fn run_repository_pipeline(
     repository_url: String,
     local_path: String,
@@ -1528,7 +1738,12 @@ async fn run_repository_pipeline(
             percent: 0.05,
         });
         let repo_metadata = remote_repository(
-            context.clone(),
+            Arc::new(
+                context
+                    .as_ref()
+                    .clone()
+                    .with_recheck_level(RecheckLevel::MOD),
+            ),
             &normalized_repo_url,
             Some(&local_path),
             Some(&mod_enabled_overrides),
@@ -1956,12 +2171,16 @@ async fn run_repository_pipeline(
                     .with_download_target_queueing(remote_metadata_queues_download_targets),
             )
         } else {
-            Arc::new(
-                context
-                    .as_ref()
-                    .clone()
-                    .with_download_target_queueing(remote_metadata_queues_download_targets),
-            )
+            let refresh_context = context
+                .as_ref()
+                .clone()
+                .with_download_target_queueing(remote_metadata_queues_download_targets);
+            let refresh_context = if force_redownload {
+                refresh_context.with_recheck_level(RecheckLevel::MOD)
+            } else {
+                refresh_context
+            };
+            Arc::new(refresh_context)
         };
 
         // A++ (after_turso_regression_analysis7.md): on a force-redownload, let the
@@ -2020,6 +2239,16 @@ async fn run_repository_pipeline(
         };
         Some(repo_metadata)
     };
+
+    if *cancel_rx.borrow() {
+        info!(
+            "Sync cancelled after remote metadata refresh for repo={}",
+            normalized_repo_url
+        );
+        summary.log_table("cancelled");
+        emit_progress!(ProgressEvent::Cancelled);
+        return;
+    }
 
     if let Some(metadata) = &repo_metadata {
         if metadata.accepted_empty {
@@ -2756,17 +2985,26 @@ async fn run_repository_pipeline(
     );
     stage = std::time::Instant::now();
 
+    let mut cleanup_mod_names: HashSet<String> = HashSet::new();
     if builds_download_plan {
         let pending_mod_names: HashSet<String> = mods
             .iter()
             .filter(|m| m.needs_update)
             .map(|m| m.name.to_lowercase())
             .collect();
-        if !pending_mod_names.is_empty() {
+        cleanup_mod_names = collect_cleanup_scope_mods(
+            &context,
+            &normalized_repo_url,
+            &pending_mod_names,
+            force_redownload,
+            &mod_enabled_overrides,
+        )
+        .await;
+        if prepare_download_plan && !cleanup_mod_names.is_empty() {
             unexpected_by_mod = collect_unexpected_files_for_repo_mods(
                 context.clone(),
                 &normalized_repo_url,
-                &pending_mod_names,
+                &cleanup_mod_names,
                 Some(&mod_enabled_overrides),
             )
             .await;
@@ -3110,7 +3348,8 @@ async fn run_repository_pipeline(
         }
 
         // Queue may still contain stale targets when quick verification proves files are already valid.
-        if !force_redownload && !mods.iter().any(|m| m.needs_update) {
+        if !force_redownload && !mods.iter().any(|m| m.needs_update) && cleanup_mod_names.is_empty()
+        {
             if let Err(err) = truncate_all_download_tables(context.clone()).await {
                 warn!(
                     "Failed to clear download queue after clean post-remote quick verify: {}",
@@ -3126,7 +3365,10 @@ async fn run_repository_pipeline(
             return;
         }
 
-        if download_file_ids.is_empty() && unexpected_by_mod.values().all(Vec::is_empty) {
+        if prepare_download_plan
+            && download_file_ids.is_empty()
+            && unexpected_by_mod.values().all(Vec::is_empty)
+        {
             let pending_mods = mods.iter().filter(|m| m.needs_update).count();
             let message = format!(
                 "Unable to build a download queue for repo {} despite {} pending addon updates (possible undeletable unexpected local files)",
@@ -3145,29 +3387,6 @@ async fn run_repository_pipeline(
             ));
             summary.log_table("prepared-download-confirmation");
             emit_progress!(ProgressEvent::Finished);
-            return;
-        }
-
-        if let Some(backup_root) = auto_backup_directory
-            .as_deref()
-            .or(backup_local_drift.then_some(""))
-            && let Err(err) = backup_pending_addons_for_download(
-                backup_root,
-                &local_path,
-                &mods,
-                &progress_tx,
-                &operation_id,
-                Some(&crate::core::utils::addon_backup::AddonBackupOrigin {
-                    game_space_id: crate::core::game::spaces::active_game_space().space_id,
-                    repository_url: normalized_repo_url.clone(),
-                    local_path: local_path.clone(),
-                }),
-            )
-        {
-            let message = format!("Automatic addon backup failed: {}", err);
-            error!("{}", message);
-            summary.log_table("failed-backup");
-            emit_progress!(ProgressEvent::Failed(message));
             return;
         }
     }
@@ -3257,39 +3476,103 @@ async fn run_repository_pipeline(
     };
     context.pin_hash_targets(write_targets.clone());
 
-    // Download files
     let mut shared_version_advisory = false;
-    match shared_conflicts::check_shared_version_conflicts(
+    let resolved_cleanup = match resolve_cleanup_and_shared_conflicts(
         context.clone(),
         &normalized_repo_url,
         &repository_space_members,
+        &cleanup_mod_names,
+        &mod_enabled_overrides,
     )
     .await
     {
-        Ok(conflicts) => {
-            if !conflicts.blocking.is_empty() {
-                let message = format!(
-                    "Shared addon versions conflict within this repository space: {}. Publish matching shared files before updating.",
-                    conflicts.blocking.join(", ")
-                );
-                summary.log_table("failed-shared-version-conflict");
-                emit_progress!(ProgressEvent::Failed(message));
-                return;
-            }
-            if !conflicts.advisory.is_empty() {
-                shared_version_advisory = true;
-                emit_progress!(ProgressEvent::SharedVersionWarning {
-                    repositories: conflicts.advisory
-                });
-            }
-        }
-        Err(err) => {
-            summary.log_table("failed-shared-version-check");
-            emit_progress!(ProgressEvent::Failed(format!(
-                "Could not check shared addon versions: {err}"
-            )));
+        Ok(resolved) => resolved,
+        Err((message, table_tag)) => {
+            summary.log_table(table_tag);
+            emit_progress!(ProgressEvent::Failed(message));
             return;
         }
+    };
+    unexpected_by_mod = resolved_cleanup.unexpected_by_mod;
+    let unexpected_total: usize = unexpected_by_mod.values().map(Vec::len).sum();
+    if unexpected_total > 0 {
+        info!(
+            "Detected {} unexpected local files across {} addons for repo={}",
+            unexpected_total,
+            unexpected_by_mod.len(),
+            normalized_repo_url
+        );
+        emit_progress!(ProgressEvent::CleanupPlan {
+            files: unexpected_by_mod.values().flatten().cloned().collect()
+        });
+    }
+    if !resolved_cleanup.conflicts.advisory.is_empty() {
+        shared_version_advisory = true;
+        emit_progress!(ProgressEvent::SharedVersionWarning {
+            repositories: resolved_cleanup.conflicts.advisory
+        });
+    }
+    if download_file_ids.is_empty() && unexpected_by_mod.values().all(Vec::is_empty) {
+        let settled = quick_local_change_diff(
+            context.clone(),
+            &normalized_repo_url,
+            None,
+            Some(&mod_enabled_overrides),
+            Some(&progress_tx),
+            false,
+            true,
+            true,
+            None,
+        )
+        .await;
+        if !force_redownload && !settled.iter().any(|m| m.needs_update) {
+            persist_pending_updates(context.clone(), &normalized_repo_url, &settled).await;
+            emit_progress!(ProgressEvent::Diff { mods: settled });
+            if let Err(err) = truncate_all_download_tables(context.clone()).await {
+                warn!(
+                    "Failed to clear download queue after settled quick verify: {}",
+                    err
+                );
+            }
+            summary.push(StageEntry::new(
+                "download_skip_after_quick_verify",
+                overall_start.elapsed(),
+            ));
+            summary.log_table("early-exit-clean");
+            emit_progress!(ProgressEvent::Finished);
+            return;
+        }
+        let pending_mods = mods.iter().filter(|m| m.needs_update).count();
+        let message = format!(
+            "Unable to build a download queue for repo {} despite {} pending addon updates (possible undeletable unexpected local files)",
+            normalized_repo_url, pending_mods
+        );
+        error!("{}", message);
+        summary.log_table("failed-empty-queue");
+        emit_progress!(ProgressEvent::Failed(message));
+        return;
+    }
+    if let Some(backup_root) = auto_backup_directory
+        .as_deref()
+        .or(backup_local_drift.then_some(""))
+        && let Err(err) = backup_pending_addons_for_download(
+            backup_root,
+            &local_path,
+            &mods,
+            &progress_tx,
+            &operation_id,
+            Some(&crate::core::utils::addon_backup::AddonBackupOrigin {
+                game_space_id: crate::core::game::spaces::active_game_space().space_id,
+                repository_url: normalized_repo_url.clone(),
+                local_path: local_path.clone(),
+            }),
+        )
+    {
+        let message = format!("Automatic addon backup failed: {}", err);
+        error!("{}", message);
+        summary.log_table("failed-backup");
+        emit_progress!(ProgressEvent::Failed(message));
+        return;
     }
     crate::core::utils::profiling::phase("download");
     emit_progress!(ProgressEvent::UpdatePhase(
@@ -4057,6 +4340,15 @@ async fn run_repository_pipeline(
         )
         .await;
     }
+    let mut post_cleanup_diff = settle_cleanup_only_addons_after_removal(
+        context.clone(),
+        &normalized_repo_url,
+        &download_file_ids,
+        &unexpected_by_mod,
+        &mod_enabled_overrides,
+        Some(&progress_tx),
+    )
+    .await;
 
     emit_progress!(ProgressEvent::UpdatePhase(
         crate::core::utils::update_estimate::UpdatePhase::Saving,
@@ -4150,18 +4442,23 @@ async fn run_repository_pipeline(
     }
     // Emit a fresh diff after hashes so UI can update downloaded states immediately
     if download_file_ids.is_empty() {
-        let cleaned = quick_local_change_diff(
-            context.clone(),
-            &normalized_repo_url,
-            None,
-            Some(&mod_enabled_overrides),
-            Some(&progress_tx),
-            false,
-            true,
-            true,
-            None,
-        )
-        .await;
+        let cleaned = match post_cleanup_diff.take() {
+            Some(cleaned) => cleaned,
+            None => {
+                quick_local_change_diff(
+                    context.clone(),
+                    &normalized_repo_url,
+                    None,
+                    Some(&mod_enabled_overrides),
+                    Some(&progress_tx),
+                    false,
+                    true,
+                    true,
+                    None,
+                )
+                .await
+            }
+        };
         persist_pending_updates(context.clone(), &normalized_repo_url, &cleaned).await;
         emit_progress!(ProgressEvent::Diff { mods: cleaned });
     } else if let Some(hash_context) = incremental_hash_tree_context.as_ref() {
@@ -4170,7 +4467,10 @@ async fn run_repository_pipeline(
         } else {
             Some(&download_mod_ids)
         };
-        let mods = emit_diff(&hash_context.tree, diff_filter);
+        let mut mods = emit_diff(&hash_context.tree, diff_filter);
+        if let Some(cleanup_diff) = post_cleanup_diff.take() {
+            mods.extend(cleanup_diff.into_iter().filter(|m| m.needs_update));
+        }
         persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
     } else if let Ok(tree_after_hash) = Tree::load(context.clone(), &normalized_repo_url).await {
         let diff_filter = if download_mod_ids.is_empty() {
@@ -4178,7 +4478,10 @@ async fn run_repository_pipeline(
         } else {
             Some(&download_mod_ids)
         };
-        let mods = emit_diff(&tree_after_hash, diff_filter);
+        let mut mods = emit_diff(&tree_after_hash, diff_filter);
+        if let Some(cleanup_diff) = post_cleanup_diff.take() {
+            mods.extend(cleanup_diff.into_iter().filter(|m| m.needs_update));
+        }
         persist_pending_updates(context.clone(), &normalized_repo_url, &mods).await;
     } else {
         warn!("Failed to build diff tree after hash stage");
@@ -5260,5 +5563,281 @@ mod tests {
         assert!(!suspect_full_redownload_guard_applies(
             &summary, true, false, true
         ));
+    }
+
+    async fn run_shared_cleanup_fixture(
+        sibling_publishes_candidate: bool,
+        sibling_already_at_new_checksum: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<FoxyContext>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Shared");
+        let addon_dir = root.join("@mod_01");
+        std::fs::create_dir_all(&addon_dir).unwrap();
+        let kept = addon_dir.join("kept.pbo");
+        let candidate = addon_dir.join("obsolete.pbo");
+        std::fs::write(&kept, b"keep").unwrap();
+        std::fs::write(&candidate, b"drop").unwrap();
+
+        let kept_content_hash =
+            crate::core::utils::content_hash::fast_file_content_hash(&kept.to_string_lossy())
+                .unwrap();
+        let stale_folder_hash =
+            crate::core::utils::content_hash::calculate_addon_folder_content_hash(&addon_dir)
+                .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sibling_url = format!("http://{}/", listener.local_addr().unwrap());
+        let addon_checksum = if sibling_publishes_candidate {
+            "ADDON_WITH_OBSOLETE"
+        } else {
+            "ADDON_NEW"
+        };
+        let repo_addons_body = serde_json::json!({
+            "checksum": "REPO_NEW",
+            "requiredMods": [{"modName": "@mod_01", "checkSum": addon_checksum, "enabled": true}],
+            "optionalMods": []
+        })
+        .to_string();
+        let addon_manifest_body = if sibling_publishes_candidate {
+            serde_json::json!({
+                "checksum": addon_checksum,
+                "files": [
+                    {
+                        "path": "kept.pbo", "checksum": "KEPT", "length": 4,
+                        "parts": [{"path": "kept.pbo", "checksum": "KEPT_PART", "start": 0, "length": 4}]
+                    },
+                    {
+                        "path": "obsolete.pbo", "checksum": "OBSOLETE", "length": 4,
+                        "parts": [{"path": "obsolete.pbo", "checksum": "OBSOLETE_PART", "start": 0, "length": 4}]
+                    }
+                ]
+            })
+            .to_string()
+        } else {
+            serde_json::json!({
+                "checksum": addon_checksum,
+                "files": [{
+                    "path": "kept.pbo", "checksum": "KEPT", "length": 4,
+                    "parts": [{"path": "kept.pbo", "checksum": "KEPT_PART", "start": 0, "length": 4}]
+                }]
+            })
+            .to_string()
+        };
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..length]);
+                let path = request.split_whitespace().nth(1).unwrap_or_default();
+                let body = match path {
+                    "/repo.json" => {
+                        r#"{"repoName":"RepoAlpha","checksum":"REPO_NEW","foxyMode":"FoxyModeV1"}"#
+                    }
+                    "/foxy_addons.json" => &repo_addons_body,
+                    "/@mod_01/foxy_addon.json" => &addon_manifest_body,
+                    _ => panic!("Unexpected fixture request: {path}"),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let root_str = root.to_string_lossy().replace('\\', "/");
+        let addon_str = addon_dir.to_string_lossy().replace('\\', "/");
+        let kept_str = kept.to_string_lossy().replace('\\', "/");
+        let candidate_str = candidate.to_string_lossy().replace('\\', "/");
+        let sibling_repo_checksum = if sibling_already_at_new_checksum {
+            "REPO_NEW"
+        } else {
+            "REPO_OLD"
+        };
+        let sibling_addon_checksum = if sibling_already_at_new_checksum {
+            addon_checksum
+        } else {
+            "ADDON_OLD"
+        };
+
+        let db_handle = crate::core::tasks::db_turso::build_test_database().await;
+        let db = FoxyDb::from_turso(db_handle.clone());
+        let main_url = "http://repo.example.invalid:8080/";
+        db.execute(
+            "INSERT INTO repositories \
+             (id,name,remote_url,local_path,local_checksum,remote_checksum,local_content_hash,foxy_mode) VALUES \
+             (1,'MainRepo',?,?,'ADDON_OLD','ADDON_NEW',?,'FoxyModeV1'), \
+             (2,'RepoAlpha',?,?,'REPO_OLD',?,'sibling-content','FoxyModeV1')",
+            params![
+                main_url,
+                format!("{root_str}/"),
+                stale_folder_hash.clone(),
+                sibling_url.clone(),
+                format!("{root_str}/"),
+                sibling_repo_checksum
+            ],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addons \
+             (id,name,remote_path,local_path,enabled,required,local_checksum,remote_checksum,local_content_hash,data_order) VALUES \
+             (1,'@mod_01',?,?,1,1,'ADDON_OLD','ADDON_NEW',?,0), \
+             (2,'@mod_01',?,?,1,1,?,?,'',0)",
+            params![
+                format!("{main_url}@mod_01"),
+                addon_str.clone(),
+                stale_folder_hash,
+                format!("{sibling_url}@mod_01"),
+                addon_str,
+                sibling_addon_checksum,
+                sibling_addon_checksum
+            ],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO repository_addons (repository_id,addon_id) VALUES (1,1),(2,2)",
+            params![],
+        )
+        .await
+        .unwrap();
+        // Seed MainRepo with an already-pruned orphan file row for `obsolete.pbo`
+        // (simulating the post-check state after RemoteRefreshOnly pruned links).
+        db.execute(
+            "INSERT INTO files \
+             (id,name,remote_path,local_path,local_checksum,remote_checksum,local_content_hash,length,data_order) VALUES \
+             (10,'kept.pbo',?,?, 'KEPT','KEPT',?,4,0), \
+             (11,'obsolete.pbo',?,?,'OBSOLETE','OBSOLETE','',4,1), \
+             (20,'kept.pbo',?,?, 'KEPT','KEPT',?,4,0), \
+             (21,'obsolete.pbo',?,?,'OBSOLETE','OBSOLETE','',4,1)",
+            params![
+                format!("{main_url}@mod_01/kept.pbo"),
+                kept_str.clone(),
+                kept_content_hash.clone(),
+                format!("{main_url}@mod_01/obsolete.pbo"),
+                candidate_str.clone(),
+                format!("{sibling_url}@mod_01/kept.pbo"),
+                kept_str.clone(),
+                kept_content_hash,
+                format!("{sibling_url}@mod_01/obsolete.pbo"),
+                candidate_str
+            ],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addon_files (addon_id,file_id) VALUES (1,10),(2,20),(2,21)",
+            params![],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO subfiles (file_id,path,local_length,local_start,remote_length,remote_start,local_checksum,remote_checksum,data_order) VALUES \
+             (10,'kept.pbo#0',4,0,4,0,'KEPT_PART','KEPT_PART',0), \
+             (20,'kept.pbo#0',4,0,4,0,'KEPT_PART','KEPT_PART',0), \
+             (21,'obsolete.pbo#0',4,0,4,0,'OBSOLETE_PART','OBSOLETE_PART',0)",
+            params![],
+        )
+        .await
+        .unwrap();
+
+        let context = Arc::new(
+            FoxyContext::new(db_handle, reqwest::Client::new()).with_target_local_path(&root_str),
+        );
+        let overrides = HashMap::new();
+        let cleanup_mods =
+            collect_cleanup_scope_mods(&context, main_url, &HashSet::new(), false, &overrides)
+                .await;
+        assert!(cleanup_mods.contains("@mod_01"));
+
+        let resolved = resolve_cleanup_and_shared_conflicts(
+            context.clone(),
+            main_url,
+            &[(sibling_url, format!("{root_str}/"))],
+            &cleanup_mods,
+            &overrides,
+        )
+        .await
+        .unwrap();
+        server.abort();
+
+        if !resolved.unexpected_by_mod.is_empty() {
+            let mut rollback =
+                UpdateRollbackSession::new_for_instance(temp.path(), main_url, &root_str)
+                    .await
+                    .unwrap();
+            for path in resolved.unexpected_by_mod.values().flatten() {
+                rollback.remove_file(0, Path::new(path)).await.unwrap();
+            }
+            rollback.commit().await.unwrap();
+
+            let settled = settle_cleanup_only_addons_after_removal(
+                context.clone(),
+                main_url,
+                &HashSet::new(),
+                &resolved.unexpected_by_mod,
+                &overrides,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(!settled.iter().any(|m| m.needs_update));
+            propagate_checksums_to_siblings(context.clone(), main_url).await;
+        }
+
+        (temp, context, kept, candidate)
+    }
+
+    #[tokio::test]
+    async fn shared_cleanup_removes_obsolete_file_after_refreshing_stale_sibling_even_for_deletion_only_update()
+     {
+        for sibling_at_new_checksum in [false, true] {
+            let (_temp, context, kept, obsolete) =
+                run_shared_cleanup_fixture(false, sibling_at_new_checksum).await;
+            assert!(kept.exists(), "kept file must remain");
+            assert!(
+                !obsolete.exists(),
+                "obsolete file must be deleted after sibling refresh (sibling_at_new_checksum={sibling_at_new_checksum})"
+            );
+            let db = context.db();
+            let addons = db
+                .query_all(
+                    "SELECT id, local_checksum, remote_checksum, local_content_hash FROM addons ORDER BY id ASC",
+                    params![],
+                )
+                .await
+                .unwrap();
+            assert_eq!(addons.len(), 2);
+            for row in addons {
+                assert_eq!(
+                    row.get_string("local_checksum").unwrap(),
+                    "ADDON_NEW",
+                    "addon checksum must settle and propagate cleanly"
+                );
+                assert!(
+                    !row.get_string("local_content_hash").unwrap().is_empty(),
+                    "addon content hash must settle and propagate"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_cleanup_preserves_file_still_owned_by_refreshed_sibling() {
+        let (_temp, _context, kept, shared_file) = run_shared_cleanup_fixture(true, false).await;
+        assert!(kept.exists());
+        assert!(
+            shared_file.exists(),
+            "file still published by refreshed sibling must stay on disk"
+        );
     }
 }

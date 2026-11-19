@@ -367,9 +367,10 @@ async fn reconcile_addon_file_links(
     mod_parent: Arc<FoxyMod>,
     desired_file_ids: HashSet<i64>,
     can_prune_stale: bool,
-) {
+    manifest_empty: bool,
+) -> bool {
     let mod_id = mod_parent.id as i64;
-    if !can_prune_stale {
+    if !can_prune_stale && !manifest_empty {
         warn!(
             "Skipping stale addon_files cleanup for {} due to unresolved file ids",
             mod_parent.remote_path
@@ -387,17 +388,22 @@ async fn reconcile_addon_file_links(
         );
     }
 
+    if !can_prune_stale {
+        return manifest_empty;
+    }
+
     // Phase 2: Prune stale addon_file links. A repository that linked no file
     // before this rebuild has no leftover links, so skip the per-mod SELECT/DELETE.
-    if can_prune_stale
-        && !context.has_fresh_addon_file_links()
+    if !context.has_fresh_addon_file_links()
         && let Err(e) = prune_stale_addon_file_links(&context.db(), mod_id, &desired_file_ids).await
     {
         warn!(
             "Failed to prune stale addon_files for {}: {}",
             mod_parent.remote_path, e
         );
+        return false;
     }
+    true
 }
 
 /// Deletes the addon's links to files outside `desired_file_ids`. The read runs
@@ -465,6 +471,21 @@ pub(crate) async fn flush_pending_addon_file_links(context: Arc<FoxyContext>) {
         }
         if let Err(e) = db.execute_retry("addon_files insert", &sql, values).await {
             warn!("Failed to insert batched addon_files: {}", e);
+            context.mark_transient_metadata_failure();
+            let mut failed_addon_ids: Vec<i64> =
+                chunk.iter().map(|(addon_id, _)| *addon_id).collect();
+            failed_addon_ids.sort_unstable();
+            failed_addon_ids.dedup();
+            for id_chunk in failed_addon_ids.chunks(SQLITE_MAX_VARIABLES.max(1)) {
+                let id_placeholders = vec!["?"; id_chunk.len()].join(", ");
+                let sql = format!(
+                    "UPDATE addons SET remote_checksum = '' WHERE id IN ({id_placeholders})"
+                );
+                let id_values: Vec<DbValue> = id_chunk.iter().copied().map(DbValue::from).collect();
+                let _ = db
+                    .execute_retry("invalidate failed addon links", &sql, id_values)
+                    .await;
+            }
         }
     }
 }
@@ -743,13 +764,14 @@ pub(crate) async fn apply_mod_file_rows(
     } = staged;
     let mut all_rows_with_json = Vec::new();
     let mut desired_file_ids: HashSet<i64> = HashSet::new();
+    let manifest_empty = file_keys.is_empty();
     // An explicit empty file list is accepted metadata, but it cannot authorize
     // automatic removal of files the user may still need.
-    let mut can_prune_file_links = !file_keys.is_empty();
+    let mut can_prune_file_links = !manifest_empty;
     let mut total_bytes: u64 = 0;
     let mut total_parts: usize = 0;
 
-    if !file_keys.is_empty() {
+    if !manifest_empty {
         let db = context.db();
         let manifest_file_ids: HashSet<i64> = file_keys
             .iter()
@@ -808,11 +830,12 @@ pub(crate) async fn apply_mod_file_rows(
         }
     }
 
-    reconcile_addon_file_links(
+    let links_reconciled = reconcile_addon_file_links(
         context.clone(),
         mod_parent.clone(),
         desired_file_ids,
         can_prune_file_links,
+        manifest_empty,
     )
     .await;
 
@@ -872,7 +895,10 @@ pub(crate) async fn apply_mod_file_rows(
     }
 
     let parts_persist_duration = parts_start.elapsed();
-    if let Err(error) = context
+    if !links_reconciled {
+        context.mark_transient_metadata_failure();
+        invalidate_failed_mod_manifest(&context, &mod_parent).await;
+    } else if let Err(error) = context
         .db()
         .execute_retry(
             "store applied addon remote checksum",
@@ -881,10 +907,12 @@ pub(crate) async fn apply_mod_file_rows(
         )
         .await
     {
+        context.mark_transient_metadata_failure();
         error!(
             "Could not store applied addon remote checksum for addon_id={}: {}",
             mod_parent.id, error
         );
+        invalidate_failed_mod_manifest(&context, &mod_parent).await;
     }
 
     ModRecheckStats {
@@ -1387,5 +1415,49 @@ mod tests {
     #[tokio::test]
     async fn forced_manifest_refresh_replaces_parts_with_unchanged_file_checksum() {
         assert_clean_file_refreshes_parts("NEW", true, true).await;
+    }
+
+    #[tokio::test]
+    async fn incomplete_addon_file_link_reconcile_invalidates_remote_checksum() {
+        use crate::core::tasks::db_turso::build_test_database;
+
+        let context = Arc::new(FoxyContext::new(
+            build_test_database().await,
+            reqwest::Client::new(),
+        ));
+        let db = context.db();
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, required, enabled, remote_checksum) VALUES (1, '@mod_01', 'https://repo.example.invalid/@mod_01', 'R:/Mods/MainRepo/@mod_01', 1, 1, 'OLD')",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let mut staged = staged_file("@mod_01", "new.pbo", "NEW_FILE");
+        staged.mod_parent = Arc::new(FoxyMod {
+            id: 1,
+            name: "@mod_01".to_string(),
+            remote_path: "https://repo.example.invalid/@mod_01".to_string(),
+            local_path: "R:/Mods/MainRepo/@mod_01".to_string(),
+            remote_checksum: "NEW".to_string(),
+            ..Default::default()
+        });
+
+        apply_mod_file_rows(
+            context.clone(),
+            staged,
+            &FileUpsertResult {
+                files: HashMap::new(),
+                previous: HashMap::new(),
+            },
+        )
+        .await;
+
+        let addon = db
+            .query_one("SELECT remote_checksum FROM addons WHERE id = 1", params![])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(addon.get_string("remote_checksum").unwrap(), "");
+        assert!(context.has_transient_metadata_failure());
     }
 }
