@@ -297,11 +297,54 @@ pub(crate) async fn check_shared_version_conflicts_with_cleanup_paths(
     strict_members: &[(String, String)],
     cleanup_candidate_paths: &[String],
 ) -> Result<SharedVersionConflicts> {
+    check_shared_version_conflicts_internal(
+        context,
+        repo_url,
+        strict_members,
+        cleanup_candidate_paths,
+        true,
+    )
+    .await
+}
+
+/// Refreshes siblings holding cleanup-candidate paths during prepare/recheck flows
+/// without failing status checks on version conflicts or offline siblings.
+pub(crate) async fn refresh_cleanup_shielding_siblings(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    strict_members: &[(String, String)],
+    cleanup_candidate_paths: &[String],
+) -> Result<()> {
+    if cleanup_candidate_paths.is_empty() {
+        return Ok(());
+    }
+    check_shared_version_conflicts_internal(
+        context,
+        repo_url,
+        strict_members,
+        cleanup_candidate_paths,
+        false,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn check_shared_version_conflicts_internal(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    strict_members: &[(String, String)],
+    cleanup_candidate_paths: &[String],
+    check_download_targets: bool,
+) -> Result<SharedVersionConflicts> {
     let current = load_repository_by_remote_url(context.clone(), repo_url)
         .await
         .context("load repository for shared-version check")?;
     let db = context.db();
-    let source = source_download_expectations(&db, current.id as i64).await?;
+    let source = if check_download_targets {
+        source_download_expectations(&db, current.id as i64).await?
+    } else {
+        Vec::new()
+    };
     let source_paths = source
         .iter()
         .map(|(path, _)| path.clone())
@@ -407,7 +450,7 @@ pub(crate) async fn check_shared_version_conflicts_with_cleanup_paths(
         )
         .await;
         if refreshed.is_none() {
-            if strict_member {
+            if strict_member && check_download_targets {
                 return Err(anyhow!(
                     "Could not refresh repository-space member {} before checking shared file versions",
                     sibling_name

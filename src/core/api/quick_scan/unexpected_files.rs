@@ -28,7 +28,7 @@ pub(super) async fn load_managed_local_paths(context: &FoxyContext) -> Option<Ha
     load_managed_local_paths_scoped(context, None).await
 }
 
-async fn load_managed_local_paths_scoped(
+pub(super) async fn load_managed_local_paths_scoped(
     context: &FoxyContext,
     repository_id: Option<i64>,
 ) -> Option<HashSet<String>> {

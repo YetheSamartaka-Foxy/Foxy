@@ -212,6 +212,26 @@ async fn seed_and_check_cleanup_overlap(
     published_files_json: &str,
     candidate_name: &str,
 ) -> Vec<i64> {
+    seed_and_check_cleanup_overlap_with_enabled(
+        true,
+        sibling_repo_checksum,
+        sibling_addon_checksum,
+        published_addon_checksum,
+        published_files_json,
+        candidate_name,
+    )
+    .await
+    .0
+}
+
+async fn seed_and_check_cleanup_overlap_with_enabled(
+    sibling_enabled: bool,
+    sibling_repo_checksum: &str,
+    sibling_addon_checksum: &str,
+    published_addon_checksum: &str,
+    published_files_json: &str,
+    candidate_name: &str,
+) -> (Vec<i64>, bool) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("Shared");
     let addon_dir = root.join("@mod_01");
@@ -280,11 +300,12 @@ async fn seed_and_check_cleanup_overlap(
         "INSERT INTO addons \
          (id,name,remote_path,local_path,enabled,required,local_checksum,remote_checksum,local_content_hash,data_order) VALUES \
          (1,'@mod_01','http://repo.example.invalid:8080/@mod_01',?,1,1,'ADDON_OLD','ADDON_NEW','source-content',0), \
-         (2,'@mod_01',?,?,1,1,?,?,'sibling-content',0)",
+         (2,'@mod_01',?,?,?,1,?,?,'sibling-content',0)",
         params![
             addon_str.clone(),
             format!("{sibling_url}@mod_01"),
             addon_str,
+            sibling_enabled,
             sibling_addon_checksum,
             sibling_addon_checksum
         ],
@@ -345,15 +366,24 @@ async fn seed_and_check_cleanup_overlap(
     server.abort();
     assert_eq!(conflicts, SharedVersionConflicts::default());
 
-    db.query_all(
-        "SELECT file_id FROM addon_files WHERE addon_id = 2 AND file_id = 21",
-        params![],
-    )
-    .await
-    .unwrap()
-    .into_iter()
-    .filter_map(|row| row.get_i64("file_id").ok())
-    .collect()
+    let remaining = db
+        .query_all(
+            "SELECT file_id FROM addon_files WHERE addon_id = 2 AND file_id = 21",
+            params![],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|row| row.get_i64("file_id").ok())
+        .collect();
+    let enabled = db
+        .query_one("SELECT enabled FROM addons WHERE id = 2", params![])
+        .await
+        .unwrap()
+        .unwrap()
+        .get_bool("enabled")
+        .unwrap();
+    (remaining, enabled)
 }
 
 #[tokio::test]
@@ -369,6 +399,27 @@ async fn cleanup_candidate_refreshes_stale_sibling_on_deletion_only_update() {
     assert!(
         remaining.is_empty(),
         "sibling refresh should prune removed file link before cleanup runs"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_candidate_refreshes_disabled_stale_sibling_without_enabling_it() {
+    let (remaining, enabled) = seed_and_check_cleanup_overlap_with_enabled(
+        false,
+        "REPO_OLD",
+        "ADDON_OLD",
+        "ADDON_NEW",
+        r#"{"checksum":"ADDON_NEW","files":[{"path":"kept.pbo","checksum":"KEPT","length":4,"parts":[{"path":"kept.pbo","checksum":"KEPT_PART","start":0,"length":4}]}]}"#,
+        "obsolete.pbo",
+    )
+    .await;
+    assert!(
+        remaining.is_empty(),
+        "disabled sibling refresh should still prune removed file links"
+    );
+    assert!(
+        !enabled,
+        "refreshing a disabled sibling addon must keep it disabled"
     );
 }
 

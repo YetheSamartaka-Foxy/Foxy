@@ -453,7 +453,10 @@ pub(super) async fn process_mods_upsert(
     let mut tasks = Vec::new();
 
     for mod_entry in all_mods {
-        if !mod_entry.enabled {
+        let mod_key = mod_entry.name.to_lowercase();
+        let force_mod_refresh = context.forced_mod_refreshes.contains(&mod_key)
+            || context.reapplied_mod_manifests.contains(&mod_key);
+        if !mod_entry.enabled && !force_mod_refresh {
             debug!(
                 "Skipping disabled mod during remote recheck: {}",
                 mod_entry.remote_path
@@ -480,9 +483,6 @@ pub(super) async fn process_mods_upsert(
                 })
             };
             let has_content_hash = !mod_entry.local_content_hash.trim().is_empty();
-            let mod_key = mod_entry.name.to_lowercase();
-            let force_mod_refresh = context_clone.forced_mod_refreshes.contains(&mod_key)
-                || context_clone.reapplied_mod_manifests.contains(&mod_key);
             let remote_graph_unchanged = previous_mod.as_ref().is_some_and(|previous| {
                 previous.remote_checksum == mod_entry.remote_checksum
                     && normalize_path_key(&previous.local_path)
@@ -625,15 +625,18 @@ pub(super) async fn stage_manifests_for_publication(
             if name.is_empty() {
                 continue;
             }
+            let mod_key = name.to_lowercase();
             let enabled = enabled_overrides
-                .and_then(|overrides| overrides.get(&name.to_lowercase()).copied())
+                .and_then(|overrides| overrides.get(&mod_key).copied())
                 .unwrap_or_else(|| {
                     entry
                         .get("enabled")
                         .and_then(Value::as_bool)
                         .unwrap_or(true)
                 });
-            if !enabled {
+            let forced = context.forced_mod_refreshes.contains(&mod_key)
+                || context.reapplied_mod_manifests.contains(&mod_key);
+            if !enabled && !forced {
                 continue;
             }
             let remote_path = join_path(&repository.remote_url, name);

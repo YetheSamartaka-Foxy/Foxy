@@ -1165,6 +1165,25 @@ async fn resolve_cleanup_and_shared_conflicts(
     cleanup_mod_names: &HashSet<String>,
     mod_enabled_overrides: &HashMap<String, bool>,
 ) -> Result<CleanupSharedResolution, (String, &'static str)> {
+    resolve_cleanup_and_shared_conflicts_inner(
+        context,
+        repo_url,
+        repository_space_members,
+        cleanup_mod_names,
+        mod_enabled_overrides,
+        true,
+    )
+    .await
+}
+
+async fn resolve_cleanup_and_shared_conflicts_inner(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    repository_space_members: &[(String, String)],
+    cleanup_mod_names: &HashSet<String>,
+    mod_enabled_overrides: &HashMap<String, bool>,
+    check_download_targets: bool,
+) -> Result<CleanupSharedResolution, (String, &'static str)> {
     // Refresh conflicting and candidate-shielding siblings before deciding final
     // cleanup paths so obsolete files dropped from sibling manifests are not
     // kept on disk by stale sibling metadata.
@@ -1182,13 +1201,24 @@ async fn resolve_cleanup_and_shared_conflicts(
             "failed-cleanup-preflight",
         ));
     }
-    let conflicts = shared_conflicts::check_shared_version_conflicts_with_cleanup_paths(
-        context.clone(),
-        repo_url,
-        repository_space_members,
-        &cleanup_candidate_paths,
-    )
-    .await
+    let conflicts = if check_download_targets {
+        shared_conflicts::check_shared_version_conflicts_with_cleanup_paths(
+            context.clone(),
+            repo_url,
+            repository_space_members,
+            &cleanup_candidate_paths,
+        )
+        .await
+    } else {
+        shared_conflicts::refresh_cleanup_shielding_siblings(
+            context.clone(),
+            repo_url,
+            repository_space_members,
+            &cleanup_candidate_paths,
+        )
+        .await
+        .map(|()| shared_conflicts::SharedVersionConflicts::default())
+    }
     .map_err(|err| {
         (
             format!("Could not check shared addon versions: {err}"),
@@ -1222,6 +1252,158 @@ async fn resolve_cleanup_and_shared_conflicts(
         unexpected_by_mod,
         conflicts,
     })
+}
+
+fn merge_cleanup_diffs(mods: &mut Vec<ModDiffSummary>, cleanup_diffs: Vec<ModDiffSummary>) -> bool {
+    let mut changed = false;
+    for diff in cleanup_diffs.into_iter().filter(|diff| diff.needs_update) {
+        if let Some(existing) = mods
+            .iter_mut()
+            .find(|existing| existing.name.eq_ignore_ascii_case(&diff.name))
+        {
+            *existing = diff;
+        } else {
+            mods.push(diff);
+        }
+        changed = true;
+    }
+    changed
+}
+
+fn should_early_exit_clean_before_queue(
+    force_redownload: bool,
+    prepare_download_plan: bool,
+    mods: &[ModDiffSummary],
+    cleanup_mod_names: &HashSet<String>,
+    unexpected_by_mod: &HashMap<String, Vec<String>>,
+) -> bool {
+    if force_redownload || mods.iter().any(|m| m.needs_update) {
+        return false;
+    }
+    if prepare_download_plan {
+        unexpected_by_mod.values().all(Vec::is_empty)
+    } else {
+        cleanup_mod_names.is_empty()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_plan_cleanup_and_diff(
+    context: &Arc<FoxyContext>,
+    normalized_repo_url: &str,
+    repository_space_members: &[(String, String)],
+    cleanup_mod_names: &HashSet<String>,
+    mod_enabled_overrides: &HashMap<String, bool>,
+    progress_tx: &Sender<ProgressEvent>,
+    operation_id: &str,
+    mods: &mut Vec<ModDiffSummary>,
+) -> Result<HashMap<String, Vec<String>>, (String, &'static str)> {
+    let resolved = resolve_cleanup_and_shared_conflicts_inner(
+        context.clone(),
+        normalized_repo_url,
+        repository_space_members,
+        cleanup_mod_names,
+        mod_enabled_overrides,
+        false,
+    )
+    .await?;
+    let unexpected_by_mod = resolved.unexpected_by_mod;
+    let unexpected_total: usize = unexpected_by_mod.values().map(Vec::len).sum();
+    if unexpected_total > 0 {
+        info!(
+            "Detected {} unexpected local files across {} addons for repo={}",
+            unexpected_total,
+            unexpected_by_mod.len(),
+            normalized_repo_url
+        );
+        send_progress_event(
+            progress_tx,
+            ProgressEvent::CleanupPlan {
+                files: unexpected_by_mod.values().flatten().cloned().collect(),
+            },
+            operation_id,
+        );
+        let unflagged_cleanup_mods: HashSet<String> = unexpected_by_mod
+            .iter()
+            .filter(|(_, paths)| !paths.is_empty())
+            .map(|(name, _)| name.to_lowercase())
+            .filter(|name| {
+                !mods
+                    .iter()
+                    .any(|m| m.needs_update && m.name.eq_ignore_ascii_case(name))
+            })
+            .collect();
+        if !unflagged_cleanup_mods.is_empty() {
+            let cleanup_diffs = quick_local_change_diff(
+                context.clone(),
+                normalized_repo_url,
+                Some(&unflagged_cleanup_mods),
+                Some(mod_enabled_overrides),
+                Some(progress_tx),
+                false,
+                true,
+                false,
+                None,
+            )
+            .await;
+            if merge_cleanup_diffs(mods, cleanup_diffs) {
+                send_progress_event(
+                    progress_tx,
+                    ProgressEvent::Diff { mods: mods.clone() },
+                    operation_id,
+                );
+                persist_pending_updates(context.clone(), normalized_repo_url, mods).await;
+            }
+        }
+    }
+    Ok(unexpected_by_mod)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn try_settle_empty_queue_clean(
+    context: &Arc<FoxyContext>,
+    normalized_repo_url: &str,
+    mod_enabled_overrides: &HashMap<String, bool>,
+    progress_tx: &Sender<ProgressEvent>,
+    operation_id: &str,
+    force_redownload: bool,
+    overall_start: std::time::Instant,
+    summary: &mut PipelineSummary,
+) -> bool {
+    let settled = quick_local_change_diff(
+        context.clone(),
+        normalized_repo_url,
+        None,
+        Some(mod_enabled_overrides),
+        Some(progress_tx),
+        false,
+        true,
+        true,
+        None,
+    )
+    .await;
+    if force_redownload || settled.iter().any(|m| m.needs_update) {
+        return false;
+    }
+    persist_pending_updates(context.clone(), normalized_repo_url, &settled).await;
+    send_progress_event(
+        progress_tx,
+        ProgressEvent::Diff { mods: settled },
+        operation_id,
+    );
+    if let Err(err) = truncate_all_download_tables(context.clone()).await {
+        warn!(
+            "Failed to clear download queue after settled quick verify: {}",
+            err
+        );
+    }
+    summary.push(StageEntry::new(
+        "download_skip_after_quick_verify",
+        overall_start.elapsed(),
+    ));
+    summary.log_table("early-exit-clean");
+    send_progress_event(progress_tx, ProgressEvent::Finished, operation_id);
+    true
 }
 
 async fn settle_cleanup_only_addons_after_removal(
@@ -3001,24 +3183,24 @@ async fn run_repository_pipeline(
         )
         .await;
         if prepare_download_plan && !cleanup_mod_names.is_empty() {
-            unexpected_by_mod = collect_unexpected_files_for_repo_mods(
-                context.clone(),
+            match prepare_plan_cleanup_and_diff(
+                &context,
                 &normalized_repo_url,
+                &repository_space_members,
                 &cleanup_mod_names,
-                Some(&mod_enabled_overrides),
+                &mod_enabled_overrides,
+                &progress_tx,
+                &operation_id,
+                &mut mods,
             )
-            .await;
-            let unexpected_total: usize = unexpected_by_mod.values().map(Vec::len).sum();
-            if unexpected_total > 0 {
-                info!(
-                    "Detected {} unexpected local files across {} addons for repo={}",
-                    unexpected_total,
-                    unexpected_by_mod.len(),
-                    normalized_repo_url
-                );
-                emit_progress!(ProgressEvent::CleanupPlan {
-                    files: unexpected_by_mod.values().flatten().cloned().collect()
-                });
+            .await
+            {
+                Ok(unexpected) => unexpected_by_mod = unexpected,
+                Err((message, table_tag)) => {
+                    summary.log_table(table_tag);
+                    emit_progress!(ProgressEvent::Failed(message));
+                    return;
+                }
             }
         }
 
@@ -3348,8 +3530,13 @@ async fn run_repository_pipeline(
         }
 
         // Queue may still contain stale targets when quick verification proves files are already valid.
-        if !force_redownload && !mods.iter().any(|m| m.needs_update) && cleanup_mod_names.is_empty()
-        {
+        if should_early_exit_clean_before_queue(
+            force_redownload,
+            prepare_download_plan,
+            &mods,
+            &cleanup_mod_names,
+            &unexpected_by_mod,
+        ) {
             if let Err(err) = truncate_all_download_tables(context.clone()).await {
                 warn!(
                     "Failed to clear download queue after clean post-remote quick verify: {}",
@@ -3369,6 +3556,20 @@ async fn run_repository_pipeline(
             && download_file_ids.is_empty()
             && unexpected_by_mod.values().all(Vec::is_empty)
         {
+            if try_settle_empty_queue_clean(
+                &context,
+                &normalized_repo_url,
+                &mod_enabled_overrides,
+                &progress_tx,
+                &operation_id,
+                force_redownload,
+                overall_start,
+                &mut summary,
+            )
+            .await
+            {
+                return;
+            }
             let pending_mods = mods.iter().filter(|m| m.needs_update).count();
             let message = format!(
                 "Unable to build a download queue for repo {} despite {} pending addon updates (possible undeletable unexpected local files)",
@@ -3513,33 +3714,18 @@ async fn run_repository_pipeline(
         });
     }
     if download_file_ids.is_empty() && unexpected_by_mod.values().all(Vec::is_empty) {
-        let settled = quick_local_change_diff(
-            context.clone(),
+        if try_settle_empty_queue_clean(
+            &context,
             &normalized_repo_url,
-            None,
-            Some(&mod_enabled_overrides),
-            Some(&progress_tx),
-            false,
-            true,
-            true,
-            None,
+            &mod_enabled_overrides,
+            &progress_tx,
+            &operation_id,
+            force_redownload,
+            overall_start,
+            &mut summary,
         )
-        .await;
-        if !force_redownload && !settled.iter().any(|m| m.needs_update) {
-            persist_pending_updates(context.clone(), &normalized_repo_url, &settled).await;
-            emit_progress!(ProgressEvent::Diff { mods: settled });
-            if let Err(err) = truncate_all_download_tables(context.clone()).await {
-                warn!(
-                    "Failed to clear download queue after settled quick verify: {}",
-                    err
-                );
-            }
-            summary.push(StageEntry::new(
-                "download_skip_after_quick_verify",
-                overall_start.elapsed(),
-            ));
-            summary.log_table("early-exit-clean");
-            emit_progress!(ProgressEvent::Finished);
+        .await
+        {
             return;
         }
         let pending_mods = mods.iter().filter(|m| m.needs_update).count();
@@ -5565,15 +5751,22 @@ mod tests {
         ));
     }
 
-    async fn run_shared_cleanup_fixture(
+    struct SharedCleanupSeed {
+        temp: tempfile::TempDir,
+        context: Arc<FoxyContext>,
+        main_url: &'static str,
+        sibling_url: String,
+        root_str: String,
+        kept: std::path::PathBuf,
+        candidate: std::path::PathBuf,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    async fn seed_shared_cleanup_fixture(
         sibling_publishes_candidate: bool,
         sibling_already_at_new_checksum: bool,
-    ) -> (
-        tempfile::TempDir,
-        Arc<FoxyContext>,
-        std::path::PathBuf,
-        std::path::PathBuf,
-    ) {
+        sibling_enabled: bool,
+    ) -> SharedCleanupSeed {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let temp = tempfile::tempdir().unwrap();
@@ -5601,7 +5794,7 @@ mod tests {
         };
         let repo_addons_body = serde_json::json!({
             "checksum": "REPO_NEW",
-            "requiredMods": [{"modName": "@mod_01", "checkSum": addon_checksum, "enabled": true}],
+            "requiredMods": [{"modName": "@mod_01", "checkSum": addon_checksum, "enabled": sibling_enabled}],
             "optionalMods": []
         })
         .to_string();
@@ -5691,13 +5884,14 @@ mod tests {
             "INSERT INTO addons \
              (id,name,remote_path,local_path,enabled,required,local_checksum,remote_checksum,local_content_hash,data_order) VALUES \
              (1,'@mod_01',?,?,1,1,'ADDON_OLD','ADDON_NEW',?,0), \
-             (2,'@mod_01',?,?,1,1,?,?,'',0)",
+             (2,'@mod_01',?,?,?,1,?,?,'',0)",
             params![
                 format!("{main_url}@mod_01"),
                 addon_str.clone(),
                 stale_folder_hash,
                 format!("{sibling_url}@mod_01"),
                 addon_str,
+                sibling_enabled,
                 sibling_addon_checksum,
                 sibling_addon_checksum
             ],
@@ -5710,8 +5904,6 @@ mod tests {
         )
         .await
         .unwrap();
-        // Seed MainRepo with an already-pruned orphan file row for `obsolete.pbo`
-        // (simulating the post-check state after RemoteRefreshOnly pruned links).
         db.execute(
             "INSERT INTO files \
              (id,name,remote_path,local_path,local_checksum,remote_checksum,local_content_hash,length,data_order) VALUES \
@@ -5753,36 +5945,71 @@ mod tests {
         let context = Arc::new(
             FoxyContext::new(db_handle, reqwest::Client::new()).with_target_local_path(&root_str),
         );
+        SharedCleanupSeed {
+            temp,
+            context,
+            main_url,
+            sibling_url,
+            root_str,
+            kept,
+            candidate,
+            server,
+        }
+    }
+
+    async fn run_shared_cleanup_fixture(
+        sibling_publishes_candidate: bool,
+        sibling_already_at_new_checksum: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<FoxyContext>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let seed = seed_shared_cleanup_fixture(
+            sibling_publishes_candidate,
+            sibling_already_at_new_checksum,
+            true,
+        )
+        .await;
         let overrides = HashMap::new();
-        let cleanup_mods =
-            collect_cleanup_scope_mods(&context, main_url, &HashSet::new(), false, &overrides)
-                .await;
+        let cleanup_mods = collect_cleanup_scope_mods(
+            &seed.context,
+            seed.main_url,
+            &HashSet::new(),
+            false,
+            &overrides,
+        )
+        .await;
         assert!(cleanup_mods.contains("@mod_01"));
 
         let resolved = resolve_cleanup_and_shared_conflicts(
-            context.clone(),
-            main_url,
-            &[(sibling_url, format!("{root_str}/"))],
+            seed.context.clone(),
+            seed.main_url,
+            &[(seed.sibling_url, format!("{}/", seed.root_str))],
             &cleanup_mods,
             &overrides,
         )
         .await
         .unwrap();
-        server.abort();
+        seed.server.abort();
 
         if !resolved.unexpected_by_mod.is_empty() {
-            let mut rollback =
-                UpdateRollbackSession::new_for_instance(temp.path(), main_url, &root_str)
-                    .await
-                    .unwrap();
+            let mut rollback = UpdateRollbackSession::new_for_instance(
+                seed.temp.path(),
+                seed.main_url,
+                &seed.root_str,
+            )
+            .await
+            .unwrap();
             for path in resolved.unexpected_by_mod.values().flatten() {
                 rollback.remove_file(0, Path::new(path)).await.unwrap();
             }
             rollback.commit().await.unwrap();
 
             let settled = settle_cleanup_only_addons_after_removal(
-                context.clone(),
-                main_url,
+                seed.context.clone(),
+                seed.main_url,
                 &HashSet::new(),
                 &resolved.unexpected_by_mod,
                 &overrides,
@@ -5791,10 +6018,146 @@ mod tests {
             .await
             .unwrap();
             assert!(!settled.iter().any(|m| m.needs_update));
-            propagate_checksums_to_siblings(context.clone(), main_url).await;
+            propagate_checksums_to_siblings(seed.context.clone(), seed.main_url).await;
         }
 
-        (temp, context, kept, candidate)
+        (seed.temp, seed.context, seed.kept, seed.candidate)
+    }
+
+    #[test]
+    fn early_exit_clean_respects_prepare_plan_unexpected_files() {
+        let clean_mods = Vec::new();
+        let cleanup_mods = HashSet::from(["@mod_01".to_string()]);
+        let empty_unexpected = HashMap::new();
+        let non_empty_unexpected = HashMap::from([(
+            "@mod_01".to_string(),
+            vec!["R:/Mods/@mod_01/obsolete.pbo".to_string()],
+        )]);
+
+        assert!(should_early_exit_clean_before_queue(
+            false,
+            true,
+            &clean_mods,
+            &cleanup_mods,
+            &empty_unexpected
+        ));
+        assert!(!should_early_exit_clean_before_queue(
+            false,
+            true,
+            &clean_mods,
+            &cleanup_mods,
+            &non_empty_unexpected
+        ));
+        assert!(!should_early_exit_clean_before_queue(
+            false,
+            false,
+            &clean_mods,
+            &cleanup_mods,
+            &empty_unexpected
+        ));
+        assert!(!should_early_exit_clean_before_queue(
+            true,
+            true,
+            &clean_mods,
+            &HashSet::new(),
+            &empty_unexpected
+        ));
+    }
+
+    #[tokio::test]
+    async fn prepare_plan_exits_cleanly_when_sibling_still_owns_shared_file() {
+        let seed = seed_shared_cleanup_fixture(true, false, true).await;
+        let overrides = HashMap::new();
+        let cleanup_mods = collect_cleanup_scope_mods(
+            &seed.context,
+            seed.main_url,
+            &HashSet::new(),
+            false,
+            &overrides,
+        )
+        .await;
+        assert!(cleanup_mods.contains("@mod_01"));
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let mut mods = Vec::new();
+        let unexpected = prepare_plan_cleanup_and_diff(
+            &seed.context,
+            seed.main_url,
+            &[(seed.sibling_url, format!("{}/", seed.root_str))],
+            &cleanup_mods,
+            &overrides,
+            &tx,
+            "op-prepare-clean",
+            &mut mods,
+        )
+        .await
+        .unwrap();
+        seed.server.abort();
+
+        assert!(unexpected.is_empty());
+        assert!(mods.is_empty());
+        assert!(should_early_exit_clean_before_queue(
+            false,
+            true,
+            &mods,
+            &cleanup_mods,
+            &unexpected
+        ));
+    }
+
+    #[tokio::test]
+    async fn prepare_plan_unshields_and_diffs_obsolete_file_from_stale_sibling() {
+        for sibling_enabled in [true, false] {
+            let seed = seed_shared_cleanup_fixture(false, false, sibling_enabled).await;
+            let overrides = HashMap::new();
+            let cleanup_mods = collect_cleanup_scope_mods(
+                &seed.context,
+                seed.main_url,
+                &HashSet::new(),
+                false,
+                &overrides,
+            )
+            .await;
+            assert!(cleanup_mods.contains("@mod_01"));
+
+            let (tx, mut rx) = tokio::sync::broadcast::channel(32);
+            let mut mods = Vec::new();
+            let unexpected = prepare_plan_cleanup_and_diff(
+                &seed.context,
+                seed.main_url,
+                &[(seed.sibling_url, format!("{}/", seed.root_str))],
+                &cleanup_mods,
+                &overrides,
+                &tx,
+                "op-prepare-unshield",
+                &mut mods,
+            )
+            .await
+            .unwrap();
+            seed.server.abort();
+
+            assert_eq!(unexpected.get("@mod_01").map(Vec::len), Some(1));
+            assert_eq!(mods.len(), 1);
+            assert!(mods[0].needs_update);
+            assert_eq!(mods[0].files.len(), 1);
+            assert_eq!(mods[0].files[0].change_kind, FileDiffKind::Deleted);
+            assert!(!should_early_exit_clean_before_queue(
+                false,
+                true,
+                &mods,
+                &cleanup_mods,
+                &unexpected
+            ));
+            let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert!(events.iter().any(
+                |event| matches!(event, ProgressEvent::CleanupPlan { files } if files.len() == 1)
+            ));
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, ProgressEvent::Diff { .. }))
+            );
+        }
     }
 
     #[tokio::test]
