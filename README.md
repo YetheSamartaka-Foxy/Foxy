@@ -446,7 +446,9 @@ options and key collection work as for `create`, applied to every repository
 (`--collect-keys` gathers the keys of the whole space into `<output>/keys`,
 `--per-repo-keys` writes each repository's own keys plus `--additional-keys` into
 `<output>/<folder>/keys` so a server can symlink one repository's keys folder
-directly, and `-mod=` lines are printed per repository folder).
+directly; with it, `--additional-keys` no longer implies `--collect-keys`, so add
+`--collect-keys` for the combined folder too, and `-mod=` lines are printed per
+repository folder).
 
 ### Server CLI checks and deployment
 

@@ -11,6 +11,7 @@
 - Compatible updates in repository spaces and shared folders are no longer falsely blocked by outdated local file metadata; Foxy refreshes the affected sibling addon manifests before checking for shared-file conflicts.
 - Files removed from a server's addon manifest remain listed as zero-byte deletions (including alongside addons with downloads) until removed in an approved update, without distorting download size estimates or deleting files still owned by another addon or repository.
 - Repositories sharing a folder now clean up obsolete files and complete remote checks without false cleanup prompts or failed refreshes; Foxy retries transient database snapshot conflicts automatically, re-verifies full mod state during integrity rechecks and forced redownloads with consistent addon-name matching across platforms, and stops promptly on cancellation right after checking the server.
+- Server tool: `create-space --per-repo-keys` with `--additional-keys` now writes keys only into each repository's own `keys` folder instead of also creating the combined keys folder. Add `--collect-keys` to get the combined folder as well.
 
 # 1.2.2
 ## Added

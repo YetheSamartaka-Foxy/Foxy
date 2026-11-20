@@ -324,6 +324,77 @@ fn space_prune_asks_for_yes_only_when_published_optionals_exist() {
     assert!(source.join("optionals").join("unused.pbo").exists());
 }
 
+#[test]
+fn per_repo_keys_with_additional_keys_skips_the_combined_keys_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods");
+    for (mod_name, key) in [("@one", "one.bikey"), ("@two", "two.bikey")] {
+        std::fs::create_dir_all(mods.join(mod_name).join("keys")).unwrap();
+        std::fs::write(mods.join(mod_name).join("data.txt"), mod_name).unwrap();
+        std::fs::write(mods.join(mod_name).join("keys").join(key), key).unwrap();
+    }
+    let extra = dir.path().join("extra-keys");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("a3.bikey"), b"a3").unwrap();
+    for (folder, mod_name) in [("one", "@one"), ("two", "@two")] {
+        write_json(
+            &dir.path().join(format!("{folder}.json")),
+            json!({
+                "repoName": folder,
+                "basePath": mods,
+                "requiredMods": [{"modName": mod_name}]
+            }),
+        );
+    }
+    let space = dir.path().join("space.json");
+    write_json(
+        &space,
+        json!({
+            "name": "Test Space",
+            "baseUrl": "https://example.com/repos/",
+            "repositories": [
+                {"config": "one.json", "folder": "one"},
+                {"config": "two.json", "folder": "two"}
+            ]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+    let run = |collect: bool| {
+        let mut command = Command::new(bin);
+        command
+            .arg("create-space")
+            .arg(&space)
+            .arg(&output)
+            .args(["--no-progress", "--per-repo-keys", "--additional-keys"])
+            .arg(&extra);
+        if collect {
+            command.arg("--collect-keys");
+        }
+        let built = command.output().unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+    };
+
+    run(false);
+    assert!(!output.join("keys").exists());
+    let one_keys = output.join("one").join("keys");
+    let two_keys = output.join("two").join("keys");
+    assert!(one_keys.join("one.bikey").exists());
+    assert!(one_keys.join("a3.bikey").exists());
+    assert!(!one_keys.join("two.bikey").exists());
+    assert!(two_keys.join("two.bikey").exists());
+    assert!(two_keys.join("a3.bikey").exists());
+
+    run(true);
+    for key in ["one.bikey", "two.bikey", "a3.bikey"] {
+        assert!(output.join("keys").join(key).exists(), "{key}");
+    }
+}
+
 fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed;
     (0..len)

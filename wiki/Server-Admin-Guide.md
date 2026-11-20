@@ -543,7 +543,7 @@ A mod name that appears in several repositories must hash identically in all of 
 ### Space options
 
 - `--mode`, `--threads`, `--app-update-url`, the launch line options, `--dry-run`, `--incremental`, `--atomic --yes`, and `--report` work as for `create`, applied to every repository. Arma 3 and Reforger repositories get a launch line and `server_mod_line.txt`; custom game repositories do not. Each applicable repository's `modLineFiles` are rewritten with its own line.
-- `--collect-keys` gathers the keys of the whole space into `<output>/keys`. `--per-repo-keys` also writes each repository's keys (plus `--additional-keys`) into `<output>/<folder>/keys`, so a server can symlink one repository's keys folder directly.
+- `--collect-keys` gathers the keys of the whole space into `<output>/keys`. `--per-repo-keys` writes each repository's keys (plus `--additional-keys`) into `<output>/<folder>/keys`, so a server can symlink one repository's keys folder directly. With `--per-repo-keys`, `--additional-keys` no longer implies `--collect-keys`: add `--collect-keys` or `--keys-output` to also build the combined folder.
 - `--only <folder>` (repeatable) regenerates only the selected repositories and keeps the full space manifest. It refuses mods shared with repositories you did not select, and it cannot rebuild the combined keys folder.
 - `--prune-unused-optionals` works with `copy` and `pool`, not with `link`.
 - For pool output, `--clean --dry-run` lists orphaned generated pool folders and their symlinks, and `--clean --yes` removes them after a successful generation. Cleanup never touches unrelated folders, and a pool outside the output needs an inventory from an earlier `create-space` run.

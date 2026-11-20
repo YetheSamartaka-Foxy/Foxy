@@ -170,10 +170,10 @@ pub enum Command {
         /// Destination for the combined keys folder (default: <output>/keys, implies --collect-keys)
         #[arg(long, value_name = "DIR")]
         keys_output: Option<PathBuf>,
-        /// Extra key file or directory to add to the combined keys folder (repeatable, implies --collect-keys)
+        /// Extra key file or directory to add to the keys folders (repeatable; implies --collect-keys unless --per-repo-keys is set)
         #[arg(long, value_name = "PATH")]
         additional_keys: Vec<PathBuf>,
-        /// Also write each repository's .bikey files (plus --additional-keys) into <output>/<folder>/keys so a server can symlink one repository's keys folder directly
+        /// Write each repository's .bikey files (plus --additional-keys) into <output>/<folder>/keys so a server can symlink one repository's keys folder directly; add --collect-keys to also build the combined folder
         #[arg(long)]
         per_repo_keys: bool,
     },

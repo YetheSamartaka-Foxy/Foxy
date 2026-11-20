@@ -159,9 +159,12 @@ fn main() -> Result<()> {
                         include_optional: mod_line_include_optional,
                     },
                     keys: KeyCollectionRequest {
-                        enabled: collect_keys
-                            || keys_output.is_some()
-                            || !additional_keys.is_empty(),
+                        enabled: space_combined_keys_requested(
+                            collect_keys,
+                            keys_output.is_some(),
+                            !additional_keys.is_empty(),
+                            per_repo_keys,
+                        ),
                         dest: keys_output,
                         additional_sources: additional_keys,
                     },
@@ -267,6 +270,17 @@ pub(crate) struct KeyCollectionRequest {
     pub enabled: bool,
     pub dest: Option<std::path::PathBuf>,
     pub additional_sources: Vec<std::path::PathBuf>,
+}
+
+/// With `--per-repo-keys`, `--additional-keys` feeds the per-repository folders
+/// only; the combined folder then needs `--collect-keys` or `--keys-output`.
+fn space_combined_keys_requested(
+    collect_keys: bool,
+    keys_output: bool,
+    additional_keys: bool,
+    per_repo_keys: bool,
+) -> bool {
+    collect_keys || keys_output || (additional_keys && !per_repo_keys)
 }
 
 fn cmd_create(
@@ -899,6 +913,16 @@ mod generation_tests {
                 additional_sources: vec![],
             },
         }
+    }
+
+    #[test]
+    fn per_repo_keys_keeps_additional_keys_out_of_the_combined_folder() {
+        assert!(!space_combined_keys_requested(false, false, true, true));
+        assert!(!space_combined_keys_requested(false, false, false, true));
+        assert!(space_combined_keys_requested(false, false, true, false));
+        assert!(space_combined_keys_requested(true, false, true, true));
+        assert!(space_combined_keys_requested(false, true, false, true));
+        assert!(!space_combined_keys_requested(false, false, false, false));
     }
 
     #[test]
