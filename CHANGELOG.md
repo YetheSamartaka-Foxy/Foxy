@@ -1,4 +1,16 @@
 # 1.2.3
+## Added
+- When joining a server requires enabling disabled local addons from the repository, the confirmation dialog now offers an option to save those newly enabled addons to your active profile before launching (checked by default when disabled required addons are listed).
+
+## Changed
+- Standalone Direct Downloads (in the desktop app and `foxy direct-download`) now use larger HTTP/2 flow-control windows for faster HTTPS transfers.
+
+## Fixed
+- Dismissing an addon context menu or popup by clicking an addon row no longer toggles that addon's enabled state.
+- The update dialog no longer pushes its Update action button below the window when known local differences and the backup checkbox are displayed.
+- Compatible updates in repository spaces and shared folders are no longer falsely blocked by outdated local file metadata; Foxy refreshes the affected sibling addon manifests before checking for shared-file conflicts.
+- Files removed from a server's addon manifest remain listed as zero-byte deletions (including alongside addons with downloads) until removed in an approved update, without distorting download size estimates or deleting files still owned by another addon or repository.
+- Repositories sharing a folder now clean up obsolete files and complete remote checks without false cleanup prompts or failed refreshes; Foxy retries transient database snapshot conflicts automatically, re-verifies full mod state during integrity rechecks and forced redownloads with consistent addon-name matching across platforms, and stops promptly on cancellation right after checking the server.
 
 # 1.2.2
 ## Added

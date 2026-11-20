@@ -180,11 +180,11 @@ The Arma 3 template looks like this:
 Key points:
 
 - **`basePath`** is the root folder containing your mod folders. Mod names in `requiredMods`/`optionalMods` resolve relative to it. On Windows, use forward slashes or escaped backslashes in JSON.
-- **`enabled`** defaults to `true`. Set it to `false` for mods that clients see but leave unchecked by default.
+- **`enabled`** defaults to `true`. Setting `"enabled": false` still builds, copies/links, and hashes the mod into the output and repository checksum, publishes `"enabled": false` in the manifests, leaves it unchecked on first add in new Foxy clients (even in `requiredMods`), and omits it from generated server launch lines and `export-reforger-config`. Existing clients that already added the repository keep their saved selection on later refreshes unless the mod switches between `requiredMods` and `optionalMods`.
 - **`clientSide`** marks a mod that only players run (Arma 3). It is never added to the server launch line, and the Foxy client uses it to explain what it enables when joining.
 - **Wildcards** are supported in the last path segment: `"@*"` matches every folder starting with `@` inside `basePath`, and `"collections/*"` matches subfolders.
-- **Nested mods** such as `@ace/optionals/@ace_noactionmenu` are published as a standalone `@ace_noactionmenu` mod.
-- **Mod names are lowercased** in the output. A source folder named `@ACE3` becomes `@ace3`.
+- **Nested mods** in `config.json` (such as `folder/@mod` or `@ace/optionals/@ace_noactionmenu`) read from that nested folder on disk, **flatten** the published output to the repository root (`<output>/@mod/`), and write `"modName": "@mod"` into `repo.json` and `foxy_addons.json`. Two references whose final folder names match case-insensitively conflict and fail `validate`.
+- **Published mod names preserve source directory case** (for example `@ACE` stays `@ACE` on disk and in manifests), while duplicate checks are case-insensitive. Keep casing consistent if hosting on a case-sensitive web server.
 - **Images** (`iconImagePath`, `repoImagePath`) resolve relative to `basePath`. If found, they are copied to the output and their SHA-1 checksums are written into `repo.json`.
 - If the client still shows a placeholder, check that the generated `repo.json` has a non-empty `repoImagePath` and `repoImageChecksum` and that the published image is reachable. A source image is not published unless its path is configured. Add `"repoImagePath": "repo.png"` to the generator config with `repo.png` under `basePath`, regenerate, and refresh the repository in Foxy.
 - **`dlcContent`** lists the Arma 3 Creator DLCs the repository uses (see [DLC content](#dlc-content)).
@@ -238,7 +238,7 @@ foxy-server-backend-cli create config.json ./output --mod-line-prefix mods
 # -mod=gm;spe;mods/@cba_a3;mods/@ace;mods/@tfar;
 ```
 
-For Arma 3, the Creator DLC codes from `dlcContent` come first, then the enabled required mods. Disabled and client-side mods are never added; `--mod-line-include-optional` appends the enabled optional mods. Put a nested mod path in `requiredMods` to include it in the default line.
+For Arma 3, the Creator DLC codes from `dlcContent` come first, then the enabled required mods. Both Arma 3 and Reforger skip mods with `"enabled": false` or `"clientSide": true` in the generated launch line (`server_mod_line.txt` and `modLineFiles`); `--mod-line-include-optional` appends enabled non-client-side optional mods. Because nested config paths are flattened on publish, putting `folder/@mod` or `@ace/optionals/@ace_noactionmenu` in `requiredMods` adds the flattened `@mod` or `@ace_noactionmenu` entry to the default line.
 
 ### Keeping launch scripts in step (`modLineFiles`)
 
@@ -765,8 +765,8 @@ Platform keys are `windows-x86_64`, `linux-x86_64`, and `linux-aarch64`. The cli
 { "modName": "@ace", "enabled": true, "clientSide": false }
 ```
 
-- `modName` (string, required) - folder name or path relative to `basePath`. Supports glob wildcards in the last segment (`@*`, `collections/*`, `mods/@[ac]*`). Absolute paths work for mods stored outside `basePath`.
-- `enabled` (boolean, default `true`) - whether the mod is checked by default in the Foxy client.
+- `modName` (string, required) - folder name or path relative to `basePath` (for example `"@ace"`, `"folder/@mod"`, or `"@ace/optionals/@ace_noactionmenu"`). Supports glob wildcards in the last segment (`@*`, `collections/*`, `mods/@[ac]*`). Absolute paths work for mods stored outside `basePath`. When published, nested paths are flattened to their final directory segment (`@mod`) with its source casing preserved; two entries whose final directory names match case-insensitively fail `validate`.
+- `enabled` (boolean, default `true`) - whether the mod starts checked in new Foxy clients (works in both `requiredMods` and `optionalMods`) and is included in generated server launch lines and `export-reforger-config`. Mods with `"enabled": false` are still packaged and hashed into the repository output; existing clients keep their own saved selection across refreshes unless an addon moves between `requiredMods` and `optionalMods`.
 - `clientSide` (boolean, default `false`, Arma 3) - the mod runs only on players' machines and is left out of the server launch line.
 
 #### Server entry format
@@ -835,7 +835,7 @@ When set, Foxy clients send HTTP Basic Auth headers with every request to this r
 
 | Field | Description |
 |-------|-------------|
-| `name` | Mod folder name (lowercased) |
+| `name` | Mod folder name |
 | `version` | `"FoxyModeV1"` |
 | `checksum` | Mod-level BLAKE3 checksum |
 | `hashAlgorithm` | `"BLAKE3"` |
@@ -850,6 +850,18 @@ Each file entry:
 | `length` | File size in bytes |
 | `fileType` | `"FoxyPboFile"` for `.pbo` files, `"FoxyFile"` for all others |
 | `parts` | Array of `{ path, checksum, start, length }` parts |
+
+#### Published `modName` requirements (hand-edited or external manifests)
+
+Published manifests (`repo.json`, `foxy_addons.json`) expect each `modName` to be a single top-level folder name (for example `@mod`), never a relative subpath such as `folder/@mod`. `foxy-server-backend-cli` flattens `config.json` subpaths automatically when publishing.
+
+If you edit manifests by hand or migrate a Swifty/third-party manifest that keeps `"modName": "folder/@mod"`:
+
+- Foxy's core sync, path safety checks, and exact-path Arma 3 launch still resolve `folder/@mod`, and `"enabled": false` still leaves it unchecked on first load.
+- Foxy's UI addon inventory scans only one folder level deep, so Repository Settings displays `(path not found)` for `folder/@mod` and disables folder-based context menu actions (open directory, manual backup, expand file structure, and delete addon).
+- Case-insensitive folder lookup falls back only one directory level (causing casing mismatches in `folder/@mod` to fail on case-sensitive Linux filesystems), and Workshop link lookups skip entries containing `/` or `\`.
+
+Flatten published mods into top-level folders (or publish through `foxy-server-backend-cli`) to avoid these issues.
 
 ### DLC content
 
@@ -1041,6 +1053,15 @@ A wildcard such as `@*` found no matching folders. This is a warning; the build 
 ### "No mods found after expanding all mod references"
 
 After expanding every reference, no mod folders were found. Check `basePath` and your mod references.
+
+### "Repository ... publishes ... more than once"
+
+Because `foxy-server-backend-cli` flattens every `modName` reference in `config.json` to its final directory name on publish, two entries such as `folder_a/@mod` and `folder_b/@mod` (or two paths whose final names differ only in case) target the same published `@mod` folder. Rename one source directory or remove the duplicate reference.
+
+### Addons show "(path not found)" or ignore `"enabled": false` on existing clients
+
+- If Repository Settings shows `(path not found)` for a mod published under a nested path such as `folder/@mod`, flatten it to a top-level folder (`@mod`) or regenerate the repository with `foxy-server-backend-cli` instead of writing a subpath into `repo.json` or `foxy_addons.json`.
+- If changing `"enabled": false` in `config.json` does not uncheck an addon for players who already added the repository, that is expected: `enabled` sets the initial default when the repository is added or when a mod changes between `requiredMods` and `optionalMods`, while existing users keep their local or profile selection.
 
 ### A `modLineFiles` entry fails the run
 

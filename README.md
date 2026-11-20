@@ -294,17 +294,15 @@ foxy-server-backend-cli create config.json ./output --mod-line-prefix mods
 ```
 
 Creator DLC codes from `dlcContent` come first, then the enabled required mods.
-Client-side mods are always excluded; add `--mod-line-include-optional` to append
-the optional mods as well.
+Mods marked `"enabled": false` or `"clientSide": true` are excluded from the generated server line (while still packaged and hashed into the repository output for clients); add `--mod-line-include-optional` to append enabled optional mods as well.
 
-Nested mod paths such as `@ace/optionals/@ace_noactionmenu` publish the nested
-folder as a standalone `@ace_noactionmenu` mod. Add `--prune-unused-optionals`
+Nested mod paths in `config.json` (such as `folder/@mod` or `@ace/optionals/@ace_noactionmenu`) publish flattened as standalone top-level `@mod` folders using their source directory casing (`validate` rejects colliding final folder names). Published `repo.json` and `foxy_addons.json` manifests themselves should always use top-level folder names rather than subpaths. Add `--prune-unused-optionals`
 to omit the root `optionals` directory from the published `@ace` copy. The
 source mod is untouched. When the output still holds an `optionals` directory
 from an earlier run, the command lists it and asks for `--yes` before removing
 it; a fresh or already-pruned output needs no `--yes`. Put the nested path in
 `requiredMods` to include it in the default server line; entries in
-`optionalMods` need `--mod-line-include-optional`.
+`optionalMods` need `--mod-line-include-optional`. `"enabled": false` keeps a mod unchecked on first client load without replacing choices existing clients already saved.
 
 To keep a server launch script in step with the generated repository, list it in
 `modLineFiles`:
