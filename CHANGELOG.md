@@ -1,3 +1,5 @@
+# 1.2.3
+
 # 1.2.2
 ## Added
 - Repository updates show an estimated completion time that includes preparation, transfer and patching, verification, saving, and queued repository updates. Estimates learn from successful updates of each installation; unmeasured work, pauses, retries, and expired estimates stay explicit instead of showing zero remaining time. All new text is translated into every bundled language.
