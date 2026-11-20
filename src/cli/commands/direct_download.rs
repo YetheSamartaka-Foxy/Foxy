@@ -35,9 +35,8 @@ pub fn cmd_direct_download(
         ));
     }
 
-    let client = crate::core::utils::proxy::blocking_client_builder()
-        .build()
-        .map_err(|e| {
+    let client =
+        crate::core::tasks::create_web_client::create_direct_download_client().map_err(|e| {
             CommandError::operation(
                 "direct-download",
                 format!("Failed to initialize HTTP client: {}", e),
