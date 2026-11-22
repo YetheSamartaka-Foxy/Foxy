@@ -1,6 +1,7 @@
 # 1.2.3
 ## Added
 - Install or update Foxy with one command on Windows, Linux, and macOS. Running the command again updates your copy and keeps saved repositories, settings, and databases. The README and User Guide list every install option and how to remove Foxy.
+- On a Windows server or virtual machine with only a basic or virtual display adapter, the install command adds CPU drawing next to Foxy so the window can open without a graphics driver. Drawing uses at most 4 processor threads, and the picture updates about 4 times a second.
 - When joining a server requires enabling disabled local addons from the repository, the confirmation dialog now offers an option to save those newly enabled addons to your active profile before launching (checked by default when disabled required addons are listed).
 - Server tool: `create` and `create-space` now accept `--no-mod-line-files` to skip checking and rewriting `modLineFiles` for a run, useful for test builds.
 
