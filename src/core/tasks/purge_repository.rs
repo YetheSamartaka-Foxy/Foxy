@@ -312,7 +312,10 @@ async fn query_exclusive_paths(
     ))
 }
 
-pub async fn purge_repository_by_url_and_path(repository_url: &str, local_path: &str) -> Result<()> {
+pub async fn purge_repository_by_url_and_path(
+    repository_url: &str,
+    local_path: &str,
+) -> Result<()> {
     let context = create_context().await;
     purge_repository_instance(context, repository_url, local_path).await
 }

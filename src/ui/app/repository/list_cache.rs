@@ -1066,13 +1066,19 @@ fn legacy_pending_requires_local_check(payload: &str, mods: &[ModDiffSummary]) -
         return false;
     };
     raw.iter().any(|addon| {
-        addon.get("needs_update").and_then(serde_json::Value::as_bool) == Some(true)
+        addon
+            .get("needs_update")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
             && addon.get("total_bytes").and_then(serde_json::Value::as_u64) == Some(0)
             && addon
                 .get("files")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(Vec::is_empty)
-            && addon.get("update_basis").and_then(serde_json::Value::as_str) != Some("managed_files")
+            && addon
+                .get("update_basis")
+                .and_then(serde_json::Value::as_str)
+                != Some("managed_files")
     })
 }
 

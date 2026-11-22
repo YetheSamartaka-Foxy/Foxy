@@ -9,8 +9,7 @@ use crate::core::utils::fs_safety::resolve_child_dir_case_insensitive;
 use crate::ui::types::{Repository, RepositoryServer, SettingsViewState};
 
 use super::generic::{
-    GenericRunScriptConfig, GenericRunScriptModule, ManifestEncoding,
-    ModsManifestConfig,
+    GenericRunScriptConfig, GenericRunScriptModule, ManifestEncoding, ModsManifestConfig,
 };
 use super::{
     GameCapabilities, GameDetectCtx, GameLaunchCtx, GameModule, GameSettingsSchema, LaunchCommand,

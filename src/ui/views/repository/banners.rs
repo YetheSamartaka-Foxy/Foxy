@@ -548,8 +548,7 @@ impl Foxy {
                         &notice.local_path,
                         &normalized_repo_url,
                         &repo.path,
-                    )
-                        && notice.summary.has_meaningful_content()
+                    ) && notice.summary.has_meaningful_content()
                 })
         {
             // `pending_ack_count` is how many completed downloads for this repo

@@ -100,9 +100,14 @@ impl GameModule for GenericGameModule {
     }
 
     fn launch_write_targets(&self, plan: &LaunchPlan, ctx: &GameLaunchCtx) -> Vec<PathBuf> {
-        let Some(settings) = ctx.settings else { return Vec::new() };
+        let Some(settings) = ctx.settings else {
+            return Vec::new();
+        };
         build_generic_launch(plan, ctx, &config_from_settings(settings), false)
-            .ok().and_then(|built| built.manifest).map(|manifest| vec![manifest.path]).unwrap_or_default()
+            .ok()
+            .and_then(|built| built.manifest)
+            .map(|manifest| vec![manifest.path])
+            .unwrap_or_default()
     }
 
     fn settings_schema(&self) -> GameSettingsSchema {

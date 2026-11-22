@@ -475,9 +475,7 @@ pub(crate) async fn bind_write_targets(
     })
     .await
     .map_err(|_| "Linked-folder inspection stopped".to_owned())?
-    .map_err(|_| {
-        "Could not inspect linked folders. Restore access before updating.".to_owned()
-    })?;
+    .map_err(|_| "Could not inspect linked folders. Restore access before updating.".to_owned())?;
     let linked_enrollment: Vec<_> = enrolled
         .iter()
         .filter(|entry| {
@@ -527,12 +525,13 @@ pub(crate) async fn bind_write_targets(
     .map_err(|_| "Target storage inspection stopped".to_string())??;
     let write_roots = write_roots.map(<[PathBuf]>::to_vec);
     tokio::task::spawn_blocking(move || {
-        let targets = crate::core::tasks::download_files::PinnedDownloadTargets::from_approved_roots(
-            roots,
-            links,
-            root_identities,
-            linked_identities,
-        )?;
+        let targets =
+            crate::core::tasks::download_files::PinnedDownloadTargets::from_approved_roots(
+                roots,
+                links,
+                root_identities,
+                linked_identities,
+            )?;
         Ok(Arc::new(targets.with_write_roots(write_roots)?))
     })
     .await
@@ -562,10 +561,10 @@ pub(super) async fn selected_addon_write_roots(
             .copied()
             .unwrap_or(enabled)
         {
-            roots.push(PathBuf::from(
-                row.get_string("local_path")
-                    .map_err(|_| "Could not inspect update ownership".to_owned())?,
-            ));
+            roots
+                .push(PathBuf::from(row.get_string("local_path").map_err(
+                    |_| "Could not inspect update ownership".to_owned(),
+                )?));
         }
     }
     Ok(roots)
