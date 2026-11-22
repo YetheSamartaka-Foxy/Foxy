@@ -116,6 +116,10 @@ fn cmd_settings_set(
         state.settings.auto_quick_scan_on_launch = v;
         changed = true;
     }
+    if let Some(v) = args.recheck_repositories_after_app_update {
+        state.settings.recheck_repositories_after_app_update = v;
+        changed = true;
+    }
     if let Some(v) = args.retry_failed_downloads {
         state.settings.retry_failed_downloads = v;
         changed = true;

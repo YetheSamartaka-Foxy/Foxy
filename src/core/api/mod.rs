@@ -62,10 +62,10 @@ pub use logging::{
 };
 pub(crate) use logging::{ensure_logger, ensure_logger_with_terminal};
 pub use quick_scan::{
-    StartupProbeRetryPlan, StartupRepositoryInstance, filter_repo_instances_with_db_entry,
-    plan_startup_probe_retry, plan_startup_quick_scan_repos, recalculate_hashes_for_addon_by_name,
-    spawn_quick_local_scan, spawn_quick_local_scan_instances, startup_probe_retry_delay,
-    startup_probe_retry_is_blocked,
+    AppUpdateStartupRoute, StartupProbeRetryPlan, StartupRepositoryInstance,
+    filter_repo_instances_with_db_entry, plan_startup_probe_retry, plan_startup_quick_scan_repos,
+    recalculate_hashes_for_addon_by_name, route_startup_after_app_update, spawn_quick_local_scan,
+    spawn_quick_local_scan_instances, startup_probe_retry_delay, startup_probe_retry_is_blocked,
 };
 pub use startup_diagnostics::{
     StartupDiagnosticsReport, StartupStoragePath, all_storage_devices_lines,

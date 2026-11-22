@@ -207,6 +207,52 @@ pub(crate) fn partition_startup_repositories(
     plan
 }
 
+/// Startup routing after the previous app version's check cache was deleted.
+///
+/// Repositories the probe could compare go through a remote recheck so the
+/// new build writes its own update cache. A probe that got no answer stays on
+/// the local quick scan, the same fallback as an ordinary startup.
+pub fn route_startup_after_app_update(
+    eligible: Vec<StartupRepositoryInstance>,
+    prevalidated: Vec<StartupRepositoryInstance>,
+    remote_changed: Vec<StartupRepositoryInstance>,
+    pending_updates: Vec<StartupRepositoryInstance>,
+    remote_unknown: &[StartupRepositoryInstance],
+) -> AppUpdateStartupRoute {
+    let unknown: HashSet<StartupRepositoryInstance> = remote_unknown.iter().cloned().collect();
+    let mut remote_refresh = Vec::new();
+    let mut seen = HashSet::new();
+    for repository in remote_changed.into_iter().chain(pending_updates) {
+        if seen.insert(repository.clone()) {
+            remote_refresh.push(repository);
+        }
+    }
+    let mut quick_scan = Vec::new();
+    for repository in eligible {
+        if unknown.contains(&repository) {
+            quick_scan.push(repository);
+        } else if seen.insert(repository.clone()) {
+            remote_refresh.push(repository);
+        }
+    }
+    let prevalidated = prevalidated
+        .into_iter()
+        .filter(|repository| quick_scan.iter().any(|local| local == repository))
+        .collect();
+    AppUpdateStartupRoute {
+        remote_refresh,
+        quick_scan,
+        prevalidated,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppUpdateStartupRoute {
+    pub remote_refresh: Vec<StartupRepositoryInstance>,
+    pub quick_scan: Vec<StartupRepositoryInstance>,
+    pub prevalidated: Vec<StartupRepositoryInstance>,
+}
+
 pub async fn recalculate_hashes_for_addon_by_name(
     repository_url: &str,
     addon_name: &str,
@@ -1419,8 +1465,9 @@ mod tests {
     use super::{
         RemoteFreshness, StartupQuickScanEligibility, StartupRepositoryFacts,
         StartupRepositoryInstance, StartupRepositoryRoute, normalize_startup_repositories,
-        partition_startup_repositories, remote_freshness, route_startup_repository,
-        startup_probe_retry_delay, startup_probe_retry_is_blocked, startup_repository_is_unknown,
+        partition_startup_repositories, remote_freshness, route_startup_after_app_update,
+        route_startup_repository, startup_probe_retry_delay, startup_probe_retry_is_blocked,
+        startup_repository_is_unknown,
     };
     use std::time::Duration;
 
@@ -1659,5 +1706,23 @@ mod tests {
         assert!(startup_probe_retry_is_blocked(false, false, true, false));
         assert!(startup_probe_retry_is_blocked(false, false, false, true));
         assert!(!startup_probe_retry_is_blocked(false, false, false, false));
+    }
+
+    #[test]
+    fn app_update_sends_compared_repositories_to_a_remote_recheck() {
+        let unchanged = instance("unchanged");
+        let unknown = instance("unknown");
+        let changed = instance("changed");
+        let pending = instance("pending");
+        let routed = route_startup_after_app_update(
+            vec![unchanged.clone(), unknown.clone()],
+            vec![unchanged.clone()],
+            vec![changed.clone()],
+            vec![pending.clone()],
+            std::slice::from_ref(&unknown),
+        );
+        assert_eq!(routed.remote_refresh, vec![changed, pending, unchanged]);
+        assert_eq!(routed.quick_scan, vec![unknown]);
+        assert!(routed.prevalidated.is_empty());
     }
 }

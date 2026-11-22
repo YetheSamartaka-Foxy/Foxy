@@ -198,9 +198,16 @@ pub fn run_from_env() -> CliExecution {
         // Honor an already requested wipe before the readiness check opens the DB.
         crate::core::tasks::init_database::check_and_wipe_database();
         let ready = match tokio::runtime::Runtime::new() {
-            Ok(runtime) => runtime.block_on(
-                crate::core::tasks::db_schema_version::ensure_database_ready_for_updates(),
-            ),
+            Ok(runtime) => runtime.block_on(async {
+                crate::core::tasks::db_schema_version::ensure_database_ready_for_updates().await?;
+                let enabled = crate::core::tasks::check_cache_version::recheck_repositories_after_app_update_enabled();
+                if let Err(err) = crate::core::tasks::check_cache_version::align_check_cache_with_app_version(enabled).await {
+                    log::warn!(
+                        "Could not discard the repository check cache for this app version: {err}"
+                    );
+                }
+                Ok(())
+            }),
             Err(err) => Err(format!(
                 "Failed to create runtime for database check: {err}"
             )),

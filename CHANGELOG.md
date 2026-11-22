@@ -4,6 +4,7 @@
 
 ## Changed
 - Standalone Direct Downloads (in the desktop app and `foxy direct-download`) now use larger HTTP/2 flow-control windows for faster HTTPS transfers.
+- After Foxy is updated, saved repository check results and update plans from the previous version are discarded, and startup runs a fresh remote recheck for repositories that check on launch. The new results belong to the installed version. This is on by default and can be turned off in Application settings or with `foxy settings set --recheck-repositories-after-app-update false`.
 
 ## Fixed
 - Dismissing an addon context menu or popup by clicking an addon row no longer toggles that addon's enabled state.

@@ -287,7 +287,13 @@ checksum empty, and an incomplete refresh must fail before downloading.
     be invalidated or recomputed by the startup check, a clean quick scan, clean
     tree verification, a successful download, repository removal, or local path
     changes. A saved pending update is provisional until that startup check
-    finishes.
+    finishes. The cache belongs to the Foxy version that wrote it
+    (`check_cache_app_version.json` in the game space). When that version
+    differs from the running build and "Recheck repositories after a Foxy
+    update" is on (the default), startup deletes the pending-update rows and
+    the saved check results, records the running version, and remote-rechecks
+    repositories that check on launch so the new cache is theirs. Turning the
+    setting off keeps the previous version's cache.
 
 ### Addon Enabled State
 

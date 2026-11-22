@@ -264,6 +264,15 @@ iterations: iteration 0 is the unprepared first pass and later iterations are
 warm. The ledger retains the historical `cold` label for that first pass, but
 only an explicit `evict-cache` operation establishes a device-cold read lane.
 
+A missing or different `check_cache_app_version.json` (one file per game space)
+makes iteration 0 discard saved check results and pending updates, then
+remote-recheck, when `recheck_repositories_after_app_update` is true. That is
+the default. Later iterations in the run keep the new stamp and follow the
+normal startup path, without the pending updates the seed originally had. Set
+the setting to false, or write the running app version into the stamp file, when
+the case needs the seed's saved updates left in place. See the startup section
+of `testkit/README.md`.
+
 ## Memory
 
 Every operation is sampled from outside the process, so a footprint regression

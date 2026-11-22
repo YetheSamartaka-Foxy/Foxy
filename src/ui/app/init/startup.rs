@@ -474,6 +474,7 @@ impl Foxy {
             frame_cost: Default::default(),
             frame_cost_at_sync_start: None,
             startup_recheck_queue: VecDeque::new(),
+            startup_remote_recheck_after_app_update: false,
             repository_space_sync_queue: VecDeque::new(),
             repository_visual_folder_sync_queue: VecDeque::new(),
             addon_hash_recalc_queue: VecDeque::new(),
@@ -747,6 +748,7 @@ impl Foxy {
         };
         app.initialize_agent_gui(&cc.egui_ctx, &agent_gui, active_renderer);
         app.i18n.set_language(&app.settings_view_state.locale);
+        app.discard_stale_repository_check_cache();
         app.load_repositories();
         if app.load_repository_spaces() {
             app.reconcile_repository_space_paths();

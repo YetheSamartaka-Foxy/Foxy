@@ -14,14 +14,14 @@ mod unexpected_files;
 mod worker;
 
 // Public API (re-exported by api/mod.rs)
+pub use worker::{
+    AppUpdateStartupRoute, StartupProbeRetryPlan, StartupRepositoryInstance,
+    filter_repo_instances_with_db_entry, plan_startup_probe_retry, plan_startup_quick_scan_repos,
+    recalculate_hashes_for_addon_by_name, route_startup_after_app_update, spawn_quick_local_scan,
+    spawn_quick_local_scan_instances, startup_probe_retry_delay, startup_probe_retry_is_blocked,
+};
 #[cfg(test)]
 pub(crate) use worker::{RemoteFreshness, remote_freshness};
-pub use worker::{
-    StartupProbeRetryPlan, StartupRepositoryInstance, filter_repo_instances_with_db_entry,
-    plan_startup_probe_retry, plan_startup_quick_scan_repos, recalculate_hashes_for_addon_by_name,
-    spawn_quick_local_scan, spawn_quick_local_scan_instances, startup_probe_retry_delay,
-    startup_probe_retry_is_blocked,
-};
 
 // Crate-visible items
 pub(crate) use content_hash::{
@@ -59,8 +59,8 @@ pub(super) use readiness::{
     launch_quick_scan_repo_startup_eligibility,
 };
 pub(super) use removed_files::{preserve_removed_file_diffs, removed_managed_file_mod_names};
+#[cfg(test)]
+pub(super) use unexpected_files::delete_unexpected_local_files;
 pub(super) use unexpected_files::{
     collect_cleanup_conflict_candidate_paths_for_repo_mods, collect_unexpected_files_for_repo_mods,
 };
-#[cfg(test)]
-pub(super) use unexpected_files::delete_unexpected_local_files;

@@ -144,3 +144,14 @@ pub async fn clear_pending_update_payload_for_path(
     let db = FoxyDb::from_handle(init_database().await);
     delete_payload(&db, repository_url, &local_path).await
 }
+
+/// Delete every saved update plan in the active game space.
+pub(crate) async fn clear_all_pending_updates() -> Result<u64, DbErr> {
+    let db = FoxyDb::from_handle(init_database().await);
+    db.execute_retry(
+        "clear pending updates after app update",
+        "DELETE FROM pending_updates",
+        params![],
+    )
+    .await
+}

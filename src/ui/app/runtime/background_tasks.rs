@@ -119,6 +119,30 @@ impl Foxy {
         );
     }
 
+    pub(in crate::ui::app) fn discard_stale_repository_check_cache(&mut self) {
+        if self.db_lock_conflict.is_some() || self.database_updates_blocked() {
+            return;
+        }
+        let Some(runtime) = crate::core::api::background_runtime() else {
+            warn!("Shared background runtime unavailable; keeping the repository check cache");
+            return;
+        };
+        match runtime.block_on(
+            crate::core::tasks::check_cache_version::align_check_cache_with_app_version(
+                self.settings_view_state
+                    .recheck_repositories_after_app_update,
+            ),
+        ) {
+            Ok(crate::core::tasks::check_cache_version::CheckCacheAlign::Invalidated) => {
+                self.startup_remote_recheck_after_app_update = !self.settings_view_state.debug_mode;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!("Could not discard the repository check cache for this app version: {err}");
+            }
+        }
+    }
+
     pub fn queue_startup_rechecks(&mut self) {
         if self.database_updates_blocked() {
             return;
@@ -129,6 +153,9 @@ impl Foxy {
         let mut skipped_quick_scan = 0usize;
         let startup_quick_scan_active = !self.settings_view_state.debug_mode
             && self.settings_view_state.auto_quick_scan_on_launch;
+        if !startup_quick_scan_active {
+            self.startup_remote_recheck_after_app_update = false;
+        }
         for repo in &self.repository_view_state.repositories {
             if !self.repo_auto_recheck_on_launch(repo) {
                 continue;
@@ -482,20 +509,51 @@ impl Foxy {
             {
                 self.note_successful_remote_check(&instance.repo_url, &instance.local_path);
             }
-            let mut remote_refreshes = payload.remote_changed_repositories;
-            if !remote_refreshes.is_empty() {
-                info!(
-                    "Scheduling startup remote refresh for {} repositories with changed remote checksums",
-                    remote_refreshes.len()
+            let force_remote_recheck =
+                std::mem::take(&mut self.startup_remote_recheck_after_app_update);
+            let (remote_refreshes, eligible_repositories, prevalidated_repositories): (
+                Vec<_>,
+                Vec<_>,
+                HashSet<api::StartupRepositoryInstance>,
+            ) = if force_remote_recheck {
+                let routed: api::AppUpdateStartupRoute = api::route_startup_after_app_update(
+                    payload.eligible_repositories,
+                    payload.prevalidated_repositories,
+                    payload.remote_changed_repositories,
+                    payload.pending_update_repositories,
+                    &payload.remote_unknown_repositories,
                 );
-            }
-            if !payload.pending_update_repositories.is_empty() {
                 info!(
-                    "Scheduling startup remote refresh for {} repositories with a saved pending update",
-                    payload.pending_update_repositories.len()
+                    "Scheduling startup remote recheck for {} repositories after an app update (local fallback {})",
+                    routed.remote_refresh.len(),
+                    routed.quick_scan.len()
                 );
-                remote_refreshes.extend(payload.pending_update_repositories);
-            }
+                (
+                    routed.remote_refresh,
+                    routed.quick_scan,
+                    routed.prevalidated.into_iter().collect(),
+                )
+            } else {
+                let mut remote_refreshes = payload.remote_changed_repositories;
+                if !remote_refreshes.is_empty() {
+                    info!(
+                        "Scheduling startup remote refresh for {} repositories with changed remote checksums",
+                        remote_refreshes.len()
+                    );
+                }
+                if !payload.pending_update_repositories.is_empty() {
+                    info!(
+                        "Scheduling startup remote refresh for {} repositories with a saved pending update",
+                        payload.pending_update_repositories.len()
+                    );
+                    remote_refreshes.extend(payload.pending_update_repositories);
+                }
+                (
+                    remote_refreshes,
+                    payload.eligible_repositories,
+                    payload.prevalidated_repositories.into_iter().collect(),
+                )
+            };
             if !remote_refreshes.is_empty() {
                 self.queue_startup_remote_refreshes(remote_refreshes);
             }
@@ -504,39 +562,39 @@ impl Foxy {
             self.startup_probe_retries_completed = 0;
             info!(
                 "Scheduling startup quick scan for {} of {} repositories",
-                payload.eligible_repositories.len(),
+                eligible_repositories.len(),
                 payload.requested_repositories
             );
-            let prevalidated_repositories: HashSet<api::StartupRepositoryInstance> =
-                payload.prevalidated_repositories.into_iter().collect();
-            let eligible_repositories = payload.eligible_repositories;
-            if self.syncing_repository.is_none()
-                && self.quick_scan_worker.is_none()
-                && !self.retained_files_cleanup_in_flight
-                && self.pending_retained_file_removal.is_none()
-            {
-                self.mark_quick_scan_instances_active(eligible_repositories.iter().cloned());
-                self.quick_scan_worker = Some(api::spawn_quick_local_scan_instances(
-                    eligible_repositories,
-                    prevalidated_repositories,
-                    HashSet::new(),
-                    self.quick_scan_tx.clone(),
-                    Some(self.quick_scan_progress_tx.clone()),
-                    self.repaint_ctx.clone(),
-                ));
-            } else {
-                self.queue_quick_scan_for_urls_with_flags(
-                    eligible_repositories
-                        .into_iter()
-                        .map(|repository| repository.repo_url)
-                        .collect(),
-                    false,
-                    false,
-                );
+            if !eligible_repositories.is_empty() {
+                if self.syncing_repository.is_none()
+                    && self.quick_scan_worker.is_none()
+                    && !self.retained_files_cleanup_in_flight
+                    && self.pending_retained_file_removal.is_none()
+                {
+                    self.mark_quick_scan_instances_active(eligible_repositories.iter().cloned());
+                    self.quick_scan_worker = Some(api::spawn_quick_local_scan_instances(
+                        eligible_repositories,
+                        prevalidated_repositories,
+                        HashSet::new(),
+                        self.quick_scan_tx.clone(),
+                        Some(self.quick_scan_progress_tx.clone()),
+                        self.repaint_ctx.clone(),
+                    ));
+                } else {
+                    self.queue_quick_scan_for_urls_with_flags(
+                        eligible_repositories
+                            .into_iter()
+                            .map(|repository| repository.repo_url)
+                            .collect(),
+                        false,
+                        false,
+                    );
+                }
             }
             self.startup_quick_scan_filter_rx = None;
             self.needs_repaint = true;
         } else if disconnected {
+            self.startup_remote_recheck_after_app_update = false;
             warn!("Startup quick scan eligibility worker disconnected before delivering results");
             self.startup_quick_scan_filter_rx = None;
         }

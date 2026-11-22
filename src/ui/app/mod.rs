@@ -440,6 +440,9 @@ pub struct Foxy {
     startup_pending_restore_worker: Option<std::thread::JoinHandle<()>>,
     pub startup_repository_layout_logged: bool,
     pub startup_recheck_queue: VecDeque<(String, String, SyncMode)>,
+    /// The previous app version's check cache was discarded this launch, so
+    /// startup must remote-recheck instead of reusing a local quick scan.
+    startup_remote_recheck_after_app_update: bool,
     pub repository_space_sync_queue: VecDeque<repository::space_actions::QueuedRepositorySpaceSync>,
     pub repository_visual_folder_sync_queue:
         VecDeque<repository::space_actions::QueuedRepositoryVisualFolderSync>,

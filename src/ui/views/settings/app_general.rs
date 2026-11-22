@@ -408,6 +408,15 @@ impl Foxy {
                         Self::render_wrapped_settings_checkbox(
                             ui,
                             true,
+                            &mut self.settings_view_state.recheck_repositories_after_app_update,
+                            tr("Recheck repositories after a Foxy update"),
+                            Some(tr("After Foxy is updated, discard saved check results and update plans from the previous version. Repositories that check on startup then get a fresh remote recheck, and the new results are kept for this Foxy version. Turn this off to keep the previous version's results.")),
+                            row_width,
+                            changed,
+                        );
+                        Self::render_wrapped_settings_checkbox(
+                            ui,
+                            true,
                             &mut self.settings_view_state.trust_verified_hashes,
                             tr("Skip unchanged files after a database reset"),
                             Some(tr("After a database reset, trust files Foxy already verified and that Windows shows as untouched since, instead of reading them again. An integrity recheck always reads every file.")),

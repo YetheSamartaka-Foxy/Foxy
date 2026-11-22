@@ -1,6 +1,7 @@
 pub mod addon_enabled_state;
 pub mod app_update;
 pub mod calculate_hashes;
+pub mod check_cache_version;
 pub mod create_context;
 pub mod create_web_client;
 pub mod db_process_lock;
