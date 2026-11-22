@@ -15,6 +15,7 @@
 - Files removed from a server's addon manifest remain listed as zero-byte deletions (including alongside addons with downloads) until removed in an approved update, without distorting download size estimates or deleting files still owned by another addon or repository.
 - Repositories sharing a folder now clean up obsolete files and complete remote checks without false cleanup prompts or failed refreshes; Foxy retries transient database snapshot conflicts automatically, re-verifies full mod state during integrity rechecks and forced redownloads with consistent addon-name matching across platforms, and stops promptly on cancellation right after checking the server.
 - Server tool: `create-space --per-repo-keys` with `--additional-keys` now writes keys only into each repository's own `keys` folder instead of also creating the combined keys folder. Add `--collect-keys` to get the combined folder as well.
+- Server tool: an explicit `modName` in `config.json` now overrides a wildcard match for the same source folder (for `enabled`, `clientSide`, or moving between `requiredMods` and `optionalMods`) instead of publishing a duplicate entry and leaving disabled mods in the server launch line. Other duplicate published mod names are rejected during `create` and `create-space` as well as `validate`.
 
 # 1.2.2
 ## Added

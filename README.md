@@ -296,7 +296,7 @@ foxy-server-backend-cli create config.json ./output --mod-line-prefix mods
 Creator DLC codes from `dlcContent` come first, then the enabled required mods.
 Mods marked `"enabled": false` or `"clientSide": true` are excluded from the generated server line (while still packaged and hashed into the repository output for clients); add `--mod-line-include-optional` to append enabled optional mods as well.
 
-Nested mod paths in `config.json` (such as `folder/@mod` or `@ace/optionals/@ace_noactionmenu`) publish flattened as standalone top-level `@mod` folders using their source directory casing (`validate` rejects colliding final folder names). Published `repo.json` and `foxy_addons.json` manifests themselves should always use top-level folder names rather than subpaths. Add `--prune-unused-optionals`
+Nested mod paths in `config.json` (such as `folder/@mod` or `@ace/optionals/@ace_noactionmenu`) publish flattened as standalone top-level `@mod` folders using their source directory casing. An explicit `modName` pointing at the same source folder overrides a wildcard match (for example `"core/@*"` plus `{ "modName": "core/@mod_02", "enabled": false }`), while other duplicate published names fail during `validate`, `create`, and `create-space`. Published `repo.json` and `foxy_addons.json` manifests themselves should always use top-level folder names rather than subpaths. Add `--prune-unused-optionals`
 to omit the root `optionals` directory from the published `@ace` copy. The
 source mod is untouched. When the output still holds an `optionals` directory
 from an earlier run, the command lists it and asks for `--yes` before removing

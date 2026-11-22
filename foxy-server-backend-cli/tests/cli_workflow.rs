@@ -573,6 +573,67 @@ fn per_repo_keys_with_additional_keys_skips_the_combined_keys_folder() {
     }
 }
 
+#[test]
+fn wildcard_with_explicit_disabled_override_excludes_mod_from_server_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = dir.path().join("mods").join("core");
+    for mod_name in ["@mod_01", "@mod_02"] {
+        std::fs::create_dir_all(core.join(mod_name)).unwrap();
+        std::fs::write(core.join(mod_name).join("data.txt"), mod_name).unwrap();
+    }
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [
+                { "modName": "core/@*" },
+                { "modName": "core/@mod_02", "enabled": false }
+            ]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let validated = Command::new(bin)
+        .args(["--json", "validate"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(
+        validated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+
+    let created = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .args(["--no-progress", "--mod-line-prefix", "mods"])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let mod_line = std::fs::read_to_string(output.join("server_mod_line.txt")).unwrap();
+    assert_eq!(mod_line, "-mod=mods/@mod_01;\n");
+
+    let addons: Value =
+        serde_json::from_slice(&std::fs::read(output.join("foxy_addons.json")).unwrap()).unwrap();
+    let required = addons["requiredMods"].as_array().unwrap();
+    assert_eq!(required.len(), 2);
+    let mod_02 = required
+        .iter()
+        .find(|entry| entry["modName"] == "@mod_02")
+        .unwrap();
+    assert_eq!(mod_02["enabled"], false);
+}
+
 fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed;
     (0..len)
