@@ -10,31 +10,135 @@ Use **Search help** to find topics by their titles and text in the current langu
 
 ## Table of Contents
 
-1. [Getting Started](#getting-started)
-2. [Game Spaces](#game-spaces)
-3. [Adding Repositories](#adding-repositories)
-4. [Repository Spaces and Folders](#repository-spaces-and-folders)
-5. [Syncing and Updating](#syncing-and-updating)
-6. [Repository Settings](#repository-settings)
-7. [Profiles](#profiles)
-8. [Managing Addons](#managing-addons)
-9. [Launching the Game](#launching-the-game)
-10. [Steam Workshop](#steam-workshop)
-11. [Extra Files and Config Packs](#extra-files-and-config-packs)
-12. [Editor Missions](#editor-missions)
-13. [Application Settings](#application-settings)
-14. [Game Space Settings](#game-space-settings)
-15. [Scheduling](#scheduling)
-16. [Benchmarks](#benchmarks)
-17. [Backup Manager](#backup-manager)
-18. [Direct Download](#direct-download)
-19. [Cleanup](#cleanup)
-20. [Customization](#customization)
-21. [TS3 Plugins](#ts3-plugins)
-22. [Swifty Migration](#swifty-migration)
-23. [Keyboard Navigation](#keyboard-navigation)
-24. [Troubleshooting](#troubleshooting)
-25. [CLI Usage](#cli-usage)
+1. [Installing Foxy](#installing-foxy)
+2. [Getting Started](#getting-started)
+3. [Game Spaces](#game-spaces)
+4. [Adding Repositories](#adding-repositories)
+5. [Repository Spaces and Folders](#repository-spaces-and-folders)
+6. [Syncing and Updating](#syncing-and-updating)
+7. [Repository Settings](#repository-settings)
+8. [Profiles](#profiles)
+9. [Managing Addons](#managing-addons)
+10. [Launching the Game](#launching-the-game)
+11. [Steam Workshop](#steam-workshop)
+12. [Extra Files and Config Packs](#extra-files-and-config-packs)
+13. [Editor Missions](#editor-missions)
+14. [Application Settings](#application-settings)
+15. [Game Space Settings](#game-space-settings)
+16. [Scheduling](#scheduling)
+17. [Benchmarks](#benchmarks)
+18. [Backup Manager](#backup-manager)
+19. [Direct Download](#direct-download)
+20. [Cleanup](#cleanup)
+21. [Customization](#customization)
+22. [TS3 Plugins](#ts3-plugins)
+23. [Swifty Migration](#swifty-migration)
+24. [Keyboard Navigation](#keyboard-navigation)
+25. [Troubleshooting](#troubleshooting)
+26. [CLI Usage](#cli-usage)
+
+---
+
+## Installing Foxy
+
+Install with one command (run it again to update). The same instructions are on the [install page](https://yethesamartaka-foxy.github.io/Foxy/).
+
+```powershell
+# Windows, in PowerShell
+irm https://yethesamartaka-foxy.github.io/Foxy/install.ps1 | iex
+```
+
+```sh
+# Linux and macOS, in a terminal
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh
+```
+
+The command downloads the newest release from GitHub, checks its SHA-256, and runs Foxy's installer for this computer. A current-user install needs no administrator permission. Saved repositories, settings, and databases stay in Foxy's config folder. Downloaded mods stay in the folders you chose for each repository.
+
+After Foxy is installed, its own update check can install a newer Windows or Linux release the same way and keeps that saved data.
+
+Set `FOXY_INSTALL_REPO` to `owner/name` only when you mean to install from a different GitHub repository. The command installs whatever that repository publishes.
+
+### Windows 10 and 11
+
+The PowerShell command puts Foxy in the Start menu and in **Settings > Apps**. A new install goes to `%LOCALAPPDATA%\Programs\Foxy`. A running Foxy is closed and then started again.
+
+When Foxy is already installed for all users, the same command updates that copy and Windows asks for administrator permission. When both copies exist, it updates the current-user copy and leaves the all-users copy as it is.
+
+To install by hand, download `Foxy-<version>-setup.exe` from the [latest release](https://github.com/YetheSamartaka-Foxy/Foxy/releases/latest) and run it. The setup can install for the current user or for every user of the PC. **Delete all existing Foxy user data** starts unchecked. Choosing it asks for confirmation before settings and databases are removed. Mod folders are kept either way. A silent install always keeps that data.
+
+The published Windows setup is the x64 installer. It also runs on ARM PCs. It requires 64-bit Windows.
+
+Remove this Foxy in **Settings > Apps > Installed apps**. The uninstaller can delete Foxy's settings and databases if you check that box. It leaves mod folders where they are.
+
+### Linux
+
+The terminal command installs Foxy for the current user:
+
+- Program: `~/.local/opt/foxy`
+- Command: `foxy`, from `~/.local/bin` for a current-user install
+- Menu entry: `~/.local/share/applications/foxy.desktop`
+
+It needs no root. It selects `Foxy-<version>-linux-x86_64-installer.sh` or `Foxy-<version>-linux-aarch64-installer.sh`. When the release has no installer for this processor, the command stops and leaves the computer unchanged. If `foxy` is not found in the terminal, `~/.local/bin` is missing from `PATH`. The applications menu still opens Foxy, and a new terminal session often picks up the command after you add that directory to `PATH`.
+
+When the only existing install is the system copy in `/opt/foxy`, the command updates that copy and asks for administrator permission.
+
+By hand:
+
+```sh
+chmod +x Foxy-<version>-linux-x86_64-installer.sh
+./Foxy-<version>-linux-x86_64-installer.sh --prefix="$HOME/.local/opt/foxy"
+sudo ./Foxy-<version>-linux-x86_64-installer.sh
+```
+
+The first command is a current-user install. The second is a system install in `/opt/foxy` and a `foxy` command on the system path. Use one install. On ARM64, use the `linux-aarch64` installer when the release includes it. A system install may ask for administrator permission through `sudo`. An in-app update of a system install may ask through `pkexec` when the install folder is not writable.
+
+Remove the current-user copy:
+
+```sh
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh -s -- --uninstall
+```
+
+That removes `~/.local/opt/foxy` and the menu entry and command that point at it. Settings stay in `~/.config/Foxy`, or in `$XDG_CONFIG_HOME/Foxy` when that variable is an absolute path. Quit Foxy first.
+
+Remove a system install with the release's Linux installer:
+
+```sh
+sudo ./Foxy-<version>-linux-<arch>-installer.sh --uninstall --prefix=/opt/foxy
+```
+
+### macOS
+
+The terminal command installs `~/Applications/Foxy.app` when the release includes a disk image for this Mac. Published releases include `Foxy-<version>-macos-arm64.dmg` for Apple Silicon. macOS 11 or newer is required. The command checks the download, then opens Foxy.
+
+Quit Foxy before updating or removing it. Remove that app with the same `--uninstall` command as on Linux. A copy you dragged to `/Applications` stays there until you move it to the Trash. Settings stay in `~/Library/Application Support/Foxy`.
+
+To install by hand, open the disk image from the latest release and drag Foxy to Applications.
+
+macOS may say it could not verify Foxy, because this build is not notarized. Open **System Settings > Privacy & Security** and allow Foxy. This macOS build is experimental. Steam Workshop needs `libsteam_api.dylib` beside the `Foxy` executable inside `Foxy.app`.
+
+### What an update keeps
+
+Running the command again, running a newer installer, or accepting Foxy's in-app update keeps:
+
+- repositories, repository spaces, and visual folders
+- settings, profiles, and databases
+- caches and logs in the config folder
+- downloaded mods in the folders you chose
+
+The Windows setup's **Delete all existing Foxy user data** task is the explicit way to clear the config folder during a manual install. It starts unchecked and asks before it deletes anything. The one-command install leaves that task off.
+
+### Where the files are
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| Current-user install | `%LOCALAPPDATA%\Programs\Foxy` | `~/.local/opt/foxy` | `~/Applications/Foxy.app` |
+| All-users install | `C:\Program Files\Foxy` | `/opt/foxy` | |
+| Settings, databases, caches, logs | `%APPDATA%\Foxy` | `~/.config/Foxy` (`$XDG_CONFIG_HOME/Foxy`) | `~/Library/Application Support/Foxy` |
+
+Deleting the settings folder removes Foxy's own data for every game space. Mod folders, the game, and Steam Workshop files stay on disk.
+
+The Windows build of Foxy also runs on Linux under Proton and Wine. Setup for that is in [Linux, Proton, and Wine](#linux-proton-and-wine).
 
 ---
 
@@ -118,7 +222,7 @@ Each game space stores its data under `games/<game space>` in the Foxy config di
 
 ### Upgrading from an older Foxy
 
-Windows updates preserve your saved repositories, settings, and databases. Silent installers always keep this data. During a manual install, **Delete all existing Foxy user data** starts unchecked each time and requires confirmation before removing your setup. Leave it unchecked to keep your configuration; downloaded mod folders are kept even when you explicitly reset Foxy.
+Windows updates preserve your saved repositories, settings, and databases. The [one-command install](#installing-foxy) and silent installers always keep this data. During a manual install, **Delete all existing Foxy user data** starts unchecked each time and requires confirmation before removing your setup. Leave it unchecked to keep your configuration; downloaded mod folders are kept even when you explicitly reset Foxy.
 
 When you upgrade from a Foxy version without game spaces, your existing setup moves into an Arma 3 game space automatically. The previous files are kept as `.pre-gamespaces.bak` copies, so the change can be rolled back.
 
@@ -481,7 +585,7 @@ Enabled [extra files](#extra-files-and-config-packs) are copied into the game di
 
 ### Linux, Proton, and Wine
 
-The Windows build of **Foxy is confirmed to work on Linux under both Proton and Wine**. A native Linux build is also available; see the [installation instructions](../README.md#installation).
+The Windows build of **Foxy is confirmed to work on Linux under both Proton and Wine**. A native Linux build is also available; see [Installing Foxy](#installing-foxy).
 
 When Windows Foxy runs under Proton or Wine, it can detect and start native Linux Steam, find its Arma 3 libraries, and launch Arma 3 through Steam's selected Proton version with the enabled mods and server settings, skipping the Arma launcher. Native, Flatpak, and Snap Steam installations are supported.
 

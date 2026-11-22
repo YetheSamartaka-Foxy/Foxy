@@ -3,6 +3,22 @@
 Foxy is a modern repository updater (Intended primarily for Arma 3 from the start) built from the ground up for speed, reliability, and automation.
 It ships as a single binary with both a full desktop UI and a scriptable CLI, runs on Windows and Linux (with early experimental macOS support), and is designed to replace legacy updaters without leaving anyone behind.
 
+**[Install Foxy](https://yethesamartaka-foxy.github.io/Foxy/)** · [All install options](#installation)
+
+Install with one command (run it again to update):
+
+```powershell
+# Windows, in PowerShell
+irm https://yethesamartaka-foxy.github.io/Foxy/install.ps1 | iex
+```
+
+```sh
+# Linux and macOS, in a terminal
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh
+```
+
+The command checks the download and keeps saved repositories, settings, and databases. Every other way to install or remove Foxy is in [Installation](#installation) and the [User Guide](wiki/User-Guide.md#installing-foxy).
+
 ## Screenshots
 
 ![Foxy repository dashboard with repository spaces, servers, editor missions, and launch controls](images/image1.png)
@@ -31,7 +47,7 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 - **Benchmarks** - Save a recheck, update, or redownload as a benchmark with stage timings, transfer and disk charts, CPU and memory use, power source, and speed-of-light ratios, then compare two runs side by side or export one as a ZIP for support.
 - **Migration and direct-download workflows** - Guided Swifty migration preserves repositories and spaces, while direct-download mode can fetch repository, addon, or file URLs without a full database sync.
 - **One binary, two interfaces** - The same `Foxy` executable provides the desktop UI and a scriptable CLI with `--json`, `--dry-run`, `--yes`, `--quiet`, and `--no-progress` support for automation and accessible output.
-- **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers plus decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds. The Windows build is also confirmed to work on Linux under Proton and Wine.
+- **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers, a one-command install you can run again to update, and decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds. The Windows build is also confirmed to work on Linux under Proton and Wine.
 - **Customizable, accessible UI** - Themes support import/export, presets, scaling, and toast feedback. Keyboard navigation, locale-aware formatting, scalable fonts, clear status messages, non-color-only indicators, and a Reduce motion setting are built in.
 - **Broad localization** - Built-in localization bundles cover `en`, `ar`, `bg`, `bn`, `cs`, `da`, `de`, `el`, `es`, `et`, `fa`, `fi`, `fr`, `he`, `hi`, `hr`, `hu`, `id`, `it`, `ja`, `ko`, `lt`, `lv`, `nb`, `nl`, `pl`, `pt`, `pt-BR`, `ro`, `ru`, `sk`, `sl`, `sr`, `sv`, `th`, `tl`, `tr`, `uk`, `ur`, `vi`, and `zh`.
 
@@ -43,7 +59,7 @@ Current workspace status:
 
 ## Documentation
 
-- [User Guide](wiki/User-Guide.md) - game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
+- [User Guide](wiki/User-Guide.md) - installing Foxy, game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
 - [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3, Arma Reforger, and custom game repositories and repository spaces with `foxy-server-backend-cli`, server launch lines and keys, and self-hosted app updates.
 - The in-app Help page (**F1**) covers the same ground in every bundled language, with search across topic titles and text.
 
@@ -59,17 +75,77 @@ These are planned directions for Foxy. They are not listed in any particular ord
 
 ## Installation
 
-### Pre-built installers
+The install page is [https://yethesamartaka-foxy.github.io/Foxy/](https://yethesamartaka-foxy.github.io/Foxy/). The [User Guide](wiki/User-Guide.md#installing-foxy) has the same steps with the folders Foxy uses.
 
-Download the latest release from the repository Releases page.
+The one-command install downloads the newest [release](https://github.com/YetheSamartaka-Foxy/Foxy/releases/latest), checks its SHA-256, and installs it. Running it again updates that copy. Saved repositories, settings, and databases stay in Foxy's config folder. Downloaded mods stay in the folders you chose. A current-user install needs no administrator permission.
 
-- Windows: run `Foxy-<version>-setup.exe`
-- Linux user install: run `chmod +x Foxy-<version>-linux-x86_64-installer.sh && ./Foxy-<version>-linux-x86_64-installer.sh --prefix="$HOME/.local/opt/foxy"`
-- Linux system install: run `chmod +x Foxy-<version>-linux-x86_64-installer.sh && sudo ./Foxy-<version>-linux-x86_64-installer.sh`
+`FOXY_INSTALL_REPO` (`owner/name`) installs from a different GitHub repository. Set it only for a repository you trust, because the command installs what that repository publishes.
 
-Windows updates keep saved repositories, settings, and databases. Silent installers always preserve user data; a reset during a manual install requires a fresh selection and confirmation.
+### Windows 10 and 11
 
-Native Linux in-app updates use Foxy's self-extracting `.sh` installer. System installs may prompt for administrator privileges through `pkexec` when the install prefix is not writable.
+In PowerShell:
+
+```powershell
+irm https://yethesamartaka-foxy.github.io/Foxy/install.ps1 | iex
+```
+
+That puts Foxy in the Start menu and in Settings > Apps, under `%LOCALAPPDATA%\Programs\Foxy`. A running Foxy is closed and then started again.
+
+When Foxy is already installed for all users, the same command updates that copy and Windows asks for administrator permission. When both a current-user copy and an all-users copy exist, the command updates the current-user copy and leaves the all-users copy as it is.
+
+To download it by hand, run `Foxy-<version>-setup.exe` from the release page. The setup can install for you or for every user of the PC. **Delete all existing Foxy user data** starts unchecked and asks before it removes settings and databases. Mod folders are kept either way. Silent installs always keep that data.
+
+The Windows setup is the x64 installer. It also runs on ARM PCs. It requires 64-bit Windows.
+
+### Linux (x86_64 and ARM64)
+
+In a terminal:
+
+```sh
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh
+```
+
+That installs Foxy for the current user in `~/.local/opt/foxy`, adds a `foxy` command, and adds Foxy to the applications menu. It needs no root. The command uses `Foxy-<version>-linux-x86_64-installer.sh` or `Foxy-<version>-linux-aarch64-installer.sh` for this computer. When a release has no installer for this processor, it stops and leaves the computer unchanged.
+
+When the only existing install is the system copy in `/opt/foxy`, the command updates that copy and asks for administrator permission. A system install may prompt through `sudo`. In-app updates of a system install may prompt through `pkexec` when the install prefix is not writable.
+
+By hand:
+
+```sh
+chmod +x Foxy-<version>-linux-x86_64-installer.sh
+./Foxy-<version>-linux-x86_64-installer.sh --prefix="$HOME/.local/opt/foxy"
+sudo ./Foxy-<version>-linux-x86_64-installer.sh
+```
+
+The first is a current-user install. The second is a system install in `/opt/foxy`. Use one of them. On ARM64, use the `linux-aarch64` installer when the release includes it.
+
+Remove the current-user copy with:
+
+```sh
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh -s -- --uninstall
+```
+
+Remove a system install with `sudo ./Foxy-<version>-linux-<arch>-installer.sh --uninstall --prefix=/opt/foxy`. Settings stay in `~/.config/Foxy` (`$XDG_CONFIG_HOME/Foxy` when that path is absolute).
+
+### macOS 11 or newer (Apple Silicon and Intel)
+
+In Terminal:
+
+```sh
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh
+```
+
+That puts `Foxy.app` in `~/Applications` when the release includes a disk image for this Mac. Published releases include `Foxy-<version>-macos-arm64.dmg` for Apple Silicon. The same `--uninstall` command used on Linux removes that app. Settings stay in `~/Library/Application Support/Foxy`.
+
+To download it by hand, open the disk image from the release page and drag Foxy to Applications.
+
+macOS may say it could not verify Foxy. Open System Settings, go to Privacy & Security, and allow Foxy. This macOS build is experimental. Steam Workshop needs `libsteam_api.dylib` next to the Foxy executable inside the app.
+
+### Update or remove
+
+- **Installed with the command?** Run the same command again. On Windows, remove Foxy in Settings > Apps. On Linux and macOS, run the command with `--uninstall`, as shown above.
+- **Downloaded by hand?** Run the newest setup, Linux installer, or disk image. Foxy's in-app update uses those same Windows and Linux installers and keeps saved data.
+- **To also remove settings**, delete `%APPDATA%\Foxy` on Windows, `~/.config/Foxy` on Linux, or `~/Library/Application Support/Foxy` on macOS. Mod folders you chose are separate and stay where they are.
 
 ### Linux, Proton, and Wine
 
