@@ -219,6 +219,19 @@ impl Foxy {
                     self.pending_db_schema_wipe = None;
                     self.show_db_schema_wipe_prompt = false;
                     self.fs_watch_index_dirty = true;
+                    let mut cleared_repo_results = false;
+                    for repo in &mut self.repository_view_state.repositories {
+                        cleared_repo_results |=
+                            crate::core::tasks::check_cache_version::clear_in_memory_repository_check_results(repo);
+                    }
+                    if cleared_repo_results {
+                        self.save_repositories();
+                    }
+                    self.repo_states.clear();
+                    self.repo_states_version = self.repo_states_version.wrapping_add(1);
+                    self.pending_update_cache.clear();
+                    self.clear_mod_diff_cache();
+                    self.update_ready_repo = None;
                     self.show_success_toast(self.t("Database wiped successfully"));
                     if repair_required && self.startup_tasks_started {
                         self.start_database_startup_tasks();

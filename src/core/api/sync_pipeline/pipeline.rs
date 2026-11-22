@@ -2320,9 +2320,17 @@ async fn run_repository_pipeline(
         let reapplied_addons = if builds_download_plan || force_redownload {
             HashSet::new()
         } else {
-            recheck_reapplied_addons(
+            let mut addons = recheck_reapplied_addons(
                 &load_pending_update_mods(context.clone(), &normalized_repo_url).await,
-            )
+            );
+            // Also re-apply enabled addons whose stored checksums still
+            // disagree after `pending_updates` was cleared on an app update.
+            if let Ok(db_pending) =
+                pending_remote_addon_scope(context.clone(), &normalized_repo_url).await
+            {
+                addons.extend(db_pending);
+            }
+            addons
         };
         let remote_refresh_context = if builds_download_plan
             && !force_redownload

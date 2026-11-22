@@ -120,7 +120,10 @@ impl Foxy {
     }
 
     pub(in crate::ui::app) fn discard_stale_repository_check_cache(&mut self) {
-        if self.db_lock_conflict.is_some() || self.database_updates_blocked() {
+        if self.settings_view_state.debug_mode
+            || self.db_lock_conflict.is_some()
+            || self.database_updates_blocked()
+        {
             return;
         }
         let Some(runtime) = crate::core::api::background_runtime() else {
@@ -134,7 +137,7 @@ impl Foxy {
             ),
         ) {
             Ok(crate::core::tasks::check_cache_version::CheckCacheAlign::Invalidated) => {
-                self.startup_remote_recheck_after_app_update = !self.settings_view_state.debug_mode;
+                self.startup_remote_recheck_after_app_update = true;
             }
             Ok(_) => {}
             Err(err) => {
@@ -411,6 +414,7 @@ impl Foxy {
         let requested = normalized_requested_repositories.len();
         self.startup_quick_scan_requested = requested;
         if requested == 0 {
+            self.startup_remote_recheck_after_app_update = false;
             info!("Scheduling startup quick scan for 0 of 0 repositories");
             return;
         }
@@ -447,6 +451,7 @@ impl Foxy {
                 && plan.eligible_repositories.is_empty()
                 && plan.remote_changed_repositories.is_empty()
                 && plan.pending_update_repositories.is_empty()
+                && plan.unchanged_ineligible_repositories.is_empty()
             {
                 info!(
                     "Startup quick scan eligibility worker could not run for {} repositories; falling back to requested set",
@@ -457,6 +462,7 @@ impl Foxy {
                 && plan.eligible_repositories.is_empty()
                 && plan.remote_changed_repositories.is_empty()
                 && plan.pending_update_repositories.is_empty()
+                && plan.unchanged_ineligible_repositories.is_empty()
             {
                 info!(
                     "Startup quick scan eligibility found 0 of {} repositories ready; respecting the verdict",
@@ -471,6 +477,7 @@ impl Foxy {
                     remote_changed_repositories: plan.remote_changed_repositories,
                     pending_update_repositories: plan.pending_update_repositories,
                     remote_unknown_repositories: plan.remote_unknown_repositories,
+                    unchanged_ineligible_repositories: plan.unchanged_ineligible_repositories,
                 })
                 .is_ok()
             {
@@ -516,11 +523,17 @@ impl Foxy {
                 Vec<_>,
                 HashSet<api::StartupRepositoryInstance>,
             ) = if force_remote_recheck {
+                self.startup_probe_retry_force_remote_recheck = payload
+                    .remote_unknown_repositories
+                    .iter()
+                    .cloned()
+                    .collect();
                 let routed: api::AppUpdateStartupRoute = api::route_startup_after_app_update(
                     payload.eligible_repositories,
                     payload.prevalidated_repositories,
                     payload.remote_changed_repositories,
                     payload.pending_update_repositories,
+                    payload.unchanged_ineligible_repositories,
                     &payload.remote_unknown_repositories,
                 );
                 info!(
@@ -534,6 +547,7 @@ impl Foxy {
                     routed.prevalidated.into_iter().collect(),
                 )
             } else {
+                self.startup_probe_retry_force_remote_recheck.clear();
                 let mut remote_refreshes = payload.remote_changed_repositories;
                 if !remote_refreshes.is_empty() {
                     info!(
@@ -595,6 +609,7 @@ impl Foxy {
             self.needs_repaint = true;
         } else if disconnected {
             self.startup_remote_recheck_after_app_update = false;
+            self.startup_probe_retry_force_remote_recheck.clear();
             warn!("Startup quick scan eligibility worker disconnected before delivering results");
             self.startup_quick_scan_filter_rx = None;
         }
@@ -1312,10 +1327,61 @@ impl Foxy {
         self.startup_probe_unknown.retain(|repository| {
             repository.repo_url != repo_url || repository.local_path != local_path
         });
+        self.startup_probe_retry_force_remote_recheck
+            .retain(|repository| {
+                repository.repo_url != repo_url || repository.local_path != local_path
+            });
         if before > 0 && self.startup_probe_unknown.is_empty() {
             self.startup_probe_retry_armed_at = None;
             self.startup_probe_retries_completed = 0;
         }
+    }
+
+    fn collect_startup_probe_retry_refreshes(
+        still_tracked: &HashSet<api::StartupRepositoryInstance>,
+        remote_changed: Vec<api::StartupRepositoryInstance>,
+        pending_updates: Vec<api::StartupRepositoryInstance>,
+        still_unknown: &[api::StartupRepositoryInstance],
+        force_remote_recheck: &mut HashSet<api::StartupRepositoryInstance>,
+    ) -> (Vec<api::StartupRepositoryInstance>, usize, usize) {
+        let still_unknown_set: HashSet<&api::StartupRepositoryInstance> =
+            still_unknown.iter().collect();
+        let mut refresh = Vec::new();
+        let mut seen = HashSet::new();
+        for repository in remote_changed {
+            if still_tracked.contains(&repository) && seen.insert(repository.clone()) {
+                refresh.push(repository);
+            }
+        }
+        let mut pending = 0usize;
+        for repository in pending_updates {
+            if still_tracked.contains(&repository) {
+                pending += 1;
+                if seen.insert(repository.clone()) {
+                    refresh.push(repository);
+                }
+            }
+        }
+        force_remote_recheck.retain(|repository| still_tracked.contains(repository));
+        let mut answered_forced: Vec<api::StartupRepositoryInstance> = force_remote_recheck
+            .iter()
+            .filter(|repository| !still_unknown_set.contains(repository))
+            .cloned()
+            .collect();
+        answered_forced.sort_by(|left, right| {
+            left.repo_url
+                .cmp(&right.repo_url)
+                .then_with(|| left.local_path.cmp(&right.local_path))
+        });
+        let mut forced = 0usize;
+        for repository in answered_forced {
+            force_remote_recheck.remove(&repository);
+            if seen.insert(repository.clone()) {
+                refresh.push(repository);
+                forced += 1;
+            }
+        }
+        (refresh, pending, forced)
     }
 
     fn startup_probe_retry_candidates(&self) -> Vec<api::StartupRepositoryInstance> {
@@ -1349,17 +1415,19 @@ impl Foxy {
             self.startup_probe_retry_rx = None;
             let still_tracked: HashSet<api::StartupRepositoryInstance> =
                 self.startup_probe_unknown.iter().cloned().collect();
-            let mut refresh = payload.remote_changed_repositories;
-            let mut pending_updates = payload.pending_update_repositories;
-            refresh.retain(|repository| still_tracked.contains(repository));
-            pending_updates.retain(|repository| still_tracked.contains(repository));
-            let pending = pending_updates.len();
-            refresh.extend(pending_updates);
+            let (refresh, pending, forced) = Self::collect_startup_probe_retry_refreshes(
+                &still_tracked,
+                payload.remote_changed_repositories,
+                payload.pending_update_repositories,
+                &payload.still_unknown_repositories,
+                &mut self.startup_probe_retry_force_remote_recheck,
+            );
             if !refresh.is_empty() {
                 info!(
-                    "Startup probe retry queued remote refresh for {} repositories (pending={})",
+                    "Startup probe retry queued remote refresh for {} repositories (pending={} app_update={})",
                     refresh.len(),
-                    pending
+                    pending,
+                    forced
                 );
                 self.queue_startup_remote_refreshes(refresh);
             }
@@ -1374,6 +1442,7 @@ impl Foxy {
             if self.startup_probe_unknown.is_empty() {
                 self.startup_probe_retry_armed_at = None;
                 self.startup_probe_retries_completed = 0;
+                self.startup_probe_retry_force_remote_recheck.clear();
             }
             self.needs_repaint = true;
         } else if disconnected {
@@ -1417,6 +1486,8 @@ impl Foxy {
         }
         let candidates = self.startup_probe_retry_candidates();
         self.startup_probe_unknown.clone_from(&candidates);
+        self.startup_probe_retry_force_remote_recheck
+            .retain(|repository| candidates.contains(repository));
         if candidates.is_empty() {
             self.startup_probe_retry_armed_at = None;
             self.startup_probe_retries_completed = 0;
@@ -1527,5 +1598,35 @@ mod tests {
             Foxy::fs_watch_signature_for(&before),
             Foxy::fs_watch_signature_for(&after)
         );
+    }
+
+    #[test]
+    fn startup_probe_retry_rechecks_answered_repositories_after_app_update() {
+        let instance = |name: &str| api::StartupRepositoryInstance {
+            repo_url: format!("https://repo.example.invalid/{name}/"),
+            local_path: format!("r:/mods/{name}"),
+        };
+        let answered_unchanged = instance("alpha");
+        let answered_changed = instance("beta");
+        let still_offline = instance("gamma");
+        let still_tracked = HashSet::from([
+            answered_unchanged.clone(),
+            answered_changed.clone(),
+            still_offline.clone(),
+        ]);
+        let mut force_remote_recheck = still_tracked.clone();
+
+        let (refresh, pending, forced) = Foxy::collect_startup_probe_retry_refreshes(
+            &still_tracked,
+            vec![answered_changed.clone()],
+            Vec::new(),
+            std::slice::from_ref(&still_offline),
+            &mut force_remote_recheck,
+        );
+
+        assert_eq!(refresh, vec![answered_changed, answered_unchanged]);
+        assert_eq!(pending, 0);
+        assert_eq!(forced, 1);
+        assert_eq!(force_remote_recheck, HashSet::from([still_offline]));
     }
 }

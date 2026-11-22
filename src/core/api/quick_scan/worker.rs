@@ -76,6 +76,10 @@ pub struct StartupQuickScanPlan {
     /// Probe got no answer. The local quick scan still runs when the repository
     /// is eligible; a later retry probes these again.
     pub remote_unknown_repositories: Vec<StartupRepositoryInstance>,
+    /// Probed repositories whose remote checksum matched and that quick scan
+    /// cannot scan locally yet. Idle on ordinary launches, but still routed to
+    /// a remote recheck after an app update deletes the previous cache.
+    pub unchanged_ineligible_repositories: Vec<StartupRepositoryInstance>,
     /// True when eligibility planning ran to completion.
     pub completed: bool,
 }
@@ -201,7 +205,14 @@ pub(crate) fn partition_startup_repositories(
                     plan.prevalidated_repositories.push(repository.clone());
                 }
             }
-            StartupRepositoryRoute::Idle => {}
+            StartupRepositoryRoute::Idle => {
+                if repository_facts.probed
+                    && repository_facts.freshness == RemoteFreshness::Unchanged
+                {
+                    plan.unchanged_ineligible_repositories
+                        .push(repository.clone());
+                }
+            }
         }
     }
     plan
@@ -210,19 +221,25 @@ pub(crate) fn partition_startup_repositories(
 /// Startup routing after the previous app version's check cache was deleted.
 ///
 /// Repositories the probe could compare go through a remote recheck so the
-/// new build writes its own update cache. A probe that got no answer stays on
-/// the local quick scan, the same fallback as an ordinary startup.
+/// new build writes its own update cache, including ones quick scan cannot
+/// inspect locally yet. A probe that got no answer stays on the local quick
+/// scan, the same fallback as an ordinary startup.
 pub fn route_startup_after_app_update(
     eligible: Vec<StartupRepositoryInstance>,
     prevalidated: Vec<StartupRepositoryInstance>,
     remote_changed: Vec<StartupRepositoryInstance>,
     pending_updates: Vec<StartupRepositoryInstance>,
+    unchanged_ineligible: Vec<StartupRepositoryInstance>,
     remote_unknown: &[StartupRepositoryInstance],
 ) -> AppUpdateStartupRoute {
     let unknown: HashSet<StartupRepositoryInstance> = remote_unknown.iter().cloned().collect();
     let mut remote_refresh = Vec::new();
     let mut seen = HashSet::new();
-    for repository in remote_changed.into_iter().chain(pending_updates) {
+    for repository in remote_changed
+        .into_iter()
+        .chain(pending_updates)
+        .chain(unchanged_ineligible)
+    {
         if seen.insert(repository.clone()) {
             remote_refresh.push(repository);
         }
@@ -1714,15 +1731,49 @@ mod tests {
         let unknown = instance("unknown");
         let changed = instance("changed");
         let pending = instance("pending");
+        let ineligible = instance("ineligible");
         let routed = route_startup_after_app_update(
             vec![unchanged.clone(), unknown.clone()],
             vec![unchanged.clone()],
             vec![changed.clone()],
             vec![pending.clone()],
+            vec![ineligible.clone()],
             std::slice::from_ref(&unknown),
         );
-        assert_eq!(routed.remote_refresh, vec![changed, pending, unchanged]);
+        assert_eq!(
+            routed.remote_refresh,
+            vec![changed, pending, ineligible, unchanged]
+        );
         assert_eq!(routed.quick_scan, vec![unknown]);
         assert!(routed.prevalidated.is_empty());
+    }
+
+    #[test]
+    fn startup_plan_tracks_probed_unchanged_ineligible_repositories_for_app_update_recheck() {
+        let probed_ineligible = instance("probed_ineligible");
+        let unprobed_ineligible = instance("unprobed_ineligible");
+        let plan = partition_startup_repositories(
+            &[probed_ineligible.clone(), unprobed_ineligible],
+            &[
+                facts(
+                    RemoteFreshness::Unchanged,
+                    false,
+                    StartupQuickScanEligibility::Ineligible,
+                ),
+                StartupRepositoryFacts {
+                    freshness: RemoteFreshness::Unchanged,
+                    probed: false,
+                    has_pending_update: false,
+                    eligibility: StartupQuickScanEligibility::Ineligible,
+                },
+            ],
+        );
+        assert_eq!(
+            plan.unchanged_ineligible_repositories,
+            vec![probed_ineligible]
+        );
+        assert!(plan.eligible_repositories.is_empty());
+        assert!(plan.remote_changed_repositories.is_empty());
+        assert!(plan.pending_update_repositories.is_empty());
     }
 }

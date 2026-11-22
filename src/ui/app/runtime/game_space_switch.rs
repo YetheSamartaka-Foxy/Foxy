@@ -736,6 +736,7 @@ impl Foxy {
         self.addon_hash_recalc_queue.clear();
         self.startup_recheck_queue.clear();
         self.startup_remote_recheck_after_app_update = false;
+        self.startup_probe_retry_force_remote_recheck.clear();
         self.repository_space_sync_queue.clear();
         self.repository_visual_folder_sync_queue.clear();
         self.startup_pending_restore_rx = None;

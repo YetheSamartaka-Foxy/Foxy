@@ -99,14 +99,59 @@ pub(crate) fn write_check_cache_app_version_at(path: &Path, version: &str) -> Re
     atomic_write(path, &payload).map_err(|_| "could not write the check-cache version".to_string())
 }
 
-/// The database no longer holds check results, so the running version owns
-/// the cache the next check will write.
+/// Clear saved check results in `repositories.json` and record `version` as the
+/// cache owner when the database itself has just been wiped.
+pub(crate) fn clear_repository_check_results_and_record_owner_at(
+    repositories_path: &Path,
+    stamp_path: &Path,
+    version: &str,
+) -> Result<usize, String> {
+    let cleared = clear_repository_check_results_file(repositories_path)?;
+    write_check_cache_app_version_at(stamp_path, version)?;
+    Ok(cleared)
+}
+
+/// The database no longer holds check results, so clear stale repository check
+/// results too before recording the running version as the owner of the empty cache.
 pub fn record_running_app_as_check_cache_owner() {
-    if let Err(err) =
-        write_check_cache_app_version_at(&check_cache_app_version_path(), build_info::VERSION)
-    {
+    let repositories_path = spaces::active_game_space_dir().join("repositories.json");
+    if let Err(err) = clear_repository_check_results_and_record_owner_at(
+        &repositories_path,
+        &check_cache_app_version_path(),
+        build_info::VERSION,
+    ) {
         log::warn!("Could not record the app version for the repository check cache: {err}");
     }
+}
+
+/// Drop saved check-result fields on an in-memory repository so live UI state
+/// matches a cleared `repositories.json` and never writes stale results back.
+pub fn clear_in_memory_repository_check_results(
+    repository: &mut crate::ui::types::Repository,
+) -> bool {
+    let mut changed = false;
+    if !repository.preset_check_evidence.is_empty() {
+        repository.preset_check_evidence.clear();
+        changed = true;
+    }
+    if repository.last_check_at.take().is_some() {
+        changed = true;
+    }
+    if repository.last_remote_check_at.take().is_some() {
+        changed = true;
+    }
+    if repository.last_full_verification_at.take().is_some() {
+        changed = true;
+    }
+    if repository.last_check_full {
+        repository.last_check_full = false;
+        changed = true;
+    }
+    if !repository.last_check_remote_fresh {
+        repository.last_check_remote_fresh = true;
+        changed = true;
+    }
+    changed
 }
 
 /// Drop saved check-result fields on repository objects.
@@ -350,5 +395,88 @@ mod tests {
         );
         std::fs::write(&path, r#"{"app_version":"   "}"#).unwrap();
         assert!(read_check_cache_app_version_at(&path).is_none());
+    }
+
+    #[test]
+    fn recording_owner_after_wipe_clears_stale_repository_check_results_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let repos_path = dir.path().join("repositories.json");
+        let stamp_path = dir.path().join("check_cache_app_version.json");
+        std::fs::write(
+            &repos_path,
+            serde_json::to_string_pretty(&json!([{
+                "name": "Main",
+                "address": "https://repo.example.invalid/main/",
+                "last_check_at": 10,
+                "last_remote_check_at": 9,
+                "last_check_full": true,
+                "last_check_remote_fresh": false,
+                "preset_check_evidence": [{
+                    "profile": null,
+                    "selected_addons": ["@mod_01"],
+                    "outcome": "Synced",
+                    "checked_at": 10
+                }]
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let cleared = super::clear_repository_check_results_and_record_owner_at(
+            &repos_path,
+            &stamp_path,
+            "1.2.3",
+        )
+        .unwrap();
+        assert_eq!(cleared, 1);
+        assert_eq!(
+            read_check_cache_app_version_at(&stamp_path).as_deref(),
+            Some("1.2.3")
+        );
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&repos_path).unwrap()).unwrap();
+        assert_eq!(saved[0]["preset_check_evidence"], json!([]));
+        assert!(saved[0]["last_check_at"].is_null());
+        assert!(saved[0]["last_remote_check_at"].is_null());
+    }
+
+    #[test]
+    fn in_memory_clear_matches_persisted_clear() {
+        use crate::ui::types::{
+            Repository, RepositoryPresetCheckEvidence, RepositoryPresetCheckOutcome,
+        };
+
+        let mut repository = Repository {
+            name: "Main".to_string(),
+            address: "https://repo.example.invalid/main/".to_string(),
+            path: "R:/Mods/Main".to_string(),
+            preset_check_evidence: vec![RepositoryPresetCheckEvidence {
+                profile: None,
+                selected_addons: vec!["@mod_01".to_string()],
+                outcome: RepositoryPresetCheckOutcome::Synced,
+                checked_at: 10,
+            }],
+            last_check_at: Some(10),
+            last_remote_check_at: Some(9),
+            last_full_verification_at: Some(8),
+            last_check_full: true,
+            last_check_remote_fresh: false,
+            last_updated_at: Some(7),
+            ..Repository::default()
+        };
+
+        assert!(super::clear_in_memory_repository_check_results(
+            &mut repository
+        ));
+        assert!(!super::clear_in_memory_repository_check_results(
+            &mut repository
+        ));
+        assert!(repository.preset_check_evidence.is_empty());
+        assert!(repository.last_check_at.is_none());
+        assert!(repository.last_remote_check_at.is_none());
+        assert!(repository.last_full_verification_at.is_none());
+        assert!(!repository.last_check_full);
+        assert!(repository.last_check_remote_fresh);
+        assert_eq!(repository.last_updated_at, Some(7));
     }
 }

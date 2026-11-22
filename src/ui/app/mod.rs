@@ -443,6 +443,9 @@ pub struct Foxy {
     /// The previous app version's check cache was discarded this launch, so
     /// startup must remote-recheck instead of reusing a local quick scan.
     startup_remote_recheck_after_app_update: bool,
+    /// Unanswered startup-probe repositories that still owe a remote recheck
+    /// after an app update once their server responds on retry.
+    startup_probe_retry_force_remote_recheck: HashSet<api::StartupRepositoryInstance>,
     pub repository_space_sync_queue: VecDeque<repository::space_actions::QueuedRepositorySpaceSync>,
     pub repository_visual_folder_sync_queue:
         VecDeque<repository::space_actions::QueuedRepositoryVisualFolderSync>,

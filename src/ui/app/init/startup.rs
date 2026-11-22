@@ -475,6 +475,7 @@ impl Foxy {
             frame_cost_at_sync_start: None,
             startup_recheck_queue: VecDeque::new(),
             startup_remote_recheck_after_app_update: false,
+            startup_probe_retry_force_remote_recheck: HashSet::new(),
             repository_space_sync_queue: VecDeque::new(),
             repository_visual_folder_sync_queue: VecDeque::new(),
             addon_hash_recalc_queue: VecDeque::new(),
