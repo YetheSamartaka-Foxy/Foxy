@@ -86,6 +86,184 @@ fn mod_line_files_are_rewritten_after_a_successful_create() {
 }
 
 #[test]
+fn no_mod_line_files_skips_checking_previewing_and_rewriting_launch_scripts() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("mods").join("@mod");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("data.txt"), b"data").unwrap();
+    let script = dir.path().join("start-server.cmd");
+    let original = "@echo off\r\narma3server_x64.exe -mod=mods/@stale; -config=server.cfg\r\n";
+    std::fs::write(&script, original).unwrap();
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "Test",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [{"modName": "@mod"}],
+            "modLineFiles": ["start-server.cmd", "missing-for-test.cmd"]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let preview = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .args(["--dry-run", "--no-mod-line-files"])
+        .output()
+        .unwrap();
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let result: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert!(
+        !result["details"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "update-mod-line")
+    );
+
+    let built = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .args([
+            "--no-progress",
+            "--no-mod-line-files",
+            "--mod-line-prefix",
+            "mods",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let result: Value = serde_json::from_slice(&built.stdout).unwrap();
+    assert!(result["details"].get("modLineFiles").is_none());
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(output.join("server_mod_line.txt")).unwrap(),
+        "-mod=mods/@mod;\n"
+    );
+
+    let space = dir.path().join("space.json");
+    write_json(
+        &space,
+        json!({
+            "name": "Test Space",
+            "baseUrl": "https://example.com/repos/",
+            "repositories": [{"config": "config.json", "folder": "main"}]
+        }),
+    );
+    let space_output = dir.path().join("space-output");
+    let space_built = Command::new(bin)
+        .args(["--json", "create-space"])
+        .arg(&space)
+        .arg(&space_output)
+        .args([
+            "--no-progress",
+            "--no-mod-line-files",
+            "--mod-line-prefix",
+            "mods",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        space_built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&space_built.stderr)
+    );
+    let space_result: Value = serde_json::from_slice(&space_built.stdout).unwrap();
+    assert!(space_result["details"].get("modLineFiles").is_none());
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(space_output.join("main").join("server_mod_line.txt")).unwrap(),
+        "-mod=mods/@mod;\n"
+    );
+}
+
+#[test]
+fn nested_disabled_mod_in_config_publishes_flattened_with_enabled_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods");
+    let active = mods.join("@active");
+    let nested_disabled = mods.join("folder").join("@mod");
+    std::fs::create_dir_all(&active).unwrap();
+    std::fs::create_dir_all(&nested_disabled).unwrap();
+    std::fs::write(active.join("active.pbo"), b"active").unwrap();
+    std::fs::write(nested_disabled.join("mod.pbo"), b"disabled").unwrap();
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "Test",
+            "basePath": mods,
+            "requiredMods": [
+                {"modName": "@active", "enabled": true},
+                {"modName": "folder/@mod", "enabled": false}
+            ]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let built = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .args(["--no-progress", "--mode", "hybrid"])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(output.join("@mod").join("mod.pbo").exists());
+    assert!(!output.join("folder").exists());
+
+    let foxy_addons: Value =
+        serde_json::from_slice(&std::fs::read(output.join("foxy_addons.json")).unwrap()).unwrap();
+    let foxy_disabled = foxy_addons["requiredMods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["modName"] == "@mod")
+        .unwrap();
+    assert_eq!(foxy_disabled["enabled"], false);
+
+    let repo_json: Value =
+        serde_json::from_slice(&std::fs::read(output.join("repo.json")).unwrap()).unwrap();
+    let repo_disabled = repo_json["requiredMods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["modName"] == "@mod")
+        .unwrap();
+    assert_eq!(repo_disabled["enabled"], false);
+    assert_eq!(
+        std::fs::read_to_string(output.join("server_mod_line.txt")).unwrap(),
+        "-mod=@active;\n"
+    );
+    assert!(
+        Command::new(bin)
+            .arg("verify")
+            .arg(&output)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn json_preview_atomic_create_and_verify() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("mods").join("@mod");

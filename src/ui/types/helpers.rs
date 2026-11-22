@@ -382,31 +382,6 @@ pub fn merge_remote_addon_categories(
     repo.addons = merge_remote_addon_list(required.clone(), &old_required);
     repo.optional_addons = merge_remote_addon_list(optional.clone(), &old_optional);
 
-    let required_profile_defaults: Vec<_> = required
-        .iter()
-        .map(|(name, published_default)| {
-            let key = name.to_ascii_lowercase();
-            let enabled = if moved_to_required.contains(&key) || old_required_keys.contains(&key) {
-                *published_default
-            } else {
-                true
-            };
-            (name.clone(), enabled)
-        })
-        .collect();
-    let optional_profile_defaults: Vec<_> = optional
-        .iter()
-        .map(|(name, published_default)| {
-            let key = name.to_ascii_lowercase();
-            let enabled = if moved_to_optional.contains(&key) || old_optional_keys.contains(&key) {
-                *published_default
-            } else {
-                false
-            };
-            (name.clone(), enabled)
-        })
-        .collect();
-
     for profile in &mut repo.profiles {
         let same_category_required: Vec<_> = profile
             .addons
@@ -420,10 +395,9 @@ pub fn merge_remote_addon_categories(
             .filter(|(name, _)| old_optional_keys.contains(&name.to_ascii_lowercase()))
             .cloned()
             .collect();
-        profile.addons =
-            merge_remote_addon_list(required_profile_defaults.clone(), &same_category_required);
+        profile.addons = merge_remote_addon_list(required.clone(), &same_category_required);
         profile.optional_addons =
-            merge_remote_addon_list(optional_profile_defaults.clone(), &same_category_optional);
+            merge_remote_addon_list(optional.clone(), &same_category_optional);
     }
 
     let mut changed = Vec::new();

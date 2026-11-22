@@ -88,6 +88,9 @@ pub enum Command {
         /// Include optional mods in the printed server launch line
         #[arg(long)]
         mod_line_include_optional: bool,
+        /// Do not check or rewrite modLineFiles entries for this run
+        #[arg(long)]
+        no_mod_line_files: bool,
         /// Omit root-level optionals folders from published mods; needs --yes only to remove ones already published
         #[arg(long)]
         prune_unused_optionals: bool,
@@ -164,6 +167,9 @@ pub enum Command {
         /// Include optional mods in the printed server launch lines
         #[arg(long)]
         mod_line_include_optional: bool,
+        /// Do not check or rewrite modLineFiles entries for this run
+        #[arg(long)]
+        no_mod_line_files: bool,
         /// Copy every .bikey from all generated repositories into one combined keys folder
         #[arg(long)]
         collect_keys: bool,

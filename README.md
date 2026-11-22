@@ -330,7 +330,9 @@ replace fails the run before any hashing starts, so a typo never leaves a server
 silently running the old mod set. `validate` performs the same check, `--dry-run`
 lists the files as `update-mod-line` actions without touching them, and the
 rewrite runs only once the repository output is published (including with
-`--atomic`). In a space, two repositories may not list the same file.
+`--atomic`). Pass `--no-mod-line-files` to `create` or `create-space` to skip
+checking and rewriting `modLineFiles` for a run (for example when testing a
+build locally). In a space, two repositories may not list the same file.
 
 A config with `"game": "reforger"` (`new --game reforger` writes one) hashes the
 addon directories the same way, including the `.pak` entries inside them, and

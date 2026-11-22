@@ -326,6 +326,69 @@ fn enabled_required_moved_to_optional_adopts_published_default_across_profiles()
 }
 
 #[test]
+fn new_addons_adopt_published_enabled_defaults_across_profiles() {
+    let mut repo = Repository {
+        addons: vec![("@stable".to_string(), true)],
+        optional_addons: Vec::new(),
+        profiles: vec![RepositoryProfile {
+            name: "Custom".to_string(),
+            addons: vec![("@stable".to_string(), false)],
+            ..RepositoryProfile::default()
+        }],
+        ..Repository::default()
+    };
+
+    merge_remote_addon_categories(
+        &mut repo,
+        Some(vec![
+            ("@stable".to_string(), true),
+            ("@disabled_required".to_string(), false),
+        ]),
+        Some(vec![("@enabled_optional".to_string(), true)]),
+    );
+
+    assert_eq!(
+        repo.addons,
+        vec![
+            ("@stable".to_string(), true),
+            ("@disabled_required".to_string(), false)
+        ]
+    );
+    assert_eq!(
+        repo.optional_addons,
+        vec![("@enabled_optional".to_string(), true)]
+    );
+    assert_eq!(
+        repo.profiles[0].addons,
+        vec![
+            ("@stable".to_string(), false),
+            ("@disabled_required".to_string(), false)
+        ]
+    );
+    assert_eq!(
+        repo.profiles[0].optional_addons,
+        vec![("@enabled_optional".to_string(), true)]
+    );
+
+    for profile in &mut repo.profiles {
+        profile.addons.retain(|(_, enabled)| !*enabled);
+        profile.optional_addons.retain(|(_, enabled)| *enabled);
+    }
+    normalize_loaded_repository(&mut repo);
+    assert_eq!(
+        repo.profiles[0].addons,
+        vec![
+            ("@stable".to_string(), false),
+            ("@disabled_required".to_string(), false)
+        ]
+    );
+    assert_eq!(
+        repo.profiles[0].optional_addons,
+        vec![("@enabled_optional".to_string(), true)]
+    );
+}
+
+#[test]
 fn sanitize_external_addons_deduplicates_by_name_and_path() {
     let mut addons = vec![
         (" @ace ".to_string(), false, "C:\\Mods\\ACE\\".to_string()),

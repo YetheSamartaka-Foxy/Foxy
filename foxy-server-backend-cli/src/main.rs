@@ -85,6 +85,7 @@ fn main() -> Result<()> {
                 mode,
                 mod_line_prefix,
                 mod_line_include_optional,
+                no_mod_line_files,
                 prune_unused_optionals,
                 yes,
                 collect_keys,
@@ -102,6 +103,7 @@ fn main() -> Result<()> {
                         prefix: &mod_line_prefix,
                         include_optional: mod_line_include_optional,
                     },
+                    no_mod_line_files,
                     prune_unused_optionals,
                     dry_run,
                     incremental,
@@ -135,6 +137,7 @@ fn main() -> Result<()> {
                 mode,
                 mod_line_prefix,
                 mod_line_include_optional,
+                no_mod_line_files,
                 collect_keys,
                 keys_output,
                 additional_keys,
@@ -158,6 +161,7 @@ fn main() -> Result<()> {
                         prefix: &mod_line_prefix,
                         include_optional: mod_line_include_optional,
                     },
+                    no_mod_line_files,
                     keys: KeyCollectionRequest {
                         enabled: space_combined_keys_requested(
                             collect_keys,
@@ -185,7 +189,9 @@ fn main() -> Result<()> {
                 } else {
                     space::cmd_create_space(&config, &output, options)?
                 };
-                mod_line_files::apply_all(&pending)?;
+                if !no_mod_line_files {
+                    mod_line_files::apply_all(&pending)?;
+                }
                 if let Some(before) = before {
                     report::print(&report::compare(&before, &report::snapshot(&output)?));
                 }
@@ -256,6 +262,7 @@ struct CreateOptions<'a> {
     mode: GenerationMode,
     no_progress: bool,
     mod_line: mod_line::ModLineOptions<'a>,
+    no_mod_line_files: bool,
     prune_unused_optionals: bool,
     dry_run: bool,
     incremental: bool,
@@ -322,10 +329,12 @@ fn cmd_create(
                 options.prune_unused_optionals,
             )?;
         }
-        let launch_files = mod_line_files::resolve(&config, config_path);
-        mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
-        for path in &launch_files {
-            plan.add("update-mod-line", path, 0);
+        if !options.no_mod_line_files {
+            let launch_files = mod_line_files::resolve(&config, config_path);
+            mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
+            for path in &launch_files {
+                plan.add("update-mod-line", path, 0);
+            }
         }
         plan.show();
         return Ok(());
@@ -338,12 +347,15 @@ fn cmd_create(
         .then(|| report::snapshot(output_dir))
         .transpose()?;
     configure_thread_pool(options.threads)?;
+    let no_mod_line_files = options.no_mod_line_files;
     let pending = if options.atomic {
         staging::publish(output_dir, |stage| run_create(config_path, stage, options))?
     } else {
         run_create(config_path, output_dir, options)?
     };
-    mod_line_files::apply_all(std::slice::from_ref(&pending))?;
+    if !no_mod_line_files {
+        mod_line_files::apply_all(std::slice::from_ref(&pending))?;
+    }
     if let Some(before) = before {
         report::print(&report::compare(&before, &report::snapshot(output_dir)?));
     }
@@ -361,6 +373,7 @@ fn run_create(
         mode,
         no_progress,
         mod_line: mod_line_options,
+        no_mod_line_files,
         prune_unused_optionals,
         incremental,
         dry_run: _,
@@ -406,8 +419,13 @@ fn run_create(
     for warning in &warnings {
         log::warn!("{}", warning);
     }
-    let launch_files = mod_line_files::resolve(&config, config_path);
-    mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
+    let launch_files = if no_mod_line_files {
+        Vec::new()
+    } else {
+        let files = mod_line_files::resolve(&config, config_path);
+        mod_line_files::check(&files, &mod_line::launch_flags(config.game))?;
+        files
+    };
 
     for m in resolved_mods.iter().filter(|m| !is_game_build(m)) {
         println!(
@@ -860,6 +878,7 @@ mod generation_tests {
                     prefix: "mods",
                     include_optional: false,
                 },
+                no_mod_line_files: false,
                 prune_unused_optionals: true,
                 dry_run: false,
                 incremental: false,
@@ -901,6 +920,7 @@ mod generation_tests {
                 prefix: "",
                 include_optional: false,
             },
+            no_mod_line_files: false,
             prune_unused_optionals: true,
             dry_run: false,
             incremental: false,

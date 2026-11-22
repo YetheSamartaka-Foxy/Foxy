@@ -207,6 +207,7 @@ Useful options:
 | `--app-update-url <url>` | Set or override `appUpdateUrl` in `repo.json`; wins over the config value |
 | `--mod-line-prefix <dir>` | Server-side folder prefix for each mod in the launch line (for example `mods`) |
 | `--mod-line-include-optional` | Add the optional mods to the launch line |
+| `--no-mod-line-files` | Skip checking and rewriting `modLineFiles` for this run (useful for testing) |
 | `--prune-unused-optionals` | Leave root-level `optionals` folders out of the published copies |
 | `--collect-keys`, `--keys-output <dir>`, `--additional-keys <path>` | Collect `.bikey` files into one folder |
 | `--dry-run` | List every planned write without writing |
@@ -250,7 +251,7 @@ List the launch scripts or server configs that should always carry the current m
 
 After a successful generation, each listed file keeps its content except for the value of the launch parameters Foxy produces: `-mod=` for Arma 3, `-addonsDir` and `-addons` for Arma Reforger. Quoting is preserved, so `start.exe "-mod=@old;" -config=server.cfg` becomes `start.exe "-mod=mods/@cba_a3;" -config=server.cfg` and nothing else on the line moves. Every occurrence in a file is updated; `--mod=`, `-modules=`, and `-addons` inside `-addonsDir` are left alone. Relative paths resolve from the config file's own folder.
 
-A listed file that is missing, is not UTF-8 text, or has no such parameter fails the run before any hashing starts, so a typo never leaves a server silently running the old mod set. `validate` performs the same check, `--dry-run` lists the files as `update-mod-line` actions, and the rewrite runs only after the repository output is published. In a space, two repositories may not list the same file.
+A listed file that is missing, is not UTF-8 text, or has no such parameter fails the run before any hashing starts, so a typo never leaves a server silently running the old mod set. `validate` performs the same check, `--dry-run` lists the files as `update-mod-line` actions, and the rewrite runs only after the repository output is published. Pass `--no-mod-line-files` to `create` or `create-space` to skip checking, previewing, and rewriting `modLineFiles` for a specific run (for example during testing). In a space, two repositories may not list the same file.
 
 ### Pruning unused optionals
 
@@ -542,7 +543,7 @@ A mod name that appears in several repositories must hash identically in all of 
 
 ### Space options
 
-- `--mode`, `--threads`, `--app-update-url`, the launch line options, `--dry-run`, `--incremental`, `--atomic --yes`, and `--report` work as for `create`, applied to every repository. Arma 3 and Reforger repositories get a launch line and `server_mod_line.txt`; custom game repositories do not. Each applicable repository's `modLineFiles` are rewritten with its own line.
+- `--mode`, `--threads`, `--app-update-url`, the launch line options, `--no-mod-line-files`, `--dry-run`, `--incremental`, `--atomic --yes`, and `--report` work as for `create`, applied to every repository. Arma 3 and Reforger repositories get a launch line and `server_mod_line.txt`; custom game repositories do not. Each applicable repository's `modLineFiles` are rewritten with its own line unless `--no-mod-line-files` is set.
 - `--collect-keys` gathers the keys of the whole space into `<output>/keys`. `--per-repo-keys` writes each repository's keys (plus `--additional-keys`) into `<output>/<folder>/keys`, so a server can symlink one repository's keys folder directly. With `--per-repo-keys`, `--additional-keys` no longer implies `--collect-keys`: add `--collect-keys` or `--keys-output` to also build the combined folder.
 - `--only <folder>` (repeatable) regenerates only the selected repositories and keeps the full space manifest. It refuses mods shared with repositories you did not select, and it cannot rebuild the combined keys folder.
 - `--prune-unused-optionals` works with `copy` and `pool`, not with `link`.

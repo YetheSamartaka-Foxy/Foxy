@@ -1,12 +1,14 @@
 # 1.2.3
 ## Added
 - When joining a server requires enabling disabled local addons from the repository, the confirmation dialog now offers an option to save those newly enabled addons to your active profile before launching (checked by default when disabled required addons are listed).
+- Server tool: `create` and `create-space` now accept `--no-mod-line-files` to skip checking and rewriting `modLineFiles` for a run, useful for test builds.
 
 ## Changed
 - Standalone Direct Downloads (in the desktop app and `foxy direct-download`) now use larger HTTP/2 flow-control windows for faster HTTPS transfers.
 - After Foxy is updated, saved repository check results and update plans from the previous version are discarded, and startup runs a fresh remote recheck for repositories that check on launch. The new results belong to the installed version. This is on by default and can be turned off in Application settings or with `foxy settings set --recheck-repositories-after-app-update false`.
 
 ## Fixed
+- Newly added mods keep their published `enabled` default in existing saved profiles, and `foxy repo add` now reads `foxy_addons.json` for FoxyMode repositories so published `enabled` flags apply there too.
 - Dismissing an addon context menu or popup by clicking an addon row no longer toggles that addon's enabled state.
 - The update dialog no longer pushes its Update action button below the window when known local differences and the backup checkbox are displayed.
 - Compatible updates in repository spaces and shared folders are no longer falsely blocked by outdated local file metadata; Foxy refreshes the affected sibling addon manifests before checking for shared-file conflicts.

@@ -843,6 +843,7 @@ pub struct CreateSpaceOptions<'a> {
     pub mode: GenerationMode,
     pub no_progress: bool,
     pub mod_line: mod_line::ModLineOptions<'a>,
+    pub no_mod_line_files: bool,
     pub keys: KeyCollectionRequest,
     /// Write `<repo>/keys` with each repository's own keys next to its manifests.
     pub per_repo_keys: bool,
@@ -868,6 +869,7 @@ pub fn cmd_create_space(
         mode,
         no_progress,
         mod_line: mod_line_options,
+        no_mod_line_files,
         keys: key_collection,
         per_repo_keys,
     } = options;
@@ -973,22 +975,27 @@ pub fn cmd_create_space(
         );
     }
 
-    let launch_files: Vec<Vec<PathBuf>> = space
-        .repos
-        .iter()
-        .map(|repo| mod_line_files::resolve(&repo.config, &repo.config_path))
-        .collect();
-    for (repo, files) in space.repos.iter().zip(&launch_files) {
-        mod_line_files::check(files, &mod_line::launch_flags(repo.config.game))
-            .with_context(|| format!("Repository {}", repo.folder))?;
-    }
-    mod_line_files::ensure_distinct(
-        space
+    let launch_files: Vec<Vec<PathBuf>> = if no_mod_line_files {
+        Vec::new()
+    } else {
+        let files: Vec<Vec<PathBuf>> = space
             .repos
             .iter()
-            .map(|repo| repo.folder.as_str())
-            .zip(launch_files.iter().map(Vec::as_slice)),
-    )?;
+            .map(|repo| mod_line_files::resolve(&repo.config, &repo.config_path))
+            .collect();
+        for (repo, files) in space.repos.iter().zip(&files) {
+            mod_line_files::check(files, &mod_line::launch_flags(repo.config.game))
+                .with_context(|| format!("Repository {}", repo.folder))?;
+        }
+        mod_line_files::ensure_distinct(
+            space
+                .repos
+                .iter()
+                .map(|repo| repo.folder.as_str())
+                .zip(files.iter().map(Vec::as_slice)),
+        )?;
+        files
+    };
 
     if dry_run {
         let pool_dir = pool_dir.unwrap_or_else(|| output_dir.join(DEFAULT_POOL_DIR));
