@@ -26,7 +26,7 @@ Run `cargo agent-check models` from the repository root. It never edits a file a
 
 - A forced replacement (the pinned model is gone) proceeds as one focused commit. Any other change waits for the owner's yes.
 - Never on this workflow's initiative: raise a thinking level, move a role to a higher class, adopt a preview model, change the main-session recommendation (the owner's choice), switch on benchmark claims, or change a pin "to be safe".
-- Gemini 4 Argon, Claude Fable and Codex `gpt-6-astra` have limited usage and are owner's-choice models. Never move a pin, role or recommendation to one; Argon and its successors are never candidate pins. The main session stays Hydrogen at high or xhigh unless the owner chooses otherwise.
+- Gemini 4 Carbon, Claude Fable and Codex `gpt-6-astra` have limited usage and are owner's-choice models. Never move a pin, role or recommendation to one; excluded families are never candidate pins. The main session stays Hydrogen at high for routine work and Neon at high or xhigh for hard work unless the owner chooses otherwise.
 - Antigravity: edit `ROLE_MODELS` and the matching table in [agent workflows](../../conventions/AGENT_WORKFLOWS.md). Cursor: edit the `.cursor/agents/` model lines, the constants in `tools/agent-check/src/roles.rs` and the Cursor sentence in that document, following [agent maintenance](../foxy-agent-maintenance/SKILL.md).
 - Prove a new Antigravity pin with one bounded run, `cargo agent-check role explorer "<one-line question>"`, and confirm the model in that session's transcript.
 - Validate with `cargo agent-check models`, `cargo agent-check` and `git diff --check`; checker code changes also run the commands in `tools/AGENTS.md`.

@@ -16,7 +16,8 @@ use std::time::Duration;
 const AGY_TIMEOUT: Duration = Duration::from_secs(90);
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const WORKFLOWS: &str = "conventions/AGENT_WORKFLOWS.md";
-const OWNER_CHOICE_GEMINI: [&str; 2] = ["argon", "carbon"];
+// Excluded Gemini families (Argon is not used here; Carbon is Ultra-only): never candidate pins.
+const EXCLUDED_GEMINI: [&str; 2] = ["argon", "carbon"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pin {
@@ -202,7 +203,7 @@ pub(crate) fn findings(pins: &[Pin], listed: Option<&BTreeSet<String>>) -> Vec<F
                 let Some((version, family, _)) = parse_gemini(id) else {
                     continue;
                 };
-                if OWNER_CHOICE_GEMINI.contains(&family.as_str()) {
+                if EXCLUDED_GEMINI.contains(&family.as_str()) {
                     continue;
                 }
                 match families.get(&family) {
@@ -297,22 +298,22 @@ mod tests {
             parse_gemini("gemini-4-hydrogen-xhigh"),
             Some((vec![4], "hydrogen".to_owned(), Some("xhigh".to_owned())))
         );
-        assert_eq!(parse_gemini("gemini-pro-orchestrator-g1-pro"), None);
+        assert_eq!(parse_gemini("gemini-pro-orchestrator-neon"), None);
         assert_eq!(parse_gemini("claude-opus-5-5-high"), None);
     }
 
     #[test]
     fn agy_output_keeps_model_ids_only() {
-        let output = "Fetching available models...\ngemini-4-argon-high\tGemini 4 Argon (High)\nclaude-sonnet-5-5-low\tClaude\n";
+        let output = "Fetching available models...\ngemini-4-neon-high\tGemini 4 Neon (High)\nclaude-sonnet-5-5-low\tClaude\n";
         assert_eq!(
             parse_agy_models(output),
-            listed(&["claude-sonnet-5-5-low", "gemini-4-argon-high"])
+            listed(&["claude-sonnet-5-5-low", "gemini-4-neon-high"])
         );
     }
 
     #[test]
     fn named_ids_need_a_thinking_level() {
-        let text = "Use `gemini-4-hydrogen-high` or `gemini-4-argon` and `cargo agent-check`.";
+        let text = "Use `gemini-4-hydrogen-high` or `gemini-4-neon` and `cargo agent-check`.";
         assert_eq!(gemini_ids_named(text), listed(&["gemini-4-hydrogen-high"]));
     }
 
@@ -362,11 +363,12 @@ mod tests {
     #[test]
     fn current_pins_give_no_change() {
         let found = findings(
-            &[pin("gemini-3.8-flash-medium"), pin("gemini-4-argon-high")],
+            &[pin("gemini-3.8-flash-medium"), pin("gemini-4-neon-high")],
             Some(&listed(&[
                 "gemini-3.8-flash-medium",
-                "gemini-4-argon-high",
+                "gemini-4-neon-high",
                 "gemini-4-hydrogen-low",
+                "gemini-5-argon-high",
             ])),
         );
         assert!(found.iter().all(|finding| finding.kind == Kind::Unchecked));
