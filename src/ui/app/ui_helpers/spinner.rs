@@ -94,11 +94,22 @@ pub(crate) fn progress_frame_interval_override() -> Option<Duration> {
 
 /// How often live progress asks for its next frame.
 pub(crate) fn progress_frame_interval() -> Duration {
-    progress_frame_interval_override().unwrap_or(PROGRESS_FRAME_INTERVAL)
+    let interval = progress_frame_interval_override().unwrap_or(PROGRESS_FRAME_INTERVAL);
+    pace_for_software_ui(interval)
+}
+
+/// A CPU-drawn window paints slowly, so a request that would run at display
+/// rate waits at least [`SOFTWARE_UI_FRAME_INTERVAL`].
+pub(crate) fn pace_for_software_ui(delay: Duration) -> Duration {
+    if crate::core::utils::software_gl::software_ui_active() {
+        delay.max(crate::core::utils::software_gl::SOFTWARE_UI_FRAME_INTERVAL)
+    } else {
+        delay
+    }
 }
 
 pub(crate) fn request_frame_after(ctx: &egui::Context, delay: Duration) {
-    ctx.request_repaint_after(delay);
+    ctx.request_repaint_after(pace_for_software_ui(delay));
 }
 
 /// egui's spinner, drawn the same way, animated at [`progress_frame_interval`].

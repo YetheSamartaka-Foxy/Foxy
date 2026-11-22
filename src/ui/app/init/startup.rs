@@ -740,11 +740,20 @@ impl Foxy {
         let active_renderer = if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             // Reaching here means the instance, adapter and device all came up on
             // this backend, so it is safe to pin the next launch to it.
-            crate::core::utils::renderer_fallback::remember_graphics_backend(
-                render_state.adapter.get_info().backend.to_str(),
-            );
+            let info = render_state.adapter.get_info();
+            crate::core::utils::software_gl::note_software_renderer(&info.name);
+            if info.device_type == eframe::wgpu::DeviceType::Cpu {
+                crate::core::utils::software_gl::mark_software_ui();
+            }
+            crate::core::utils::renderer_fallback::remember_graphics_backend(info.backend.to_str());
             "wgpu"
         } else {
+            if let Some(gl) = cc.gl.as_ref() {
+                use eframe::glow::HasContext;
+                // GL_RENDERER, before the first progress frame.
+                let name = unsafe { gl.get_parameter_string(0x1F01) };
+                crate::core::utils::software_gl::note_software_renderer(&name);
+            }
             "glow"
         };
         app.initialize_agent_gui(&cc.egui_ctx, &agent_gui, active_renderer);

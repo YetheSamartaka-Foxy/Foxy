@@ -57,6 +57,7 @@ curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh</code></pr
 <p>When Foxy is already installed for all users, the same command updates that copy, and Windows asks for administrator permission. It leaves a separate current-user copy alone when both exist.</p>
 <p>To download it by hand, open the <a href="https://github.com/YetheSamartaka-Foxy/Foxy/releases/latest">release page</a> and run <code>Foxy-&lt;version&gt;-setup.exe</code>. The setup can install for you or for every user of the PC. <strong>Delete all existing Foxy user data</strong> starts unchecked and asks before it removes settings and databases. Mod folders are kept either way.</p>
 <p>Foxy's Windows setup is the x64 installer. It also runs on ARM PCs. It requires 64-bit Windows.</p>
+<p><strong>No graphics driver</strong> (only the Microsoft Basic Display Adapter, Basic Render Driver, Remote Display Adapter, or Hyper-V Video) means Windows offers OpenGL 1.1 and Foxy's window does not open. The install command detects that and places Mesa's software OpenGL next to <code>Foxy.exe</code>. The window is then drawn on the CPU, with at most 4 threads, and progress updates about 4 times a second. Set <code>LP_NUM_THREADS</code> to choose another count. Delete <code>opengl32.dll</code> and <code>libgallium_wgl.dll</code> to use a graphics driver later. <code>Mesa-NOTICE.txt</code> has the license.</p>
 
 <h2>Linux (x86_64 and ARM64)</h2>
 <pre><code>curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh</code></pre>

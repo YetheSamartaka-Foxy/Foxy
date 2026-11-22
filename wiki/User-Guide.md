@@ -69,6 +69,14 @@ To install by hand, download `Foxy-<version>-setup.exe` from the [latest release
 
 The published Windows setup is the x64 installer. It also runs on ARM PCs. It requires 64-bit Windows.
 
+### Windows without a graphics driver
+
+A server or a virtual machine whose display adapter is the **Microsoft Basic Display Adapter** (also Microsoft Basic Render Driver, Remote Display Adapter, or Hyper-V Video) does not provide a graphics driver Foxy can draw with. Windows offers OpenGL 1.1 on that adapter. Foxy's window needs OpenGL 2.0, or WGPU on a real GPU, so the window does not open and Foxy tells you why.
+
+Run the PowerShell install command again. When it finds only those adapters, it downloads Mesa's software OpenGL, checks the SHA-256, and copies `opengl32.dll` and `libgallium_wgl.dll` next to `Foxy.exe`. An all-users install asks for administrator permission for that copy. Foxy then draws every frame on the CPU (llvmpipe) and uses at most 4 processor threads, so a many-core server is not kept busy redrawing the window. While work is on screen, the picture updates about 4 times a second. Set the `LP_NUM_THREADS` environment variable before you start Foxy if you want a different thread count.
+
+The same files stay in place when you update Foxy. Delete `opengl32.dll` and `libgallium_wgl.dll` when the machine has a graphics driver and you want Foxy to use it. `Mesa-NOTICE.txt` in the install folder names the Mesa version and its license. Installing a graphics driver, or turning on GPU acceleration for the virtual machine, is the other way to open the window.
+
 Remove this Foxy in **Settings > Apps > Installed apps**. The uninstaller can delete Foxy's settings and databases if you check that box. It leaves mod folders where they are.
 
 ### Linux

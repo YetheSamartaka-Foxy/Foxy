@@ -660,7 +660,7 @@ impl Foxy {
             crate::ui::app::request_frame_after(&ctx, delay);
             self.needs_repaint = false;
         } else if let Some(repaint_interval) = self.next_visible_repaint_interval() {
-            ctx.request_repaint_after(repaint_interval);
+            ctx.request_repaint_after(crate::ui::app::pace_for_software_ui(repaint_interval));
         }
 
         self.pending_queries.retain(|h| !h.is_finished());

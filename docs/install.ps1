@@ -11,6 +11,11 @@
 # Saved repositories, settings, and databases stay in %APPDATA%\Foxy. Downloaded mods stay in
 # the folders you chose. Run the command again to update. Remove Foxy in Settings > Apps.
 #
+# When Windows has no graphics driver (only the Microsoft Basic Display Adapter or another
+# Microsoft virtual adapter), the command also places Mesa's software OpenGL next to Foxy.exe
+# so the window is drawn on the CPU. Delete opengl32.dll and libgallium_wgl.dll to use a
+# graphics driver later. Set LP_NUM_THREADS before starting Foxy to choose another thread count.
+#
 # FOXY_INSTALL_REPO overrides the GitHub repository (owner/name). Point it only at a repository
 # you trust, because this script installs what that repository publishes.
 # FOXY_INSTALL_DRY_RUN=1 prints the chosen download and stops before installing.
@@ -82,7 +87,8 @@ function Install-Foxy {
 
     if ($env:FOXY_INSTALL_DRY_RUN -eq '1') {
         $scope = if ($elevate) { 'machine' } else { 'user' }
-        Write-Host "dry-run version=$version asset=$($asset.name) sha256=$expected scope=$scope"
+        $cpu = if (Test-FoxyHardwareDisplay) { 'no' } else { 'needed' }
+        Write-Host "dry-run version=$version asset=$($asset.name) sha256=$expected scope=$scope software_gl=$cpu"
         return
     }
 
@@ -125,12 +131,169 @@ function Install-Foxy {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 
+    if (-not (Test-FoxyHardwareDisplay)) {
+        $location = Get-FoxyInstalledLocation $elevate
+        if ($location) {
+            Write-Host "Windows has no graphics driver Foxy can use (only a basic or virtual display). Adding CPU drawing..."
+            if (-not (Install-FoxySoftwareOpenGL $location)) {
+                Write-Host "CPU drawing was not added. Foxy is installed. Its window may not open until you run this command again." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "Windows has no graphics driver Foxy can use, and the install folder could not be read. Run this command again to add CPU drawing." -ForegroundColor Yellow
+        }
+    }
+
     if ($existed) {
         Write-Host "Foxy is updated to $version." -ForegroundColor Green
     } else {
         Write-Host "Foxy $version is installed. Find it in the Start menu as Foxy." -ForegroundColor Green
     }
     Write-Host "Run this command again to update. Remove Foxy in Settings > Apps."
+}
+
+function Test-FoxyVirtualDisplay($name, $id) {
+    $lower = ([string]$name).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($lower)) { return $true }
+    if ($lower.Contains('basic display') -or $lower.Contains('basic render') -or $lower.Contains('remote display')) {
+        return $true
+    }
+    if ($lower.Contains('hyper-v') -and $lower.Contains('video')) { return $true }
+    $idLower = ([string]$id).ToLowerInvariant()
+    if ($idLower.Contains('ven_1414') -or $idLower.Contains('root\basicdisplay')) { return $true }
+    return $false
+}
+
+function Test-FoxyHardwareDisplay {
+    $controllers = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+    if ($controllers.Count -eq 0) {
+        return $true
+    }
+    foreach ($controller in $controllers) {
+        if (-not (Test-FoxyVirtualDisplay $controller.Name $controller.PNPDeviceID)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-FoxyInstalledLocation($preferMachine) {
+    $id = '{E8A3F5D2-7C41-4B9E-A6D1-3F5E8C2A9B70}_is1'
+    $user = Get-FoxyUninstallRecord "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$id"
+    $machine = Get-FoxyUninstallRecord "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$id"
+    if (-not $machine) {
+        $machine = Get-FoxyUninstallRecord "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$id"
+    }
+    $userPath = if ($user) { ([string]$user.InstallLocation).TrimEnd('\') } else { '' }
+    $machinePath = if ($machine) { ([string]$machine.InstallLocation).TrimEnd('\') } else { '' }
+    if ($preferMachine -and $machinePath) { return $machinePath }
+    if ($userPath) { return $userPath }
+    if ($machinePath) { return $machinePath }
+    return $null
+}
+
+function Test-FoxyDirectoryWritable($dir) {
+    $probe = Join-Path $dir ('.foxy-write-' + [Guid]::NewGuid().ToString('n'))
+    try {
+        New-Item -ItemType File -Path $probe -Force | Out-Null
+        Remove-Item -LiteralPath $probe -Force
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Install-FoxySoftwareOpenGL($dir) {
+    $opengl = Join-Path $dir 'opengl32.dll'
+    $gallium = Join-Path $dir 'libgallium_wgl.dll'
+    if ((Test-Path -LiteralPath $opengl) -and (Test-Path -LiteralPath $gallium)) {
+        Write-Host "CPU drawing is already next to Foxy."
+        return $true
+    }
+    $version = '26.2.7'
+    $expected = '19c74aad7b09e682473b8de4c35b47e6498de97b71cae5511a231b8eb02f2b22'
+    $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$version/mesa3d-$version-release-mingw.7z"
+    $stage = Join-Path ([IO.Path]::GetTempPath()) ("Foxy-software-gl-" + [Guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    $progress = $ProgressPreference
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        $archive = Join-Path $stage 'mesa.7z'
+        Write-Host "Downloading CPU drawing libraries..."
+        Invoke-WebRequest $url -OutFile $archive -UseBasicParsing -Headers @{ 'User-Agent' = 'Foxy-installer' }
+        $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            Write-Host "The CPU drawing download is damaged (SHA-256 does not match)." -ForegroundColor Red
+            return $false
+        }
+        $unpacked = Join-Path $stage 'unpacked'
+        New-Item -ItemType Directory -Path $unpacked | Out-Null
+        Expand-FoxyMesaArchive $archive $unpacked
+        $from = Join-Path $unpacked 'x64'
+        foreach ($name in @('opengl32.dll', 'libgallium_wgl.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $from $name))) {
+                Write-Host "The CPU drawing download did not contain $name." -ForegroundColor Red
+                return $false
+            }
+        }
+        $notice = @"
+Mesa software OpenGL next to Foxy
+==================================
+
+opengl32.dll and libgallium_wgl.dll are Mesa $version (https://mesa3d.org),
+as built by mesa-dist-win (MinGW-w64 x64):
+https://github.com/pal1000/mesa-dist-win/releases/tag/$version
+
+They give Foxy OpenGL on machines without a graphics driver. Foxy draws with
+llvmpipe, which runs on the CPU, and uses at most 4 threads unless
+LP_NUM_THREADS is set. Delete both DLL files to use a graphics driver instead.
+
+Mesa is under the MIT license. Its source is at
+https://gitlab.freedesktop.org/mesa/mesa and the license list is at
+https://docs.mesa3d.org/license.html
+"@
+        Set-Content -LiteralPath (Join-Path $from 'Mesa-NOTICE.txt') -Value $notice -Encoding UTF8
+        if (Test-FoxyDirectoryWritable $dir) {
+            Copy-Item -Force -LiteralPath (Join-Path $from 'opengl32.dll'), (Join-Path $from 'libgallium_wgl.dll'), (Join-Path $from 'Mesa-NOTICE.txt') -Destination $dir
+        } else {
+            Write-Host "CPU drawing has to be copied into the all-users install. Windows will ask for administrator permission."
+            $copyScript = Join-Path $stage 'copy-software-gl.ps1'
+            @"
+`$ErrorActionPreference = 'Stop'
+Copy-Item -Force -LiteralPath '$from\opengl32.dll','$from\libgallium_wgl.dll','$from\Mesa-NOTICE.txt' -Destination '$dir'
+"@ | Set-Content -LiteralPath $copyScript -Encoding UTF8
+            $proc = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $copyScript) -Verb RunAs -Wait -PassThru
+            if ($null -eq $proc.ExitCode -or $proc.ExitCode -ne 0) {
+                Write-Host "CPU drawing was not copied." -ForegroundColor Red
+                return $false
+            }
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $dir 'libgallium_wgl.dll'))) {
+            Write-Host "CPU drawing was not copied next to Foxy." -ForegroundColor Red
+            return $false
+        }
+        Write-Host "CPU drawing is next to Foxy. The window is drawn on the CPU."
+        return $true
+    } catch {
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        return $false
+    } finally {
+        $ProgressPreference = $progress
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Expand-FoxyMesaArchive($archive, $dest) {
+    $seven = Get-Command 7z -ErrorAction SilentlyContinue
+    if ($seven) {
+        & $seven.Source x -y "-o$dest" $archive 'x64\opengl32.dll' 'x64\libgallium_wgl.dll'
+        if ($LASTEXITCODE -eq 0) { return }
+    }
+    $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+    if (Test-Path -LiteralPath $tar) {
+        & $tar -xf $archive -C $dest 'x64/opengl32.dll' 'x64/libgallium_wgl.dll'
+        if ($LASTEXITCODE -eq 0) { return }
+    }
+    throw "Could not unpack the CPU drawing libraries. Install 7-Zip and run this command again."
 }
 
 function Get-FoxyUninstallRecord($path) {
