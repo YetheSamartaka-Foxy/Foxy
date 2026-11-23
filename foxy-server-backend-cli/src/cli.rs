@@ -78,6 +78,9 @@ pub enum Command {
         /// Include optional mods in the printed server launch line
         #[arg(long)]
         mod_line_include_optional: bool,
+        /// Do not check or rewrite modLineFiles entries for this run
+        #[arg(long)]
+        no_mod_line_files: bool,
         /// Omit root-level optionals folders from published mods; needs --yes only to remove ones already published
         #[arg(long)]
         prune_unused_optionals: bool,
@@ -115,10 +118,10 @@ pub enum Command {
         /// Shared mod folder for --layout pool (default: <output>/pool)
         #[arg(long, value_name = "DIR")]
         pool_dir: Option<PathBuf>,
-        /// Accept source manifest writes with link, output pruning, or pool cleanup
+        /// Accept source manifest writes with link, output pruning, or atomic replacement
         #[arg(long)]
         yes: bool,
-        /// Remove orphaned generated pool mods and their repository symlinks
+        /// Remove orphaned generated pool mods and their repository symlinks (does not require --yes)
         #[arg(long)]
         clean: bool,
         /// Preview generation, overwrites, pruning, and optional cleanup without writing
@@ -154,16 +157,19 @@ pub enum Command {
         /// Include optional mods in the printed server launch lines
         #[arg(long)]
         mod_line_include_optional: bool,
+        /// Do not check or rewrite modLineFiles entries for this run
+        #[arg(long)]
+        no_mod_line_files: bool,
         /// Copy every .bikey from all generated repositories into one combined keys folder
         #[arg(long)]
         collect_keys: bool,
         /// Destination for the combined keys folder (default: <output>/keys, implies --collect-keys)
         #[arg(long, value_name = "DIR")]
         keys_output: Option<PathBuf>,
-        /// Extra key file or directory to add to the combined keys folder (repeatable, implies --collect-keys)
+        /// Extra key file or directory to add to the keys folders (repeatable; implies --collect-keys unless --per-repo-keys is set)
         #[arg(long, value_name = "PATH")]
         additional_keys: Vec<PathBuf>,
-        /// Also write each repository's .bikey files (plus --additional-keys) into <output>/<folder>/keys so a server can symlink one repository's keys folder directly
+        /// Write each repository's .bikey files (plus --additional-keys) into <output>/<folder>/keys so a server can symlink one repository's keys folder directly; add --collect-keys to also build the combined folder
         #[arg(long)]
         per_repo_keys: bool,
     },

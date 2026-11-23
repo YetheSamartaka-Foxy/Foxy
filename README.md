@@ -3,6 +3,22 @@
 Foxy is a modern repository updater (Intended primarily for Arma 3 from the start) built from the ground up for speed, reliability, and automation.
 It ships as a single binary with both a full desktop UI and a scriptable CLI, runs on Windows and Linux (with early experimental macOS support), and is designed to replace legacy updaters without leaving anyone behind.
 
+**[Install Foxy](https://yethesamartaka-foxy.github.io/Foxy/)** · [Direct download](https://yethesamartaka-foxy.github.io/Foxy/download/) · [All install options](#installation)
+
+Install with one command (run it again to update):
+
+```powershell
+# Windows, in PowerShell
+irm https://yethesamartaka-foxy.github.io/Foxy/install.ps1 | iex
+```
+
+```sh
+# Linux and macOS, in a terminal
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh
+```
+
+The command checks the download and keeps saved repositories, settings, and databases. Every other way to install or remove Foxy is in [Installation](#installation) and the [User Guide](wiki/User-Guide.md#installing-foxy).
+
 ## Screenshots
 
 ![Foxy repository dashboard with repository spaces, servers, editor missions, and launch controls](images/image1.png)
@@ -32,7 +48,7 @@ It ships as a single binary with both a full desktop UI and a scriptable CLI, ru
 - **Benchmarks** - Save a recheck, update, or redownload as a benchmark with stage timings, transfer and disk charts, CPU and memory use, power source, and speed-of-light ratios, then compare two runs side by side or export one as a ZIP for support.
 - **Migration and direct-download workflows** - Guided Swifty migration preserves repositories and spaces, while direct-download mode can fetch repository, addon, or file URLs without a full database sync.
 - **One binary, two interfaces** - The same `Foxy` executable provides the desktop UI and a scriptable CLI with `--json`, `--dry-run`, `--yes`, `--quiet`, and `--no-progress` support for automation and accessible output.
-- **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers plus decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds. The Windows build is also confirmed to work on Linux under Proton and Wine.
+- **Cross-platform app delivery** - Native Windows and Linux builds include platform-appropriate installers, a one-command install you can run again to update, and decentralized in-app updates from self-hosted manifests or GitHub Releases, with early experimental macOS builds. The Windows build is also confirmed to work on Linux under Proton and Wine.
 - **Customizable, accessible UI** - Themes support import/export, presets, scaling, and toast feedback. Keyboard navigation, locale-aware formatting, scalable fonts, clear status messages, non-color-only indicators, and a Reduce motion setting are built in.
 - **Broad localization** - Built-in localization bundles cover `en`, `ar`, `bg`, `bn`, `cs`, `da`, `de`, `el`, `es`, `et`, `fa`, `fi`, `fr`, `he`, `hi`, `hr`, `hu`, `id`, `it`, `ja`, `ko`, `lt`, `lv`, `nb`, `nl`, `pl`, `pt`, `pt-BR`, `ro`, `ru`, `sk`, `sl`, `sr`, `sv`, `th`, `tl`, `tr`, `uk`, `ur`, `vi`, and `zh`.
 
@@ -44,7 +60,7 @@ Current workspace status:
 
 ## Documentation
 
-- [User Guide](wiki/User-Guide.md) - game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
+- [User Guide](wiki/User-Guide.md) - installing Foxy, game spaces, repositories, syncing, launching, Steam Workshop, benchmarks, settings, troubleshooting, and the CLI.
 - [Server Admin Guide](wiki/Server-Admin-Guide.md) - generating and hosting Arma 3, Arma Reforger, and custom game repositories and repository spaces with `foxy-server-backend-cli`, native Steam session preparation, server launch lines and keys, and self-hosted app updates.
 - The in-app Help page (**F1**) covers the same ground in every bundled language, with search across topic titles and text.
 
@@ -59,17 +75,79 @@ These are planned directions for Foxy. They are not listed in any particular ord
 
 ## Installation
 
-### Pre-built installers
+The install page is [https://yethesamartaka-foxy.github.io/Foxy/](https://yethesamartaka-foxy.github.io/Foxy/). Static direct-download links for the newest installer are at [download/](https://yethesamartaka-foxy.github.io/Foxy/download/) (auto-detect), [download/windows/](https://yethesamartaka-foxy.github.io/Foxy/download/windows/), [download/linux/](https://yethesamartaka-foxy.github.io/Foxy/download/linux/), [download/linux-arm64/](https://yethesamartaka-foxy.github.io/Foxy/download/linux-arm64/), and [download/macos/](https://yethesamartaka-foxy.github.io/Foxy/download/macos/). The [User Guide](wiki/User-Guide.md#installing-foxy) has the same steps with the folders Foxy uses.
 
-Download the latest release from the repository Releases page.
+The one-command install downloads the newest [release](https://github.com/YetheSamartaka-Foxy/Foxy/releases/latest), checks its SHA-256, and installs it. Running it again updates that copy. Saved repositories, settings, and databases stay in Foxy's config folder. Downloaded mods stay in the folders you chose. A current-user install needs no administrator permission.
 
-- Windows: run `Foxy-<version>-setup.exe`
-- Linux user install: run `chmod +x Foxy-<version>-linux-x86_64-installer.sh && ./Foxy-<version>-linux-x86_64-installer.sh --prefix="$HOME/.local/opt/foxy"`
-- Linux system install: run `chmod +x Foxy-<version>-linux-x86_64-installer.sh && sudo ./Foxy-<version>-linux-x86_64-installer.sh`
+`FOXY_INSTALL_REPO` (`owner/name`) installs from a different GitHub repository. Set it only for a repository you trust, because the command installs what that repository publishes.
 
-Windows updates keep saved repositories, settings, and databases. Silent installers always preserve user data; a reset during a manual install requires a fresh selection and confirmation.
+### Windows 10 and 11
 
-Native Linux in-app updates use Foxy's self-extracting `.sh` installer. System installs may prompt for administrator privileges through `pkexec` when the install prefix is not writable.
+In PowerShell:
+
+```powershell
+irm https://yethesamartaka-foxy.github.io/Foxy/install.ps1 | iex
+```
+
+That puts Foxy in the Start menu and in Settings > Apps, under `%LOCALAPPDATA%\Programs\Foxy`. A running Foxy is closed and then started again.
+
+When Foxy is already installed for all users, the same command updates that copy and Windows asks for administrator permission. When both a current-user copy and an all-users copy exist, the command updates the current-user copy and leaves the all-users copy as it is.
+
+To download it by hand, run `Foxy-<version>-setup.exe` from the release page. The setup can install for you or for every user of the PC. **Delete all existing Foxy user data** starts unchecked and asks before it removes settings and databases. Mod folders are kept either way. Silent installs always keep that data.
+
+The Windows setup is the x64 installer. It also runs on ARM PCs. It requires 64-bit Windows.
+
+**A server or virtual machine with no graphics driver** (Device Manager shows only the Microsoft Basic Display Adapter, Microsoft Basic Render Driver, Remote Display Adapter, or Hyper-V Video) cannot open Foxy's window: Windows offers OpenGL 1.1 there, and Foxy needs OpenGL 2.0 or WGPU on a real GPU. The install command detects that and places Mesa's software OpenGL (`opengl32.dll` and `libgallium_wgl.dll`) next to `Foxy.exe`. Foxy then draws the window on the CPU with llvmpipe, using at most 4 threads. Progress on screen updates about 4 times a second so the server keeps its cores. Set `LP_NUM_THREADS` before starting Foxy to choose another count. Delete those two DLL files to use a graphics driver later. `Mesa-NOTICE.txt` beside them has the license. Run the command again if the window still does not open.
+
+### Linux (x86_64 and ARM64)
+
+In a terminal:
+
+```sh
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh
+```
+
+That installs Foxy for the current user in `~/.local/opt/foxy`, adds a `foxy` command, and adds Foxy to the applications menu. It needs no root. The command uses `Foxy-<version>-linux-x86_64-installer.sh` or `Foxy-<version>-linux-aarch64-installer.sh` for this computer. When a release has no installer for this processor, it stops and leaves the computer unchanged.
+
+When the only existing install is the system copy in `/opt/foxy`, the command updates that copy and asks for administrator permission. A system install may prompt through `sudo`. In-app updates of a system install may prompt through `pkexec` when the install prefix is not writable.
+
+By hand:
+
+```sh
+chmod +x Foxy-<version>-linux-x86_64-installer.sh
+./Foxy-<version>-linux-x86_64-installer.sh --prefix="$HOME/.local/opt/foxy"
+sudo ./Foxy-<version>-linux-x86_64-installer.sh
+```
+
+The first is a current-user install. The second is a system install in `/opt/foxy`. Use one of them. On ARM64, use the `linux-aarch64` installer when the release includes it.
+
+Remove the current-user copy with:
+
+```sh
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh -s -- --uninstall
+```
+
+Remove a system install with `sudo ./Foxy-<version>-linux-<arch>-installer.sh --uninstall --prefix=/opt/foxy`. Settings stay in `~/.config/Foxy` (`$XDG_CONFIG_HOME/Foxy` when that path is absolute).
+
+### macOS 11 or newer (Apple Silicon and Intel)
+
+In Terminal:
+
+```sh
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh
+```
+
+That puts `Foxy.app` in `~/Applications` when the release includes a disk image for this Mac. Published releases include `Foxy-<version>-macos-arm64.dmg` for Apple Silicon. The same `--uninstall` command used on Linux removes that app. Settings stay in `~/Library/Application Support/Foxy`.
+
+To download it by hand, open the disk image from the release page and drag Foxy to Applications.
+
+macOS may say it could not verify Foxy. Open System Settings, go to Privacy & Security, and allow Foxy. This macOS build is experimental. Steam Workshop needs `libsteam_api.dylib` next to the Foxy executable inside the app.
+
+### Update or remove
+
+- **Installed with the command?** Run the same command again. On Windows, remove Foxy in Settings > Apps. On Linux and macOS, run the command with `--uninstall`, as shown above.
+- **Downloaded by hand?** Run the newest setup, Linux installer, or disk image. Foxy's in-app update uses those same Windows and Linux installers and keeps saved data.
+- **To also remove settings**, delete `%APPDATA%\Foxy` on Windows, `~/.config/Foxy` on Linux, or `~/Library/Application Support/Foxy` on macOS. Mod folders you chose are separate and stay where they are.
 
 ### Linux, Proton, and Wine
 
@@ -386,17 +464,15 @@ foxy-server-backend-cli create config.json ./output --mod-line-prefix mods
 ```
 
 Creator DLC codes from `dlcContent` come first, then the enabled required mods.
-Client-side mods are always excluded; add `--mod-line-include-optional` to append
-the optional mods as well.
+Mods marked `"enabled": false` or `"clientSide": true` are excluded from the generated server line (while still packaged and hashed into the repository output for clients); add `--mod-line-include-optional` to append enabled optional mods as well.
 
-Nested mod paths such as `@ace/optionals/@ace_noactionmenu` publish the nested
-folder as a standalone `@ace_noactionmenu` mod. Add `--prune-unused-optionals`
+Nested mod paths in `config.json` (such as `folder/@mod` or `@ace/optionals/@ace_noactionmenu`) publish flattened as standalone top-level `@mod` folders using their source directory casing. An explicit `modName` pointing at the same source folder overrides a wildcard match (for example `"core/@*"` plus `{ "modName": "core/@mod_02", "enabled": false }`), while other duplicate published names fail during `validate`, `create`, and `create-space`. Published `repo.json` and `foxy_addons.json` manifests themselves should always use top-level folder names rather than subpaths. Add `--prune-unused-optionals`
 to omit the root `optionals` directory from the published `@ace` copy. The
 source mod is untouched. When the output still holds an `optionals` directory
 from an earlier run, the command lists it and asks for `--yes` before removing
 it; a fresh or already-pruned output needs no `--yes`. Put the nested path in
 `requiredMods` to include it in the default server line; entries in
-`optionalMods` need `--mod-line-include-optional`.
+`optionalMods` need `--mod-line-include-optional`. `"enabled": false` keeps a mod unchecked on first client load without replacing choices existing clients already saved.
 
 To keep a server launch script in step with the generated repository, list it in
 `modLineFiles`:
@@ -424,7 +500,9 @@ replace fails the run before any hashing starts, so a typo never leaves a server
 silently running the old mod set. `validate` performs the same check, `--dry-run`
 lists the files as `update-mod-line` actions without touching them, and the
 rewrite runs only once the repository output is published (including with
-`--atomic`). In a space, two repositories may not list the same file.
+`--atomic`). Pass `--no-mod-line-files` to `create` or `create-space` to skip
+checking and rewriting `modLineFiles` for a run (for example when testing a
+build locally). In a space, two repositories may not list the same file.
 
 A config with `"game": "reforger"` (`new --game reforger` writes one) hashes the
 addon directories the same way, including the `.pak` entries inside them, and
@@ -479,7 +557,10 @@ foxy-server-backend-cli create config.json ./output   --collect-keys   --keys-ou
 a directory of keys (repeatable) for things Foxy does not generate, such as
 `a3.bikey` and the Creator DLC keys. Both imply `--collect-keys`. Keys are flattened
 by file name: byte-identical duplicates are skipped, and a name clash between two
-different keys keeps the first one and is reported.
+different keys keeps the first one and is reported. Output-managed keys folders
+(`<output>/keys` and `<output>/<folder>/keys`) automatically remove stale `.bikey`
+files from removed mods; an external `--keys-output` folder outside `<output>`
+keeps existing files untouched.
 
 ### Repository spaces in one command
 
@@ -521,8 +602,9 @@ paths resolve from the space config file; each repository's `basePath` keeps the
 | `link` | Every repository symlinks straight to the source mod folder; nothing is copied. Requires `--yes`: the per-mod manifests are written into the source folders, and any later change there silently breaks the published checksums until `create-space` runs again. | Only when the sources are already the served copy and never edited in place. |
 
 For pool output, `--clean --dry-run` lists orphaned generated pool folders and
-symlinks that would be removed. Run `--clean --yes` to remove them after a
-successful regeneration. Cleanup does not remove unrelated directories. A pool
+symlinks that would be removed. Run `--clean` to remove them after a successful
+regeneration (`--yes` is not required for pool cleanup, though still accepted).
+Cleanup does not remove unrelated directories. A pool
 outside the output directory needs an inventory from a previous `create-space`
 run before cleanup is allowed. `--prune-unused-optionals` also works with
 `copy` and `pool` layouts, but cannot be used with `link`, which publishes the
@@ -540,7 +622,9 @@ options and key collection work as for `create`, applied to every repository
 (`--collect-keys` gathers the keys of the whole space into `<output>/keys`,
 `--per-repo-keys` writes each repository's own keys plus `--additional-keys` into
 `<output>/<folder>/keys` so a server can symlink one repository's keys folder
-directly, and `-mod=` lines are printed per repository folder).
+directly; with it, `--additional-keys` no longer implies `--collect-keys`, so add
+`--collect-keys` for the combined folder too, and `-mod=` lines are printed per
+repository folder).
 
 ### Server CLI checks and deployment
 

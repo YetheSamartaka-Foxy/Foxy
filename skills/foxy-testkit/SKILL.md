@@ -131,6 +131,13 @@ for the timeline (first frame, dispatch, eligibility, verdict). Give the case a
 populated profile rather than a first-run bootstrap; the source is read-only and
 `require_no_other_foxy` is what keeps the copy consistent, so close Foxy first.
 
+Saved check results and pending-update plans belong to the app version in
+`check_cache_app_version.json`. On by default, a missing or different stamp
+makes the first startup after a version change delete that cache and
+remote-recheck, so a seeded startup is not a warm quick scan until the stamp
+matches. See `testkit/README.md` (Measuring startup) before comparing startup
+or recheck rows across an app update.
+
 Read `startup` rows through the app's line, not the runner's `elapsed_s`: the
 latter includes the driver's readiness polling and is quantized to it.
 

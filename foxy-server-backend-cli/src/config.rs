@@ -1,7 +1,13 @@
 use anyhow::{Context, Result, bail};
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::types::{Chunking, GameBuildConfig, RepoConfig, RepoGame, ResolvedMod};
+
+struct ExpandedMod {
+    resolved: ResolvedMod,
+    from_wildcard: bool,
+}
 
 pub fn load_config(config_path: &Path) -> Result<(RepoConfig, Vec<ResolvedMod>)> {
     let content = std::fs::read_to_string(config_path).context("Failed to read config file")?;
@@ -16,28 +22,37 @@ pub fn load_config(config_path: &Path) -> Result<(RepoConfig, Vec<ResolvedMod>)>
         );
     }
 
-    let mut resolved = Vec::new();
+    let mut expanded_mods = Vec::new();
 
     for mod_ref in &config.required_mods {
-        let expanded = expand_mod_ref(
+        let (expanded, from_wildcard) = expand_mod_ref_with_kind(
             &base,
             &mod_ref.mod_name,
             true,
             mod_ref.enabled,
             mod_ref.client_side,
         )?;
-        resolved.extend(expanded);
+        expanded_mods.extend(expanded.into_iter().map(|resolved| ExpandedMod {
+            resolved,
+            from_wildcard,
+        }));
     }
     for mod_ref in &config.optional_mods {
-        let expanded = expand_mod_ref(
+        let (expanded, from_wildcard) = expand_mod_ref_with_kind(
             &base,
             &mod_ref.mod_name,
             false,
             mod_ref.enabled,
             mod_ref.client_side,
         )?;
-        resolved.extend(expanded);
+        expanded_mods.extend(expanded.into_iter().map(|resolved| ExpandedMod {
+            resolved,
+            from_wildcard,
+        }));
     }
+
+    let mut resolved =
+        resolve_mod_overrides_and_check_duplicates(&config.repo_name, expanded_mods)?;
 
     if let Some(build) = config.game_build.as_mut() {
         let game_mod = resolve_game_build(&base, config.game, build)?;
@@ -61,6 +76,39 @@ pub fn load_config(config_path: &Path) -> Result<(RepoConfig, Vec<ResolvedMod>)>
     }
 
     Ok((config, resolved))
+}
+
+fn source_identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn resolve_mod_overrides_and_check_duplicates(
+    repo_name: &str,
+    entries: Vec<ExpandedMod>,
+) -> Result<Vec<ResolvedMod>> {
+    let explicit_sources: HashSet<PathBuf> = entries
+        .iter()
+        .filter(|entry| !entry.from_wildcard)
+        .map(|entry| source_identity(&entry.resolved.source_path))
+        .collect();
+
+    let mut seen = BTreeSet::new();
+    let mut resolved = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if entry.from_wildcard
+            && explicit_sources.contains(&source_identity(&entry.resolved.source_path))
+        {
+            continue;
+        }
+        if !seen.insert(entry.resolved.mod_name.to_lowercase()) {
+            bail!(
+                "Repository {repo_name} publishes {} more than once",
+                entry.resolved.mod_name
+            );
+        }
+        resolved.push(entry.resolved);
+    }
+    Ok(resolved)
 }
 
 /// The game build is published as a required, enabled mod. Clients run its
@@ -122,6 +170,17 @@ fn expand_mod_ref(
     enabled: bool,
     client_side: bool,
 ) -> Result<Vec<ResolvedMod>> {
+    expand_mod_ref_with_kind(base, mod_name, is_required, enabled, client_side)
+        .map(|(mods, _)| mods)
+}
+
+fn expand_mod_ref_with_kind(
+    base: &Path,
+    mod_name: &str,
+    is_required: bool,
+    enabled: bool,
+    client_side: bool,
+) -> Result<(Vec<ResolvedMod>, bool)> {
     let full_path = if Path::new(mod_name).is_absolute() {
         PathBuf::from(mod_name)
     } else {
@@ -182,7 +241,7 @@ fn expand_mod_ref(
             log::warn!("Wildcard pattern matched no directories: {}", pattern_str);
         }
 
-        return Ok(result);
+        return Ok((result, true));
     }
 
     if !full_path.is_dir() {
@@ -193,14 +252,17 @@ fn expand_mod_ref(
         );
     }
 
-    Ok(vec![ResolvedMod {
-        mod_name: published_mod_name(&full_path)?,
-        source_path: full_path,
-        is_required,
-        enabled,
-        client_side,
-        chunking: Chunking::Fixed,
-    }])
+    Ok((
+        vec![ResolvedMod {
+            mod_name: published_mod_name(&full_path)?,
+            source_path: full_path,
+            is_required,
+            enabled,
+            client_side,
+            chunking: Chunking::Fixed,
+        }],
+        false,
+    ))
 }
 
 pub fn generate_template_config(output: &Path, game: RepoGame) -> Result<()> {
@@ -469,5 +531,82 @@ mod tests {
         assert_eq!(resolved.len(), 1);
 
         std::fs::remove_dir_all(base).expect("test temp dir should be removed");
+    }
+
+    #[test]
+    fn explicit_entry_overrides_wildcard_for_same_source_folder() {
+        let base = temp_dir("wildcard-override");
+        let core = base.join("core");
+        std::fs::create_dir_all(core.join("@mod_01")).unwrap();
+        std::fs::create_dir_all(core.join("@mod_02")).unwrap();
+        std::fs::create_dir_all(core.join("@mod_03")).unwrap();
+
+        let config_path = base.join("config.json");
+        let config_json = serde_json::json!({
+            "repoName": "MainRepo",
+            "basePath": base,
+            "requiredMods": [
+                { "modName": "core/@*" },
+                { "modName": "core/@mod_02", "enabled": false }
+            ],
+            "optionalMods": [
+                { "modName": "core/@mod_03", "enabled": false, "clientSide": true }
+            ]
+        });
+        std::fs::write(&config_path, serde_json::to_vec(&config_json).unwrap()).unwrap();
+
+        let (_config, resolved) = load_config(&config_path).expect("override should resolve");
+        assert_eq!(resolved.len(), 3);
+        let mod_01 = resolved.iter().find(|m| m.mod_name == "@mod_01").unwrap();
+        let mod_02 = resolved.iter().find(|m| m.mod_name == "@mod_02").unwrap();
+        let mod_03 = resolved.iter().find(|m| m.mod_name == "@mod_03").unwrap();
+        assert!(mod_01.is_required && mod_01.enabled && !mod_01.client_side);
+        assert!(mod_02.is_required && !mod_02.enabled && !mod_02.client_side);
+        assert!(!mod_03.is_required && !mod_03.enabled && mod_03.client_side);
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn load_config_rejects_duplicate_explicit_overlapping_wildcards_and_collisions() {
+        let base = temp_dir("duplicate-checks");
+        std::fs::create_dir_all(base.join("core").join("@mod_01")).unwrap();
+        std::fs::create_dir_all(base.join("extra").join("@mod_01")).unwrap();
+
+        let config_path = base.join("config.json");
+        for (label, required) in [
+            (
+                "duplicate explicit",
+                serde_json::json!([
+                    { "modName": "core/@mod_01" },
+                    { "modName": "core/@mod_01", "enabled": false }
+                ]),
+            ),
+            (
+                "different source collision",
+                serde_json::json!([
+                    { "modName": "core/@*" },
+                    { "modName": "extra/@mod_01", "enabled": false }
+                ]),
+            ),
+            (
+                "overlapping wildcards",
+                serde_json::json!([
+                    { "modName": "core/@*" },
+                    { "modName": "core/@mod_*" }
+                ]),
+            ),
+        ] {
+            let value = serde_json::json!({
+                "repoName": "MainRepo",
+                "basePath": base,
+                "requiredMods": required
+            });
+            std::fs::write(&config_path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let err = load_config(&config_path).expect_err(label).to_string();
+            assert!(err.contains("more than once"), "{label}: {err}");
+        }
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

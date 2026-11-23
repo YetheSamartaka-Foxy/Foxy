@@ -25,16 +25,29 @@ fn cleanup_candidate_samples(mod_root: &str, candidates: &[String]) -> Vec<Strin
 }
 
 pub(super) async fn load_managed_local_paths(context: &FoxyContext) -> Option<HashSet<String>> {
-    match context
-        .db()
-        .query_all(
+    load_managed_local_paths_scoped(context, None).await
+}
+
+pub(super) async fn load_managed_local_paths_scoped(
+    context: &FoxyContext,
+    repository_id: Option<i64>,
+) -> Option<HashSet<String>> {
+    let (sql, values) = match repository_id {
+        Some(repo_id) => (
+            "SELECT DISTINCT f.local_path FROM files f \
+             JOIN addon_files af ON af.file_id = f.id \
+             JOIN repository_addons ra ON ra.addon_id = af.addon_id \
+             WHERE ra.repository_id = ?",
+            crate::core::db::params![repo_id],
+        ),
+        None => (
             "SELECT DISTINCT f.local_path FROM files f \
              JOIN addon_files af ON af.file_id = f.id \
              JOIN repository_addons ra ON ra.addon_id = af.addon_id",
             crate::core::db::params![],
-        )
-        .await
-    {
+        ),
+    };
+    match context.db().query_all(sql, values).await {
         Ok(rows) => Some(
             rows.iter()
                 .filter_map(|row| row.get_string("local_path").ok())
@@ -106,6 +119,16 @@ pub(super) async fn scan_unexpected_local_files_for_mod(
     mod_root: &str,
     expected_local_paths: Arc<HashSet<String>>,
 ) -> Option<Vec<String>> {
+    scan_unexpected_local_files_for_mod_internal(context, mod_root, expected_local_paths, true)
+        .await
+}
+
+async fn scan_unexpected_local_files_for_mod_internal(
+    context: &FoxyContext,
+    mod_root: &str,
+    expected_local_paths: Arc<HashSet<String>>,
+    log_evidence: bool,
+) -> Option<Vec<String>> {
     let root = mod_root.to_string();
     let known_managed_paths = expected_local_paths.len();
     match tokio::task::spawn_blocking(move || {
@@ -114,7 +137,7 @@ pub(super) async fn scan_unexpected_local_files_for_mod(
     .await
     {
         Ok(Ok(extras)) => {
-            if !extras.is_empty() {
+            if log_evidence && !extras.is_empty() {
                 let normalized_root = mod_root.replace('\\', "/");
                 let addon_directory = Path::new(&normalized_root).file_name().unwrap_or_default();
                 info!(
@@ -149,15 +172,70 @@ pub(crate) async fn collect_unexpected_files_for_repo_mods(
     mod_name_filter: &HashSet<String>,
     mod_enabled_overrides: Option<&HashMap<String, bool>>,
 ) -> HashMap<String, Vec<String>> {
-    let mut by_mod: HashMap<String, Vec<String>> = HashMap::new();
     if mod_name_filter.is_empty() {
-        return by_mod;
+        return HashMap::new();
     }
-
     let Some(managed_local_paths) = load_managed_local_paths(&context).await else {
-        return by_mod;
+        return HashMap::new();
     };
-    let managed_local_paths = Arc::new(managed_local_paths);
+    collect_unexpected_files_for_repo_mods_against(
+        context,
+        repo_url,
+        mod_name_filter,
+        mod_enabled_overrides,
+        Arc::new(managed_local_paths),
+        true,
+    )
+    .await
+}
+
+/// Lists unowned on-disk files under selected addons so sibling conflict checks can refresh stale owners first.
+pub(crate) async fn collect_cleanup_conflict_candidate_paths_for_repo_mods(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    mod_name_filter: &HashSet<String>,
+    mod_enabled_overrides: Option<&HashMap<String, bool>>,
+) -> Vec<String> {
+    if mod_name_filter.is_empty() {
+        return Vec::new();
+    }
+    let Ok(repo) =
+        crate::core::models::repository::load_repository_by_remote_url(context.clone(), repo_url)
+            .await
+    else {
+        return Vec::new();
+    };
+    let Some(managed_local_paths) =
+        load_managed_local_paths_scoped(&context, Some(repo.id as i64)).await
+    else {
+        return Vec::new();
+    };
+    let mut paths: Vec<String> = collect_unexpected_files_for_repo_mods_against(
+        context,
+        repo_url,
+        mod_name_filter,
+        mod_enabled_overrides,
+        Arc::new(managed_local_paths),
+        false,
+    )
+    .await
+    .into_values()
+    .flatten()
+    .collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+}
+
+async fn collect_unexpected_files_for_repo_mods_against(
+    context: Arc<FoxyContext>,
+    repo_url: &str,
+    mod_name_filter: &HashSet<String>,
+    mod_enabled_overrides: Option<&HashMap<String, bool>>,
+    managed_local_paths: Arc<HashSet<String>>,
+    log_evidence: bool,
+) -> HashMap<String, Vec<String>> {
+    let mut by_mod: HashMap<String, Vec<String>> = HashMap::new();
     let tree = match Tree::load_for_mod_names(context.clone(), repo_url, mod_name_filter).await {
         Ok(tree) => tree,
         Err(err) => {
@@ -188,11 +266,7 @@ pub(crate) async fn collect_unexpected_files_for_repo_mods(
         let Some(m) = tree.mods.get(mod_idx) else {
             continue;
         };
-        let mod_key = if cfg!(windows) {
-            m.name.to_lowercase()
-        } else {
-            m.name.clone()
-        };
+        let mod_key = m.name.to_lowercase();
         if !mod_name_filter.contains(&mod_key) {
             continue;
         }
@@ -213,9 +287,13 @@ pub(crate) async fn collect_unexpected_files_for_repo_mods(
             continue;
         }
 
-        let Some(extras) =
-            scan_unexpected_local_files_for_mod(&context, mod_root, managed_local_paths.clone())
-                .await
+        let Some(extras) = scan_unexpected_local_files_for_mod_internal(
+            &context,
+            mod_root,
+            managed_local_paths.clone(),
+            log_evidence,
+        )
+        .await
         else {
             return HashMap::new();
         };

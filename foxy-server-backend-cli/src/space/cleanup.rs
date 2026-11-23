@@ -62,6 +62,7 @@ impl CleanupPlan {
 pub fn plan_cleanup(
     output_dir: &Path,
     pool_dir: &Path,
+    repos: &[super::SpaceRepo],
     groups: &[SharedMod],
 ) -> Result<CleanupPlan> {
     refuse_symlink_dir(output_dir)?;
@@ -118,6 +119,17 @@ pub fn plan_cleanup(
             if normalized_absolute(&repo_path)? == pool_id {
                 continue;
             }
+            let repo_folder = repo.file_name().to_string_lossy().into_owned();
+            let repo_expected: Option<BTreeSet<&str>> = repos
+                .iter()
+                .find(|configured| same_name(&configured.folder, &repo_folder))
+                .map(|configured| {
+                    configured
+                        .mods
+                        .iter()
+                        .map(|item| item.mod_name.as_str())
+                        .collect()
+                });
             for entry in std::fs::read_dir(&repo_path)? {
                 let entry = entry?;
                 let path = entry.path();
@@ -137,9 +149,16 @@ pub fn plan_cleanup(
                 let Some(name) = target_id.file_name().and_then(|value| value.to_str()) else {
                     continue;
                 };
-                if contains_name(&expected, name)
-                    || !same_name(&path.file_name().unwrap().to_string_lossy(), name)
-                {
+                if !same_name(&path.file_name().unwrap().to_string_lossy(), name) {
+                    continue;
+                }
+                if let Some(repo_mods) = &repo_expected {
+                    if !contains_name(repo_mods, name) {
+                        links.push(path);
+                    }
+                    continue;
+                }
+                if contains_name(&expected, name) {
                     continue;
                 }
                 if contains_name(&orphan_names, name)
@@ -256,6 +275,7 @@ mod tests {
         let plan = plan_cleanup(
             dir.path(),
             &pool,
+            &[],
             &[SharedMod {
                 name: "@keep".to_string(),
                 uses: vec![],
@@ -288,12 +308,70 @@ mod tests {
             panic!("failed to create test symlink: {err}");
         }
 
-        let plan = plan_cleanup(dir.path(), &pool, &[]).unwrap();
+        let plan = plan_cleanup(dir.path(), &pool, &[], &[]).unwrap();
         assert_eq!(plan.links, vec![link.clone()]);
         assert_eq!(plan.mods, vec![old.clone()]);
         plan.execute().unwrap();
         assert!(std::fs::symlink_metadata(&link).is_err());
         assert!(!old.exists());
+    }
+
+    #[test]
+    fn cleanup_removes_shared_mod_link_from_repo_that_dropped_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = dir.path().join("pool");
+        let shared = pool.join("@shared");
+        let repo_one = dir.path().join("one");
+        let repo_two = dir.path().join("two");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&repo_one).unwrap();
+        std::fs::create_dir_all(&repo_two).unwrap();
+        std::fs::write(shared.join("foxy_addon.json"), b"{}").unwrap();
+
+        let link_one = repo_one.join("@shared");
+        let link_two = repo_two.join("@shared");
+        for link in [&link_one, &link_two] {
+            let target = super::super::symlink_target(link, &shared);
+            if let Err(err) = super::super::create_dir_symlink(&target, link) {
+                if cfg!(windows) && err.kind() == std::io::ErrorKind::PermissionDenied {
+                    return;
+                }
+                panic!("failed to create test symlink: {err}");
+            }
+        }
+
+        let make_repo =
+            |folder: &str, mods: Vec<crate::types::ResolvedMod>| super::super::SpaceRepo {
+                folder: folder.to_string(),
+                name: folder.to_string(),
+                address: format!("https://repo.example.invalid/{folder}/"),
+                required: true,
+                config: serde_json::from_str(r#"{"repoName":"Test","basePath":"."}"#).unwrap(),
+                config_path: PathBuf::from("config.json"),
+                mods,
+            };
+        let repos = vec![
+            make_repo("one", vec![]),
+            make_repo(
+                "two",
+                vec![crate::types::ResolvedMod {
+                    mod_name: "@shared".to_string(),
+                    source_path: shared.clone(),
+                    is_required: true,
+                    enabled: true,
+                    client_side: false,
+                    chunking: crate::types::Chunking::Fixed,
+                }],
+            ),
+        ];
+        let groups = super::super::group_shared_mods(&repos);
+        let plan = plan_cleanup(dir.path(), &pool, &repos, &groups).unwrap();
+        assert_eq!(plan.links, vec![link_one.clone()]);
+        assert!(plan.mods.is_empty());
+        plan.execute().unwrap();
+        assert!(std::fs::symlink_metadata(&link_one).is_err());
+        assert!(std::fs::symlink_metadata(&link_two).is_ok());
+        assert!(shared.exists());
     }
 
     #[test]
@@ -318,7 +396,7 @@ mod tests {
         )
         .unwrap();
 
-        let plan = plan_cleanup(&output, &pool, &[]).unwrap();
+        let plan = plan_cleanup(&output, &pool, &[], &[]).unwrap();
         assert_eq!(plan.mods, vec![pool.join("@owned")]);
         assert!(pool.join("@other").exists());
     }

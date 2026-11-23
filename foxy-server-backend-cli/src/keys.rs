@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::types::ProcessedMod;
 
@@ -8,11 +8,14 @@ use crate::types::ProcessedMod;
 pub struct KeyCollectionOptions<'a> {
     pub dest: &'a Path,
     pub additional_sources: &'a [PathBuf],
+    /// Prune stale `.bikey` files in `dest` (enabled for output-managed folders, disabled for `--keys-output`).
+    pub prune_stale: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct KeyCollectionReport {
     pub copied: usize,
+    pub removed: usize,
     pub duplicates: usize,
     pub conflicts: Vec<String>,
 }
@@ -22,6 +25,50 @@ pub fn is_key_file(path: &str) -> bool {
         .extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("bikey"))
+}
+
+pub fn same_key_name(left: &str, right: &str) -> bool {
+    left == right || (cfg!(windows) && left.eq_ignore_ascii_case(right))
+}
+
+/// True when `child` resolves inside `parent` (lexically normalized against CWD).
+pub fn path_is_within(child: &Path, parent: &Path) -> bool {
+    let (Ok(child), Ok(parent)) = (normalized_absolute(child), normalized_absolute(parent)) else {
+        return false;
+    };
+    let mut child_components = child.components();
+    for parent_comp in parent.components() {
+        let Some(child_comp) = child_components.next() else {
+            return false;
+        };
+        let same = if cfg!(windows) {
+            child_comp
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&parent_comp.as_os_str().to_string_lossy())
+        } else {
+            child_comp == parent_comp
+        };
+        if !same {
+            return false;
+        }
+    }
+    true
+}
+
+fn normalized_absolute(path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
 }
 
 pub fn generated_key_paths(output_dir: &Path, mods: &[ProcessedMod]) -> Vec<PathBuf> {
@@ -111,6 +158,28 @@ pub fn collect_key_paths(
         })?;
         taken.insert(name.to_string(), source);
         report.copied += 1;
+    }
+
+    if options.prune_stale {
+        for entry in std::fs::read_dir(options.dest)
+            .with_context(|| format!("Failed to read keys dir: {}", options.dest.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !is_key_file(name) || taken.keys().any(|known| same_key_name(known, name)) {
+                continue;
+            }
+            std::fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove stale key {}", path.display()))?;
+            report.removed += 1;
+        }
     }
 
     Ok(report)
@@ -218,6 +287,7 @@ mod tests {
             &KeyCollectionOptions {
                 dest: &dest,
                 additional_sources: &[extra],
+                prune_stale: false,
             },
         )
         .unwrap();
@@ -255,6 +325,7 @@ mod tests {
             &KeyCollectionOptions {
                 dest: &dest,
                 additional_sources: &[],
+                prune_stale: false,
             },
         )
         .unwrap();
@@ -278,10 +349,65 @@ mod tests {
             &KeyCollectionOptions {
                 dest: &dest,
                 additional_sources: &[],
+                prune_stale: false,
             },
         )
         .unwrap();
         assert_eq!(report, KeyCollectionReport::default());
         assert!(dest.is_dir());
+    }
+
+    #[test]
+    fn collect_keys_prunes_stale_bikeys_only_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out");
+        std::fs::create_dir_all(output.join("@keep").join("keys")).unwrap();
+        std::fs::write(output.join("@keep").join("keys").join("keep.bikey"), b"k").unwrap();
+        let dest = output.join("keys");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("stale.bikey"), b"old").unwrap();
+        std::fs::write(dest.join("readme.txt"), b"keep me").unwrap();
+
+        let mods = [mod_with_files("@keep", &["keys/keep.bikey"])];
+        let preserved = collect_keys(
+            &output,
+            &mods,
+            &KeyCollectionOptions {
+                dest: &dest,
+                additional_sources: &[],
+                prune_stale: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(preserved.removed, 0);
+        assert!(dest.join("stale.bikey").exists());
+
+        let pruned = collect_keys(
+            &output,
+            &mods,
+            &KeyCollectionOptions {
+                dest: &dest,
+                additional_sources: &[],
+                prune_stale: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(pruned.removed, 1);
+        assert!(!dest.join("stale.bikey").exists());
+        assert!(dest.join("keep.bikey").exists());
+        assert!(dest.join("readme.txt").exists());
+    }
+
+    #[test]
+    fn path_is_within_distinguishes_internal_and_external_key_destinations() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("output");
+        assert!(path_is_within(&output.join("keys"), &output));
+        assert!(path_is_within(&output.join("repo").join("keys"), &output));
+        assert!(!path_is_within(&dir.path().join("server-keys"), &output));
+        assert!(!path_is_within(
+            &output.join("..").join("server-keys"),
+            &output
+        ));
     }
 }

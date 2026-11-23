@@ -703,6 +703,7 @@ impl Foxy {
         external_addon_context_action: &mut Option<(String, String, ExternalAddonContextAction)>,
         context_menu_labels: &ExternalAddonContextMenuLabels,
         tooltips: &ExternalAddonRowTooltips,
+        popup_open_before_rows: bool,
     ) {
         let (is_enabled, favorite, client_side, forced_client_side) = {
             let cache = &self.repository_external_addons_list_cache;
@@ -1043,11 +1044,14 @@ impl Foxy {
         if context_response.hovered() {
             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
         }
-        if context_response.clicked()
-            && !checkbox_clicked
-            && !favorite_clicked
-            && !client_side_clicked
-            && self.set_repository_external_addon_row_enabled_cached(entry_index, !is_enabled)
+        if super::should_toggle_addon_row_on_card_click(
+            context_response.clicked(),
+            popup_open_before_rows,
+            checkbox_clicked
+                || checkbox_response.changed()
+                || favorite_clicked
+                || client_side_clicked,
+        ) && self.set_repository_external_addon_row_enabled_cached(entry_index, !is_enabled)
         {
             *repo_data_changed = true;
         }
@@ -1519,6 +1523,7 @@ impl Foxy {
                 include_origin,
             );
 
+            let popup_open_before_rows = egui::Popup::is_any_open(ui.ctx());
             if *group_by_origin {
                 let grouped_row_count = {
                     let cache = &self.repository_external_addons_list_cache;
@@ -1611,6 +1616,7 @@ impl Foxy {
                                                 &mut external_addon_context_action,
                                                 &context_menu_labels,
                                                 &row_tooltips,
+                                                popup_open_before_rows,
                                             );
                                         });
                                     }
@@ -1663,6 +1669,7 @@ impl Foxy {
                                             &mut external_addon_context_action,
                                             &context_menu_labels,
                                             &row_tooltips,
+                                            popup_open_before_rows,
                                         );
                                     });
                                 }

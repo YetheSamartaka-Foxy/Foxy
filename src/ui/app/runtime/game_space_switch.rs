@@ -502,6 +502,7 @@ impl Foxy {
         let _ = crate::core::tasks::db_schema_version::evaluate_and_bootstrap();
         self.pending_db_schema_wipe = None;
         self.refresh_database_repair_requirement();
+        self.discard_stale_repository_check_cache();
         self.load_repositories();
         if self.load_repository_spaces() {
             self.reconcile_repository_space_paths();
@@ -767,6 +768,8 @@ impl Foxy {
         self.addon_hash_recalc_in_flight = false;
         self.addon_hash_recalc_queue.clear();
         self.startup_recheck_queue.clear();
+        self.startup_remote_recheck_after_app_update = false;
+        self.startup_probe_retry_force_remote_recheck.clear();
         self.repository_space_sync_queue.clear();
         self.repository_visual_folder_sync_queue.clear();
         self.startup_pending_restore_rx = None;

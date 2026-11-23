@@ -111,6 +111,26 @@ async fn files_with_recoverable_part_state(
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TreeDiffFilePresence {
+    Present,
+    Missing,
+    Unreadable(String),
+}
+
+fn probe_tree_diff_file_presence(path: &str) -> TreeDiffFilePresence {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return TreeDiffFilePresence::Missing;
+    }
+    match crate::core::utils::profiling::fs::metadata(trimmed) {
+        Ok(meta) if meta.is_file() => TreeDiffFilePresence::Present,
+        Ok(_) => TreeDiffFilePresence::Missing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => TreeDiffFilePresence::Missing,
+        Err(error) => TreeDiffFilePresence::Unreadable(error.to_string()),
+    }
+}
+
 fn is_stale_tree_only_file_diff(
     exists: bool,
     size_ok: bool,
@@ -249,6 +269,44 @@ pub(super) async fn compute_file_diffs(
     )
     .await;
     let tree_part_stats_load_elapsed = tree_part_stats_started.elapsed();
+
+    let mut tree_diff_probe_targets: Vec<(u64, String)> = Vec::new();
+    for m in mods {
+        let is_enabled = mod_enabled_overrides
+            .and_then(|overrides| overrides.get(&m.name.to_lowercase()).copied())
+            .unwrap_or(m.enabled);
+        if !is_enabled {
+            continue;
+        }
+        let mod_id = m.id as i64;
+        if deep_scan_mod_ids.contains(&mod_id) || m.local_checksum == m.remote_checksum {
+            continue;
+        }
+        let addon_state = addon_hash.addon_state_by_mod_id.get(&mod_id);
+        if m.local_path.trim().is_empty()
+            || !addon_state.is_some_and(|state| state.exists && state.read_error.is_none())
+        {
+            continue;
+        }
+        if let Some(files) = files_by_mod.get(&mod_id) {
+            for f in files {
+                tree_diff_probe_targets.push((f.id, f.local_path.clone()));
+            }
+        }
+    }
+    let tree_diff_presence_by_file_id: HashMap<u64, TreeDiffFilePresence> =
+        if tree_diff_probe_targets.is_empty() {
+            HashMap::new()
+        } else {
+            tokio::task::spawn_blocking(move || {
+                tree_diff_probe_targets
+                    .into_iter()
+                    .map(|(id, path)| (id, probe_tree_diff_file_presence(&path)))
+                    .collect()
+            })
+            .await
+            .unwrap_or_default()
+        };
 
     let mut local_file_state_cache: HashMap<String, LocalFileState> = HashMap::new();
     let mut checked_files = 0usize;
@@ -511,6 +569,43 @@ pub(super) async fn compute_file_diffs(
         } else if addon_tree_mismatch {
             for f in files.drain(..) {
                 let file_tree_mismatch = f.local_checksum != f.remote_checksum;
+                let presence = tree_diff_presence_by_file_id
+                    .get(&f.id)
+                    .cloned()
+                    .unwrap_or_else(|| probe_tree_diff_file_presence(&f.local_path));
+                match presence {
+                    TreeDiffFilePresence::Unreadable(detail) => {
+                        context.hash_evidence.record_issue(
+                            crate::core::tasks::calculate_hashes::HashIssue {
+                                file_path: f.local_path.clone(),
+                                kind:
+                                    crate::core::tasks::calculate_hashes::HashIssueKind::Unreadable,
+                                detail: Some(detail),
+                            },
+                        );
+                        continue;
+                    }
+                    TreeDiffFilePresence::Missing => {
+                        missing_files += 1;
+                        if file_tree_mismatch {
+                            checksum_mismatch_files += 1;
+                        }
+                        let part_stats = changed_part_stats_by_file_id
+                            .get(&(f.id as i64))
+                            .copied()
+                            .unwrap_or_default();
+                        total_bytes += f.length;
+                        mod_files.push(FileDiffSummary {
+                            name: f.name.clone(),
+                            needs_update: true,
+                            total_bytes: f.length,
+                            changed_parts: part_stats.changed_parts,
+                            change_kind: FileDiffKind::Added,
+                        });
+                        continue;
+                    }
+                    TreeDiffFilePresence::Present => {}
+                }
                 if !file_tree_mismatch {
                     continue;
                 }
@@ -925,5 +1020,136 @@ mod tests {
         assert!(!is_stale_tree_only_file_diff(
             true, true, false, false, 0, 100
         ));
+    }
+
+    #[tokio::test]
+    async fn tree_mismatch_fast_path_reports_missing_rolled_back_files_as_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let addon_dir = dir.path().join("@mod_01");
+        std::fs::create_dir_all(&addon_dir).unwrap();
+        let present_path = addon_dir.join("present.pbo");
+        std::fs::write(&present_path, b"present-bytes").unwrap();
+        let missing_rolled_back = addon_dir.join("rolled_back.bisign");
+        let missing_brand_new = addon_dir.join("brand_new.bisign");
+
+        let db = crate::core::tasks::db_turso::build_test_database().await;
+        let context = Arc::new(FoxyContext::new(db, reqwest::Client::new()));
+        let fdb = context.db();
+        fdb.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, required, enabled, local_checksum, remote_checksum, local_content_hash) \
+             VALUES (1, '@mod_01', 'https://repo.example.invalid/@mod_01', ?, 1, 1, 'OLD_ADDON', 'NEW_ADDON', 'UNCHANGED_FOLDER')",
+            crate::core::db::params![addon_dir.to_string_lossy().to_string()],
+        )
+        .await
+        .unwrap();
+        for (id, name, path, local_cs, remote_cs, len) in [
+            (
+                1i64,
+                "present.pbo",
+                present_path.to_string_lossy().to_string(),
+                "CLEAN",
+                "CLEAN",
+                13i64,
+            ),
+            (
+                2,
+                "rolled_back.bisign",
+                missing_rolled_back.to_string_lossy().to_string(),
+                "STALE_EQUAL",
+                "STALE_EQUAL",
+                565,
+            ),
+            (
+                3,
+                "brand_new.bisign",
+                missing_brand_new.to_string_lossy().to_string(),
+                "",
+                "REMOTE_NEW",
+                165,
+            ),
+        ] {
+            fdb.execute(
+                "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) \
+                 VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)",
+                crate::core::db::params![
+                    id,
+                    name,
+                    format!("https://repo.example.invalid/@mod_01/{name}"),
+                    path,
+                    local_cs,
+                    remote_cs,
+                    len,
+                    id
+                ],
+            )
+            .await
+            .unwrap();
+            fdb.execute(
+                "INSERT INTO addon_files (addon_id, file_id) VALUES (1, ?)",
+                crate::core::db::params![id],
+            )
+            .await
+            .unwrap();
+        }
+
+        let mods = vec![FoxyMod {
+            id: 1,
+            name: "@mod_01".to_string(),
+            remote_path: "https://repo.example.invalid/@mod_01".to_string(),
+            local_path: addon_dir.to_string_lossy().to_string(),
+            enabled: true,
+            local_checksum: "OLD_ADDON".to_string(),
+            remote_checksum: "NEW_ADDON".to_string(),
+            local_content_hash: "UNCHANGED_FOLDER".to_string(),
+            ..Default::default()
+        }];
+        let mut addon_state_by_mod_id = HashMap::new();
+        addon_state_by_mod_id.insert(
+            1,
+            super::super::file_state::AddonFolderState {
+                exists: true,
+                content_hash: "UNCHANGED_FOLDER".to_string(),
+                read_error: None,
+            },
+        );
+        let addon_hash = AddonHashResult {
+            addon_state_by_mod_id,
+            deep_scan_mod_ids: HashSet::new(),
+            mods_with_tree_mismatch: HashSet::from([1]),
+            mods_with_missing_path: HashSet::new(),
+            addon_hash_timings: Vec::new(),
+            addon_hash_elapsed: Duration::ZERO,
+            addon_hash_concurrency: 1,
+            addon_hash_calculated: 1,
+            addon_hash_hits_shared_memory: 0,
+            addon_hash_hits_persistent: 0,
+            persistent_cache_entry_count: 0,
+            enabled_addons: 1,
+            entries_walked: 1,
+            phase1_addon_content_mismatch_count: 0,
+            missing_addon_path_samples: Vec::new(),
+        };
+
+        let result = compute_file_diffs(
+            context,
+            "https://repo.example.invalid/",
+            &mods,
+            None,
+            &addon_hash,
+            None,
+            None,
+        )
+        .await
+        .expect("diff result");
+
+        assert_eq!(result.missing_files, 2);
+        assert!(result.clean_hash_updates.is_empty());
+        assert_eq!(result.diffs.len(), 1);
+        assert_eq!(result.diffs[0].total_bytes, 565 + 165);
+        assert_eq!(result.diffs[0].files.len(), 2);
+        for file in &result.diffs[0].files {
+            assert_eq!(file.change_kind, FileDiffKind::Added);
+        }
+        assert!(result.files_needing_tree_verify.is_empty());
     }
 }

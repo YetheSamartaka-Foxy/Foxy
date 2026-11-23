@@ -366,6 +366,7 @@ impl Foxy {
                 return;
             }
 
+            let popup_open_before_rows = egui::Popup::is_any_open(ui.ctx());
             let render_entry = |ui: &mut Ui,
                                 entry_index: usize,
                                 external_entries: &mut Vec<(String, String, String, bool)>,
@@ -456,7 +457,11 @@ impl Foxy {
                         ui.ctx()
                             .output_mut(Foxy::set_pointing_cursor_output);
                     }
-                    if context_response.clicked() && *is_enabled == was_enabled {
+                    if super::should_toggle_addon_row_on_card_click(
+                        context_response.clicked(),
+                        popup_open_before_rows,
+                        *is_enabled != was_enabled,
+                    ) {
                         *is_enabled = !*is_enabled;
                         *repo_data_changed = true;
                     }

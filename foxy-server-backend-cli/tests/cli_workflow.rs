@@ -86,6 +86,184 @@ fn mod_line_files_are_rewritten_after_a_successful_create() {
 }
 
 #[test]
+fn no_mod_line_files_skips_checking_previewing_and_rewriting_launch_scripts() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("mods").join("@mod");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("data.txt"), b"data").unwrap();
+    let script = dir.path().join("start-server.cmd");
+    let original = "@echo off\r\narma3server_x64.exe -mod=mods/@stale; -config=server.cfg\r\n";
+    std::fs::write(&script, original).unwrap();
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "Test",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [{"modName": "@mod"}],
+            "modLineFiles": ["start-server.cmd", "missing-for-test.cmd"]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let preview = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .args(["--dry-run", "--no-mod-line-files"])
+        .output()
+        .unwrap();
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let result: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert!(
+        !result["details"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "update-mod-line")
+    );
+
+    let built = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .args([
+            "--no-progress",
+            "--no-mod-line-files",
+            "--mod-line-prefix",
+            "mods",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let result: Value = serde_json::from_slice(&built.stdout).unwrap();
+    assert!(result["details"].get("modLineFiles").is_none());
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(output.join("server_mod_line.txt")).unwrap(),
+        "-mod=mods/@mod;\n"
+    );
+
+    let space = dir.path().join("space.json");
+    write_json(
+        &space,
+        json!({
+            "name": "Test Space",
+            "baseUrl": "https://example.com/repos/",
+            "repositories": [{"config": "config.json", "folder": "main"}]
+        }),
+    );
+    let space_output = dir.path().join("space-output");
+    let space_built = Command::new(bin)
+        .args(["--json", "create-space"])
+        .arg(&space)
+        .arg(&space_output)
+        .args([
+            "--no-progress",
+            "--no-mod-line-files",
+            "--mod-line-prefix",
+            "mods",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        space_built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&space_built.stderr)
+    );
+    let space_result: Value = serde_json::from_slice(&space_built.stdout).unwrap();
+    assert!(space_result["details"].get("modLineFiles").is_none());
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(space_output.join("main").join("server_mod_line.txt")).unwrap(),
+        "-mod=mods/@mod;\n"
+    );
+}
+
+#[test]
+fn nested_disabled_mod_in_config_publishes_flattened_with_enabled_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods");
+    let active = mods.join("@active");
+    let nested_disabled = mods.join("folder").join("@mod");
+    std::fs::create_dir_all(&active).unwrap();
+    std::fs::create_dir_all(&nested_disabled).unwrap();
+    std::fs::write(active.join("active.pbo"), b"active").unwrap();
+    std::fs::write(nested_disabled.join("mod.pbo"), b"disabled").unwrap();
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "Test",
+            "basePath": mods,
+            "requiredMods": [
+                {"modName": "@active", "enabled": true},
+                {"modName": "folder/@mod", "enabled": false}
+            ]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let built = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .args(["--no-progress", "--mode", "hybrid"])
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert!(output.join("@mod").join("mod.pbo").exists());
+    assert!(!output.join("folder").exists());
+
+    let foxy_addons: Value =
+        serde_json::from_slice(&std::fs::read(output.join("foxy_addons.json")).unwrap()).unwrap();
+    let foxy_disabled = foxy_addons["requiredMods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["modName"] == "@mod")
+        .unwrap();
+    assert_eq!(foxy_disabled["enabled"], false);
+
+    let repo_json: Value =
+        serde_json::from_slice(&std::fs::read(output.join("repo.json")).unwrap()).unwrap();
+    let repo_disabled = repo_json["requiredMods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["modName"] == "@mod")
+        .unwrap();
+    assert_eq!(repo_disabled["enabled"], false);
+    assert_eq!(
+        std::fs::read_to_string(output.join("server_mod_line.txt")).unwrap(),
+        "-mod=@active;\n"
+    );
+    assert!(
+        Command::new(bin)
+            .arg("verify")
+            .arg(&output)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn json_preview_atomic_create_and_verify() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("mods").join("@mod");
@@ -322,6 +500,291 @@ fn space_prune_asks_for_yes_only_when_published_optionals_exist() {
     );
     assert!(!published.exists());
     assert!(source.join("optionals").join("unused.pbo").exists());
+}
+
+#[test]
+fn per_repo_keys_with_additional_keys_skips_the_combined_keys_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods");
+    for (mod_name, key) in [("@one", "one.bikey"), ("@two", "two.bikey")] {
+        std::fs::create_dir_all(mods.join(mod_name).join("keys")).unwrap();
+        std::fs::write(mods.join(mod_name).join("data.txt"), mod_name).unwrap();
+        std::fs::write(mods.join(mod_name).join("keys").join(key), key).unwrap();
+    }
+    let extra = dir.path().join("extra-keys");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("a3.bikey"), b"a3").unwrap();
+    for (folder, mod_name) in [("one", "@one"), ("two", "@two")] {
+        write_json(
+            &dir.path().join(format!("{folder}.json")),
+            json!({
+                "repoName": folder,
+                "basePath": mods,
+                "requiredMods": [{"modName": mod_name}]
+            }),
+        );
+    }
+    let space = dir.path().join("space.json");
+    write_json(
+        &space,
+        json!({
+            "name": "Test Space",
+            "baseUrl": "https://example.com/repos/",
+            "repositories": [
+                {"config": "one.json", "folder": "one"},
+                {"config": "two.json", "folder": "two"}
+            ]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+    let run = |collect: bool| {
+        let mut command = Command::new(bin);
+        command
+            .arg("create-space")
+            .arg(&space)
+            .arg(&output)
+            .args(["--no-progress", "--per-repo-keys", "--additional-keys"])
+            .arg(&extra);
+        if collect {
+            command.arg("--collect-keys");
+        }
+        let built = command.output().unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+    };
+
+    run(false);
+    assert!(!output.join("keys").exists());
+    let one_keys = output.join("one").join("keys");
+    let two_keys = output.join("two").join("keys");
+    assert!(one_keys.join("one.bikey").exists());
+    assert!(one_keys.join("a3.bikey").exists());
+    assert!(!one_keys.join("two.bikey").exists());
+    assert!(two_keys.join("two.bikey").exists());
+    assert!(two_keys.join("a3.bikey").exists());
+
+    run(true);
+    for key in ["one.bikey", "two.bikey", "a3.bikey"] {
+        assert!(output.join("keys").join(key).exists(), "{key}");
+    }
+}
+
+#[test]
+fn wildcard_with_explicit_disabled_override_excludes_mod_from_server_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = dir.path().join("mods").join("core");
+    for mod_name in ["@mod_01", "@mod_02"] {
+        std::fs::create_dir_all(core.join(mod_name)).unwrap();
+        std::fs::write(core.join(mod_name).join("data.txt"), mod_name).unwrap();
+    }
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": dir.path().join("mods"),
+            "requiredMods": [
+                { "modName": "core/@*" },
+                { "modName": "core/@mod_02", "enabled": false }
+            ]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let validated = Command::new(bin)
+        .args(["--json", "validate"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(
+        validated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+
+    let created = Command::new(bin)
+        .args(["--json", "create"])
+        .arg(&config)
+        .arg(&output)
+        .args(["--no-progress", "--mod-line-prefix", "mods"])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let mod_line = std::fs::read_to_string(output.join("server_mod_line.txt")).unwrap();
+    assert_eq!(mod_line, "-mod=mods/@mod_01;\n");
+
+    let addons: Value =
+        serde_json::from_slice(&std::fs::read(output.join("foxy_addons.json")).unwrap()).unwrap();
+    let required = addons["requiredMods"].as_array().unwrap();
+    assert_eq!(required.len(), 2);
+    let mod_02 = required
+        .iter()
+        .find(|entry| entry["modName"] == "@mod_02")
+        .unwrap();
+    assert_eq!(mod_02["enabled"], false);
+}
+
+#[test]
+fn create_prunes_stale_output_keys_but_preserves_external_keys_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods");
+    for (mod_name, key) in [("@mod_01", "one.bikey"), ("@mod_02", "two.bikey")] {
+        std::fs::create_dir_all(mods.join(mod_name).join("keys")).unwrap();
+        std::fs::write(mods.join(mod_name).join("data.txt"), mod_name).unwrap();
+        std::fs::write(mods.join(mod_name).join("keys").join(key), key).unwrap();
+    }
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": mods,
+            "requiredMods": [{"modName": "@mod_01"}, {"modName": "@mod_02"}]
+        }),
+    );
+    let output = dir.path().join("output");
+    let external_keys = dir.path().join("external-keys");
+    std::fs::create_dir_all(&external_keys).unwrap();
+    std::fs::write(external_keys.join("manual.bikey"), b"manual").unwrap();
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let run = |extra_args: &[&str]| {
+        let mut cmd = Command::new(bin);
+        cmd.arg("create")
+            .arg(&config)
+            .arg(&output)
+            .arg("--no-progress")
+            .args(extra_args);
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    run(&["--collect-keys"]);
+    assert!(output.join("keys").join("one.bikey").exists());
+    assert!(output.join("keys").join("two.bikey").exists());
+
+    write_json(
+        &config,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": mods,
+            "requiredMods": [{"modName": "@mod_01"}]
+        }),
+    );
+
+    run(&["--collect-keys"]);
+    assert!(output.join("keys").join("one.bikey").exists());
+    assert!(!output.join("keys").join("two.bikey").exists());
+
+    let ext = external_keys.to_string_lossy().into_owned();
+    run(&["--keys-output", &ext]);
+    assert!(external_keys.join("one.bikey").exists());
+    assert!(external_keys.join("manual.bikey").exists());
+}
+
+#[test]
+fn space_clean_removes_orphan_pool_mod_and_stale_keys_without_yes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods");
+    for (mod_name, key) in [("@mod_01", "one.bikey"), ("@mod_02", "two.bikey")] {
+        std::fs::create_dir_all(mods.join(mod_name).join("keys")).unwrap();
+        std::fs::write(mods.join(mod_name).join("data.txt"), mod_name).unwrap();
+        std::fs::write(mods.join(mod_name).join("keys").join(key), key).unwrap();
+    }
+    let repo_cfg = dir.path().join("one.json");
+    write_json(
+        &repo_cfg,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": mods,
+            "requiredMods": [{"modName": "@mod_01"}, {"modName": "@mod_02"}]
+        }),
+    );
+    let space = dir.path().join("space.json");
+    write_json(
+        &space,
+        json!({
+            "name": "MainSpace",
+            "baseUrl": "https://repo.example.invalid/space/",
+            "repositories": [{"config": "one.json", "folder": "one"}]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let first = Command::new(bin)
+        .arg("create-space")
+        .arg(&space)
+        .arg(&output)
+        .args([
+            "--layout",
+            "pool",
+            "--collect-keys",
+            "--per-repo-keys",
+            "--no-progress",
+        ])
+        .output()
+        .unwrap();
+    if !first.status.success() {
+        let stderr = String::from_utf8_lossy(&first.stderr);
+        if cfg!(windows) && stderr.contains("privilege") {
+            return;
+        }
+        panic!("first create-space failed: {stderr}");
+    }
+    assert!(output.join("pool").join("@mod_02").exists());
+    assert!(output.join("keys").join("two.bikey").exists());
+    assert!(output.join("one").join("keys").join("two.bikey").exists());
+
+    write_json(
+        &repo_cfg,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": mods,
+            "requiredMods": [{"modName": "@mod_01"}]
+        }),
+    );
+
+    let second = Command::new(bin)
+        .arg("create-space")
+        .arg(&space)
+        .arg(&output)
+        .args([
+            "--layout",
+            "pool",
+            "--clean",
+            "--collect-keys",
+            "--per-repo-keys",
+            "--no-progress",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(output.join("pool").join("@mod_01").exists());
+    assert!(!output.join("pool").join("@mod_02").exists());
+    assert!(std::fs::symlink_metadata(output.join("one").join("@mod_02")).is_err());
+    assert!(output.join("keys").join("one.bikey").exists());
+    assert!(!output.join("keys").join("two.bikey").exists());
+    assert!(output.join("one").join("keys").join("one.bikey").exists());
+    assert!(!output.join("one").join("keys").join("two.bikey").exists());
 }
 
 fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {

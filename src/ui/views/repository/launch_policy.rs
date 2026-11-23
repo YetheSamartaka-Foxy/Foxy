@@ -128,6 +128,9 @@ pub(super) fn merge_join_preflight_choices(
             item.selected = old.selected;
         }
     }
+    if !previous.suggestions.is_empty() || !previous.ambiguous.is_empty() {
+        refreshed.save_local_addon_selections = previous.save_local_addon_selections;
+    }
 }
 
 pub(super) fn paths_overlap(left: &str, right: &str) -> bool {
@@ -253,5 +256,26 @@ mod tests {
             join_preflight_fact_keys(&old),
             join_preflight_fact_keys(&refreshed)
         );
+    }
+
+    #[test]
+    fn refreshed_join_facts_preserve_save_local_addon_selections_flag() {
+        let mut old = preflight();
+        old.suggestions
+            .push(crate::ui::app::JoinPreflightAddonSuggestion {
+                addon_name: "@mod_01".to_string(),
+                origin: crate::ui::app::JoinPreflightAddonOrigin::Required,
+                reported_name: "@mod_01".to_string(),
+                confidence: JoinPreflightMatchConfidence::ExactNormalizedName,
+                selected: true,
+            });
+        old.save_local_addon_selections = false;
+
+        let mut refreshed = preflight();
+        refreshed.suggestions = old.suggestions.clone();
+        refreshed.save_local_addon_selections = true;
+
+        merge_join_preflight_choices(&old, &mut refreshed);
+        assert!(!refreshed.save_local_addon_selections);
     }
 }

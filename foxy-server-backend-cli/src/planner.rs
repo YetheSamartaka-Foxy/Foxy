@@ -112,6 +112,7 @@ impl BuildPlan {
         dest: &Path,
         additional: &[std::path::PathBuf],
         prune: bool,
+        prune_stale: bool,
     ) -> Result<()> {
         let mut taken = BTreeMap::<String, std::path::PathBuf>::new();
         let mut sources = Vec::new();
@@ -142,6 +143,29 @@ impl BuildPlan {
             } else {
                 self.add("copy", &dest.join(name), std::fs::metadata(&source)?.len());
                 taken.insert(name.to_string(), source);
+            }
+        }
+        if prune_stale && dest.is_dir() {
+            let mut stale = Vec::new();
+            for entry in std::fs::read_dir(dest)? {
+                let entry = entry?;
+                let path = entry.path();
+                let meta = std::fs::symlink_metadata(&path)?;
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if keys::is_key_file(name)
+                    && !taken.keys().any(|known| keys::same_key_name(known, name))
+                {
+                    stale.push(path);
+                }
+            }
+            stale.sort();
+            for path in stale {
+                self.add("remove-key", &path, 0);
             }
         }
         Ok(())

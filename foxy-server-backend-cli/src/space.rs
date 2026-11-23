@@ -773,6 +773,7 @@ pub struct CreateSpaceOptions<'a> {
     pub mode: GenerationMode,
     pub no_progress: bool,
     pub mod_line: mod_line::ModLineOptions<'a>,
+    pub no_mod_line_files: bool,
     pub keys: KeyCollectionRequest,
 
     pub per_repo_keys: bool,
@@ -798,6 +799,7 @@ pub fn cmd_create_space(
         mode,
         no_progress,
         mod_line: mod_line_options,
+        no_mod_line_files,
         keys: key_collection,
         per_repo_keys,
     } = options;
@@ -813,9 +815,6 @@ pub fn cmd_create_space(
     }
     if clean && layout != SpaceLayout::Pool {
         bail!("--clean requires --layout pool");
-    }
-    if clean && !dry_run && !yes {
-        bail!("--clean removes generated files; preview with --dry-run or re-run with --yes");
     }
     if !only.is_empty() && clean {
         bail!(
@@ -903,22 +902,27 @@ pub fn cmd_create_space(
         );
     }
 
-    let launch_files: Vec<Vec<PathBuf>> = space
-        .repos
-        .iter()
-        .map(|repo| mod_line_files::resolve(&repo.config, &repo.config_path))
-        .collect();
-    for (repo, files) in space.repos.iter().zip(&launch_files) {
-        mod_line_files::check(files, &mod_line::launch_flags(repo.config.game))
-            .with_context(|| format!("Repository {}", repo.folder))?;
-    }
-    mod_line_files::ensure_distinct(
-        space
+    let launch_files: Vec<Vec<PathBuf>> = if no_mod_line_files {
+        Vec::new()
+    } else {
+        let files: Vec<Vec<PathBuf>> = space
             .repos
             .iter()
-            .map(|repo| repo.folder.as_str())
-            .zip(launch_files.iter().map(Vec::as_slice)),
-    )?;
+            .map(|repo| mod_line_files::resolve(&repo.config, &repo.config_path))
+            .collect();
+        for (repo, files) in space.repos.iter().zip(&files) {
+            mod_line_files::check(files, &mod_line::launch_flags(repo.config.game))
+                .with_context(|| format!("Repository {}", repo.folder))?;
+        }
+        mod_line_files::ensure_distinct(
+            space
+                .repos
+                .iter()
+                .map(|repo| repo.folder.as_str())
+                .zip(files.iter().map(Vec::as_slice)),
+        )?;
+        files
+    };
 
     if dry_run {
         let pool_dir = pool_dir.unwrap_or_else(|| output_dir.join(DEFAULT_POOL_DIR));
@@ -935,7 +939,7 @@ pub fn cmd_create_space(
             plan.add("replace-output", output_dir, 0);
         }
         if clean {
-            let cleanup = cleanup::plan_cleanup(output_dir, &pool_dir, &groups)?;
+            let cleanup = cleanup::plan_cleanup(output_dir, &pool_dir, &space.repos, &groups)?;
             for link in cleanup.links() {
                 plan.add("remove-link", link, 0);
             }
@@ -958,6 +962,7 @@ pub fn cmd_create_space(
                 &dest,
                 &key_collection.additional_sources,
                 prune_unused_optionals,
+                keys::path_is_within(&dest, output_dir),
             )?;
         }
         if per_repo_keys {
@@ -967,6 +972,7 @@ pub fn cmd_create_space(
                     &output_dir.join(&repo.folder).join(DEFAULT_KEYS_DIR),
                     &key_collection.additional_sources,
                     prune_unused_optionals,
+                    true,
                 )?;
             }
         }
@@ -1019,7 +1025,7 @@ pub fn cmd_create_space(
         )?;
     }
     if clean {
-        cleanup::plan_cleanup(output_dir, &pool_dir, &groups)?;
+        cleanup::plan_cleanup(output_dir, &pool_dir, &space.repos, &groups)?;
     }
 
     let progress = crate::progress_bar(no_progress);
@@ -1077,6 +1083,7 @@ pub fn cmd_create_space(
             &keys::KeyCollectionOptions {
                 dest: &keys_dir,
                 additional_sources: &key_collection.additional_sources,
+                prune_stale: keys::path_is_within(&keys_dir, output_dir),
             },
         )?;
         for name in &report.conflicts {
@@ -1101,6 +1108,7 @@ pub fn cmd_create_space(
                 &keys::KeyCollectionOptions {
                     dest: &dest,
                     additional_sources: &key_collection.additional_sources,
+                    prune_stale: true,
                 },
             )?;
             for name in &report.conflicts {
@@ -1142,7 +1150,7 @@ pub fn cmd_create_space(
 
     if layout == SpaceLayout::Pool {
         if clean {
-            let report = cleanup::plan_cleanup(output_dir, &pool_dir, &groups)?;
+            let report = cleanup::plan_cleanup(output_dir, &pool_dir, &space.repos, &groups)?;
             report.execute()?;
             report.print(false);
         }
@@ -1192,6 +1200,9 @@ pub fn cmd_create_space(
     }
     if let Some(report) = &key_report {
         println!("  Keys:       {} in {}", report.copied, keys_dir.display());
+        if report.removed > 0 {
+            println!("              {} stale keys removed", report.removed);
+        }
         if report.duplicates > 0 {
             println!("              {} duplicate keys skipped", report.duplicates);
         }
@@ -1205,6 +1216,9 @@ pub fn cmd_create_space(
     }
     for (dest, report) in &repo_key_reports {
         println!("  Keys:       {} in {}", report.copied, dest.display());
+        if report.removed > 0 {
+            println!("              {} stale keys removed", report.removed);
+        }
         if report.duplicates > 0 {
             println!("              {} duplicate keys skipped", report.duplicates);
         }

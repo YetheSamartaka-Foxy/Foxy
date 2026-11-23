@@ -321,6 +321,7 @@ impl Foxy {
         addon_context_action: &mut Option<(String, Option<String>, AddonContextAction)>,
         context_menu_labels: &AddonContextMenuLabels,
         tooltips: &AddonRowTooltips,
+        popup_open_before_rows: bool,
     ) {
         let structure_expanded = self
             .repository_addon_list_cache_cached(kind)
@@ -579,11 +580,14 @@ impl Foxy {
         if context_response.hovered() {
             ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
         }
-        if context_response.clicked()
-            && !checkbox_clicked
-            && !favorite_clicked
-            && !client_side_clicked
-            && self.set_repository_addon_row_enabled_cached(kind, source_index, !enabled)
+        if super::should_toggle_addon_row_on_card_click(
+            context_response.clicked(),
+            popup_open_before_rows,
+            checkbox_clicked
+                || checkbox_response.changed()
+                || favorite_clicked
+                || client_side_clicked,
+        ) && self.set_repository_addon_row_enabled_cached(kind, source_index, !enabled)
         {
             *repo_data_changed = true;
         }
@@ -1025,6 +1029,7 @@ impl Foxy {
                 path_overlay_width,
             );
             let visible_rows = self.repository_addon_visible_rows(kind, *search_files, filter);
+            let popup_open_before_rows = egui::Popup::is_any_open(ui.ctx());
             ScrollArea::vertical()
                 .id_salt(("repository_addons_list_cached", repo_index, list_kind_salt))
                 .show_rows(ui, row_height, visible_rows.len(), |ui, row_range| {
@@ -1079,6 +1084,7 @@ impl Foxy {
                                         &mut addon_context_action,
                                         &context_menu_labels,
                                         &row_tooltips,
+                                        popup_open_before_rows,
                                     );
                                 });
                             }

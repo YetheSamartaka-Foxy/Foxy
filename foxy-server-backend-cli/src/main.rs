@@ -62,6 +62,7 @@ fn main() -> Result<()> {
                 mode,
                 mod_line_prefix,
                 mod_line_include_optional,
+                no_mod_line_files,
                 prune_unused_optionals,
                 yes,
                 collect_keys,
@@ -79,6 +80,7 @@ fn main() -> Result<()> {
                         prefix: &mod_line_prefix,
                         include_optional: mod_line_include_optional,
                     },
+                    no_mod_line_files,
                     prune_unused_optionals,
                     dry_run,
                     incremental,
@@ -112,6 +114,7 @@ fn main() -> Result<()> {
                 mode,
                 mod_line_prefix,
                 mod_line_include_optional,
+                no_mod_line_files,
                 collect_keys,
                 keys_output,
                 additional_keys,
@@ -135,10 +138,14 @@ fn main() -> Result<()> {
                         prefix: &mod_line_prefix,
                         include_optional: mod_line_include_optional,
                     },
+                    no_mod_line_files,
                     keys: KeyCollectionRequest {
-                        enabled: collect_keys
-                            || keys_output.is_some()
-                            || !additional_keys.is_empty(),
+                        enabled: space_combined_keys_requested(
+                            collect_keys,
+                            keys_output.is_some(),
+                            !additional_keys.is_empty(),
+                            per_repo_keys,
+                        ),
                         dest: keys_output,
                         additional_sources: additional_keys,
                     },
@@ -159,7 +166,9 @@ fn main() -> Result<()> {
                 } else {
                     space::cmd_create_space(&config, &output, options)?
                 };
-                mod_line_files::apply_all(&pending)?;
+                if !no_mod_line_files {
+                    mod_line_files::apply_all(&pending)?;
+                }
                 if let Some(before) = before {
                     report::print(&report::compare(&before, &report::snapshot(&output)?));
                 }
@@ -229,6 +238,7 @@ struct CreateOptions<'a> {
     mode: GenerationMode,
     no_progress: bool,
     mod_line: mod_line::ModLineOptions<'a>,
+    no_mod_line_files: bool,
     prune_unused_optionals: bool,
     dry_run: bool,
     incremental: bool,
@@ -236,6 +246,17 @@ struct CreateOptions<'a> {
     report: bool,
     yes: bool,
     keys: KeyCollectionRequest,
+}
+
+/// With `--per-repo-keys`, `--additional-keys` feeds the per-repository folders
+/// only; the combined folder then needs `--collect-keys` or `--keys-output`.
+fn space_combined_keys_requested(
+    collect_keys: bool,
+    keys_output: bool,
+    additional_keys: bool,
+    per_repo_keys: bool,
+) -> bool {
+    collect_keys || keys_output || (additional_keys && !per_repo_keys)
 }
 
 fn cmd_create(
@@ -275,12 +296,15 @@ fn cmd_create(
                 &dest,
                 &options.keys.additional_sources,
                 options.prune_unused_optionals,
+                keys::path_is_within(&dest, output_dir),
             )?;
         }
-        let launch_files = mod_line_files::resolve(&config, config_path);
-        mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
-        for path in &launch_files {
-            plan.add("update-mod-line", path, 0);
+        if !options.no_mod_line_files {
+            let launch_files = mod_line_files::resolve(&config, config_path);
+            mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
+            for path in &launch_files {
+                plan.add("update-mod-line", path, 0);
+            }
         }
         plan.show();
         return Ok(());
@@ -293,12 +317,15 @@ fn cmd_create(
         .then(|| report::snapshot(output_dir))
         .transpose()?;
     configure_thread_pool(options.threads)?;
+    let no_mod_line_files = options.no_mod_line_files;
     let pending = if options.atomic {
         staging::publish(output_dir, |stage| run_create(config_path, stage, options))?
     } else {
         run_create(config_path, output_dir, options)?
     };
-    mod_line_files::apply_all(std::slice::from_ref(&pending))?;
+    if !no_mod_line_files {
+        mod_line_files::apply_all(std::slice::from_ref(&pending))?;
+    }
     if let Some(before) = before {
         report::print(&report::compare(&before, &report::snapshot(output_dir)?));
     }
@@ -316,6 +343,7 @@ fn run_create(
         mode,
         no_progress,
         mod_line: mod_line_options,
+        no_mod_line_files,
         prune_unused_optionals,
         incremental,
         dry_run: _,
@@ -361,8 +389,13 @@ fn run_create(
     for warning in &warnings {
         log::warn!("{}", warning);
     }
-    let launch_files = mod_line_files::resolve(&config, config_path);
-    mod_line_files::check(&launch_files, &mod_line::launch_flags(config.game))?;
+    let launch_files = if no_mod_line_files {
+        Vec::new()
+    } else {
+        let files = mod_line_files::resolve(&config, config_path);
+        mod_line_files::check(&files, &mod_line::launch_flags(config.game))?;
+        files
+    };
 
     for m in resolved_mods.iter().filter(|m| !is_game_build(m)) {
         println!(
@@ -417,6 +450,7 @@ fn run_create(
             &keys::KeyCollectionOptions {
                 dest: &dest,
                 additional_sources: &key_collection.additional_sources,
+                prune_stale: keys::path_is_within(&dest, output_dir),
             },
         )?;
         for name in &report.conflicts {
@@ -458,6 +492,9 @@ fn run_create(
     }
     if let Some((dest, report)) = &key_report {
         println!("  Keys:       {} in {}", report.copied, dest.display());
+        if report.removed > 0 {
+            println!("              {} stale keys removed", report.removed);
+        }
         if report.duplicates > 0 {
             println!("              {} duplicate keys skipped", report.duplicates);
         }
@@ -792,6 +829,7 @@ mod generation_tests {
                     prefix: "mods",
                     include_optional: false,
                 },
+                no_mod_line_files: false,
                 prune_unused_optionals: true,
                 dry_run: false,
                 incremental: false,
@@ -833,6 +871,7 @@ mod generation_tests {
                 prefix: "",
                 include_optional: false,
             },
+            no_mod_line_files: false,
             prune_unused_optionals: true,
             dry_run: false,
             incremental: false,
@@ -845,6 +884,16 @@ mod generation_tests {
                 additional_sources: vec![],
             },
         }
+    }
+
+    #[test]
+    fn per_repo_keys_keeps_additional_keys_out_of_the_combined_folder() {
+        assert!(!space_combined_keys_requested(false, false, true, true));
+        assert!(!space_combined_keys_requested(false, false, false, true));
+        assert!(space_combined_keys_requested(false, false, true, false));
+        assert!(space_combined_keys_requested(true, false, true, true));
+        assert!(space_combined_keys_requested(false, true, false, true));
+        assert!(!space_combined_keys_requested(false, false, false, false));
     }
 
     #[test]

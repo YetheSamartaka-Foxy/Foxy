@@ -22,6 +22,7 @@ pub mod renderer_fallback;
 pub mod resource_profile;
 pub mod resource_sampler;
 pub mod runtime_settings;
+pub mod software_gl;
 pub mod speed_of_light;
 pub mod storage_compat;
 pub mod thread_cpu;

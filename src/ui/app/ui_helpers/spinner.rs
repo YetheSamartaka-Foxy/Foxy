@@ -85,11 +85,20 @@ pub(crate) fn progress_frame_interval_override() -> Option<Duration> {
 }
 
 pub(crate) fn progress_frame_interval() -> Duration {
-    progress_frame_interval_override().unwrap_or(PROGRESS_FRAME_INTERVAL)
+    let interval = progress_frame_interval_override().unwrap_or(PROGRESS_FRAME_INTERVAL);
+    pace_for_software_ui(interval)
+}
+
+pub(crate) fn pace_for_software_ui(delay: Duration) -> Duration {
+    if crate::core::utils::software_gl::software_ui_active() {
+        delay.max(crate::core::utils::software_gl::SOFTWARE_UI_FRAME_INTERVAL)
+    } else {
+        delay
+    }
 }
 
 pub(crate) fn request_frame_after(ctx: &egui::Context, delay: Duration) {
-    ctx.request_repaint_after(delay);
+    ctx.request_repaint_after(pace_for_software_ui(delay));
 }
 
 #[must_use = "You should put this widget in a ui with `ui.add(widget);`"]

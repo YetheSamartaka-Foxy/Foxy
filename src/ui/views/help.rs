@@ -532,6 +532,7 @@ impl Foxy {
                     "Set a global download speed limit in Application settings, or leave it unlimited.",
                     "Use Auto recheck repositories on launch and Auto quick scan for changes on launch in Application settings to start background verification automatically.",
                     "With either startup check on, Foxy confirms a saved update with the server at startup, including a repository the quick local check cannot scan yet. A server that does not answer is tried again later in the same session.",
+                    "Recheck repositories after a Foxy update is on by default. After Foxy itself is updated, saved check results and update plans from the previous version are discarded, and repositories that check on startup get a fresh remote recheck. Turn it off in Application settings to keep the previous version's results.",
                     "Repository settings can override these startup checks per repository when needed.",
                     "Use Game space settings to show or hide the Editor Missions list and Servers list for that game space, with per-repository overrides when needed.",
                     "Use the Customization tab if you want to change UI font sizes or palette colors without touching repository data.",

@@ -59,6 +59,9 @@ pub struct SettingsViewState {
     pub auto_recheck_on_launch: bool,
     #[serde(default = "default_auto_quick_scan_on_launch")]
     pub auto_quick_scan_on_launch: bool,
+    /// Discard saved check results when the installed Foxy version changes.
+    #[serde(default = "default_recheck_repositories_after_app_update")]
+    pub recheck_repositories_after_app_update: bool,
     #[serde(default)]
     pub auto_backup_on_update: bool,
     /// Refresh repository metadata periodically while Foxy is idle.
@@ -300,6 +303,10 @@ fn default_auto_quick_scan_on_launch() -> bool {
     true
 }
 
+fn default_recheck_repositories_after_app_update() -> bool {
+    true
+}
+
 fn default_apply_repo_json_client_parameters() -> bool {
     true
 }
@@ -366,6 +373,7 @@ impl Default for SettingsViewState {
             hide_to_tray_after_launch: false,
             auto_recheck_on_launch: default_auto_recheck_on_launch(),
             auto_quick_scan_on_launch: default_auto_quick_scan_on_launch(),
+            recheck_repositories_after_app_update: default_recheck_repositories_after_app_update(),
             auto_backup_on_update: false,
             periodic_remote_check_enabled: default_periodic_remote_check_enabled(),
             periodic_remote_check_interval_minutes: default_periodic_remote_check_interval_minutes(
@@ -566,6 +574,17 @@ mod verified_hash_setting_tests {
             .remove("trust_verified_hashes");
         let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
         assert!(settings.trust_verified_hashes);
+    }
+
+    #[test]
+    fn settings_saved_before_app_update_recheck_existed_turn_it_on() {
+        let mut saved = serde_json::to_value(SettingsViewState::default()).unwrap();
+        saved
+            .as_object_mut()
+            .unwrap()
+            .remove("recheck_repositories_after_app_update");
+        let settings: SettingsViewState = serde_json::from_value(saved).unwrap();
+        assert!(settings.recheck_repositories_after_app_update);
     }
 }
 

@@ -237,6 +237,19 @@ impl Foxy {
                             self.pending_db_schema_wipe = None;
                             self.show_db_schema_wipe_prompt = false;
                             self.fs_watch_index_dirty = true;
+                            let mut cleared_repo_results = false;
+                            for repo in &mut self.repository_view_state.repositories {
+                                cleared_repo_results |=
+                                    crate::core::tasks::check_cache_version::clear_in_memory_repository_check_results(repo);
+                            }
+                            if cleared_repo_results {
+                                self.save_repositories();
+                            }
+                            self.repo_states.clear();
+                            self.repo_states_version = self.repo_states_version.wrapping_add(1);
+                            self.pending_update_cache.clear();
+                            self.clear_mod_diff_cache();
+                            self.update_ready_repo = None;
                             self.show_success_toast(self.t("Database wiped successfully"));
                             if repair_required && self.startup_tasks_started {
                                 self.start_database_startup_tasks();
@@ -1234,6 +1247,7 @@ impl Foxy {
                         let path = repo.path.clone();
                         self.clear_quick_scan_instance_active(&address, &path);
                         if finished_successfully {
+                            self.clear_queued_quick_scan_for_url(&address);
                             if last_mode == Some(SyncMode::Download) {
                                 self.set_repo_state_for_address(&address, &path, RepoState::Synced);
                             } else if had_updates {
@@ -1333,17 +1347,6 @@ impl Foxy {
                     self.recheck_progress_floor = None;
                     self.recheck_hash_estimate = None;
                     self.memory_diagnostics_last_logged_stage_key = None;
-                    if self.syncing_repository.is_none() && !self.deferred_fs_scan.is_empty() {
-                        let repo_urls: Vec<String> = self.deferred_fs_scan.drain().collect();
-                        self.queue_quick_scan_for_urls_from_fs(repo_urls);
-                    }
-                    if self.syncing_repository.is_none()
-                        && self.quick_scan_worker.is_none()
-                        && !self.pending_quick_scan_urls.is_empty()
-                    {
-                        let repo_urls: Vec<String> = self.pending_quick_scan_urls.drain().collect();
-                        self.queue_quick_scan_for_urls(repo_urls);
-                    }
                     self.needs_repaint = true;
                 }
                 ProgressEvent::Stage { label, percent } => {

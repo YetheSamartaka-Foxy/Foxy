@@ -263,6 +263,8 @@ pub fn mark_wiped() {
         dismissed_for_version: None,
         content_hash_format: CONTENT_HASH_FORMAT,
     });
+    // The wipe removed the check results, so this version owns the empty cache.
+    crate::core::tasks::check_cache_version::record_running_app_as_check_cache_owner();
 }
 
 pub(crate) fn content_hash_baselines_need_retire() -> bool {

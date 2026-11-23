@@ -203,6 +203,7 @@ impl Foxy {
             }
 
             let row_height = 66.0;
+            let popup_open_before_rows = egui::Popup::is_any_open(ui.ctx());
 
             ScrollArea::vertical()
                 .id_salt(("repository_addons_list", repo_index, label))
@@ -296,7 +297,11 @@ impl Foxy {
                             if context_response.hovered() {
                                 ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                             }
-                            if context_response.clicked() && *enabled == was_enabled {
+                            if super::should_toggle_addon_row_on_card_click(
+                                context_response.clicked(),
+                                popup_open_before_rows,
+                                *enabled != was_enabled,
+                            ) {
                                 *enabled = !*enabled;
                                 repo_data_changed = true;
                             }

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install Foxy</title>
+<meta name="description" content="Install or update Foxy with one command on Windows, Linux, and macOS. The command checks the download and keeps your saved repositories, settings, and databases.">
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0;
+    background: #f7f4f0;
+    color: #1c1917;
+    font: 18px/1.55 "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 44rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1, h2 { line-height: 1.25; }
+  h1 { font-size: 2rem; margin-bottom: 0.4rem; }
+  h2 { font-size: 1.35rem; margin-top: 2rem; }
+  a { color: #0b57d0; }
+  a:focus { outline: 3px solid #0b57d0; outline-offset: 2px; }
+  pre {
+    background: #fff;
+    border: 1px solid #d6d3d1;
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    overflow: auto;
+  }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 0.92em; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border-top: 1px solid #d6d3d1; text-align: left; padding: 0.45rem 0.5rem 0.45rem 0; vertical-align: top; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1c1917; color: #f5f5f4; }
+    a { color: #93c5fd; }
+    a:focus { outline-color: #93c5fd; }
+    pre { background: #292524; border-color: #44403c; }
+    th, td { border-color: #44403c; }
+  }
+</style>
+</head>
+<body>
+<main>
+<h1>Install Foxy</h1>
+<p>Foxy is a mod updater and launcher for Arma 3, Total War: WARHAMMER III, Arma Reforger, and other games. The same program is the desktop app and the command line.</p>
+<p>Install with one command (run it again to update):</p>
+<pre><code># Windows, in PowerShell
+irm https://yethesamartaka-foxy.github.io/Foxy/install.ps1 | iex
+
+# Linux and macOS, in a terminal
+curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh</code></pre>
+<p>The command downloads the newest <a href="https://github.com/YetheSamartaka-Foxy/Foxy/releases/latest">release</a>, checks its SHA-256, and installs it. A current-user install needs no administrator permission. Saved repositories, settings, and databases stay on the computer. Downloaded mods stay in the folders you chose.</p>
+<p>Static direct download links for the newest installer: <a href="download/">auto-detect</a> &middot; <a href="download/windows/">Windows</a> &middot; <a href="download/linux/">Linux (x86_64)</a> &middot; <a href="download/linux-arm64/">Linux (ARM64)</a> &middot; <a href="download/macos/">macOS (Apple Silicon)</a>.</p>
+<p>Longer notes, including Proton and Wine, are in the <a href="https://github.com/YetheSamartaka-Foxy/Foxy/blob/main/wiki/User-Guide.md#installing-foxy">User Guide</a>.</p>
+
+<h2>Windows 10 and 11</h2>
+<pre><code>irm https://yethesamartaka-foxy.github.io/Foxy/install.ps1 | iex</code></pre>
+<p>That puts Foxy in the Start menu and in Settings &gt; Apps. The files go to <code>%LOCALAPPDATA%\Programs\Foxy</code>. A running Foxy is closed and then started again.</p>
+<p>When Foxy is already installed for all users, the same command updates that copy, and Windows asks for administrator permission. It leaves a separate current-user copy alone when both exist.</p>
+<p>To download it by hand, open the <a href="https://github.com/YetheSamartaka-Foxy/Foxy/releases/latest">release page</a> and run <code>Foxy-&lt;version&gt;-setup.exe</code>. The setup can install for you or for every user of the PC. <strong>Delete all existing Foxy user data</strong> starts unchecked and asks before it removes settings and databases. Mod folders are kept either way.</p>
+<p>Foxy's Windows setup is the x64 installer. It also runs on ARM PCs. It requires 64-bit Windows.</p>
+<p><strong>No graphics driver</strong> (only the Microsoft Basic Display Adapter, Basic Render Driver, Remote Display Adapter, or Hyper-V Video) means Windows offers OpenGL 1.1 and Foxy's window does not open. The install command detects that and places Mesa's software OpenGL next to <code>Foxy.exe</code>. The window is then drawn on the CPU, with at most 4 threads, and progress updates about 4 times a second. Set <code>LP_NUM_THREADS</code> to choose another count. Delete <code>opengl32.dll</code> and <code>libgallium_wgl.dll</code> to use a graphics driver later. <code>Mesa-NOTICE.txt</code> has the license.</p>
+
+<h2>Linux (x86_64 and ARM64)</h2>
+<pre><code>curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh</code></pre>
+<p>That installs Foxy for the current user in <code>~/.local/opt/foxy</code>, adds a <code>foxy</code> command, and adds Foxy to the applications menu. It needs no root. The command picks <code>Foxy-&lt;version&gt;-linux-x86_64-installer.sh</code> or <code>Foxy-&lt;version&gt;-linux-aarch64-installer.sh</code> for this computer. When a release has no installer for this processor, it stops and leaves the computer unchanged.</p>
+<p>When the only existing install is the system copy in <code>/opt/foxy</code>, the command updates that copy and asks for administrator permission.</p>
+<p>By hand, from the release page:</p>
+<pre><code>chmod +x Foxy-&lt;version&gt;-linux-x86_64-installer.sh
+./Foxy-&lt;version&gt;-linux-x86_64-installer.sh --prefix="$HOME/.local/opt/foxy"
+sudo ./Foxy-&lt;version&gt;-linux-x86_64-installer.sh</code></pre>
+<p>The first is a current-user install. The second is a system install in <code>/opt/foxy</code>. Use one of them. On ARM64, use the <code>linux-aarch64</code> installer when the release includes it.</p>
+
+<h2>macOS 11 or newer</h2>
+<pre><code>curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh</code></pre>
+<p>That puts <code>Foxy.app</code> in <code>~/Applications</code> (the Applications folder in your home folder) when the release includes a disk image for this Mac. Published releases include <code>Foxy-&lt;version&gt;-macos-arm64.dmg</code> for Apple Silicon. The command checks the download's SHA-256.</p>
+<p>To download it by hand, open that disk image from the release page and drag Foxy to Applications.</p>
+<p>macOS may say it could not verify Foxy. Open System Settings, go to Privacy &amp; Security, and allow Foxy. This macOS build is experimental. Steam Workshop needs <code>libsteam_api.dylib</code> next to the Foxy executable inside the app.</p>
+
+<h2>Update or remove</h2>
+<ul>
+<li><strong>Installed with the command?</strong> Run the same command again to update.
+  <ul>
+  <li>Windows: remove Foxy in Settings &gt; Apps &gt; Installed apps. The uninstaller can also delete Foxy's settings and databases if you check that box. Mod folders stay.</li>
+  <li>Linux and macOS: <code>curl -fsSL https://yethesamartaka-foxy.github.io/Foxy/install.sh | sh -s -- --uninstall</code></li>
+  </ul>
+</li>
+<li><strong>Linux system install?</strong> Update by running the command again, or run the <code>.sh</code> installer with <code>sudo</code>. Remove it with <code>sudo ./Foxy-&lt;version&gt;-linux-&lt;arch&gt;-installer.sh --uninstall --prefix=/opt/foxy</code>.</li>
+<li><strong>Downloaded by hand?</strong> Run the newest setup, Linux installer, or disk image. On Windows and Linux, Foxy's own update check uses those same installers and keeps your saved data.</li>
+<li><strong>To also remove settings</strong>, delete the config folder in the table below. That folder holds settings, databases, caches, and logs. It does not hold your mod downloads.</li>
+</ul>
+
+<h2>Where Foxy keeps its files</h2>
+<table>
+<thead><tr><th></th><th>Windows</th><th>Linux</th><th>macOS</th></tr></thead>
+<tbody>
+<tr><th>Installed by the command</th><td><code>%LOCALAPPDATA%\Programs\Foxy</code></td><td><code>~/.local/opt/foxy</code></td><td><code>~/Applications/Foxy.app</code></td></tr>
+<tr><th>System install</th><td><code>C:\Program Files\Foxy</code></td><td><code>/opt/foxy</code></td><td></td></tr>
+<tr><th>Settings and databases</th><td><code>%APPDATA%\Foxy</code></td><td><code>~/.config/Foxy</code></td><td><code>~/Library/Application Support/Foxy</code></td></tr>
+</tbody>
+</table>
+<p>On Linux, the settings folder follows <code>$XDG_CONFIG_HOME</code> when that is an absolute path.</p>
+<p>Set <code>FOXY_INSTALL_REPO</code> to <code>owner/name</code> only for a repository you trust. The command installs what that repository publishes.</p>
+</main>
+</body>
+</html>

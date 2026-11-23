@@ -37,6 +37,7 @@ async fn pre_propagate_sibling_tree_checksums(
                    AND src_f.local_checksum = src_f.remote_checksum
                    AND src_f.local_checksum != ''
                    AND src_f.id != tgt_f.id
+                   AND EXISTS (SELECT 1 FROM addon_files src_af WHERE src_af.file_id = src_f.id)
                )
                LIMIT 1"#,
             params![repository_url],
@@ -78,6 +79,7 @@ async fn pre_propagate_sibling_tree_checksums(
                        AND src_f.local_checksum = src_f.remote_checksum
                        AND src_f.local_checksum != ''
                        AND src_f.id != tgt_f.id
+                       AND EXISTS (SELECT 1 FROM addon_files src_af WHERE src_af.file_id = src_f.id)
                    )
                )"#,
             params![repository_url],
@@ -165,6 +167,7 @@ async fn pre_propagate_sibling_content_hashes(db: &FoxyDb, repository_url: &str)
                    AND src_f.local_checksum = src_f.remote_checksum
                    AND src_f.local_content_hash != ''
                    AND src_f.id != tgt_f.id
+                   AND EXISTS (SELECT 1 FROM addon_files src_af WHERE src_af.file_id = src_f.id)
                )
                LIMIT 1"#,
             params![repository_url],
@@ -193,6 +196,7 @@ async fn pre_propagate_sibling_content_hashes(db: &FoxyDb, repository_url: &str)
                    AND src_f.local_checksum = src_f.remote_checksum
                    AND src_f.local_content_hash != ''
                    AND src_f.id != files.id
+                   AND EXISTS (SELECT 1 FROM addon_files src_af WHERE src_af.file_id = src_f.id)
                    LIMIT 1
                )
                WHERE local_content_hash = ''
@@ -216,6 +220,7 @@ async fn pre_propagate_sibling_content_hashes(db: &FoxyDb, repository_url: &str)
                        AND src_f.local_checksum = src_f.remote_checksum
                        AND src_f.local_content_hash != ''
                        AND src_f.id != tgt_f.id
+                       AND EXISTS (SELECT 1 FROM addon_files src_af WHERE src_af.file_id = src_f.id)
                    )
                )"#,
             params![repository_url],

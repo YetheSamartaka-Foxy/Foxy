@@ -23,8 +23,9 @@ pub(crate) use ui_helpers::activity::{
 #[cfg(test)]
 pub(crate) use ui_helpers::spinner::PROGRESS_FRAME_INTERVAL;
 pub(crate) use ui_helpers::spinner::{
-    PacedSpinner, WindowPresence, progress_frame_interval, progress_frame_interval_override,
-    request_frame_after, set_progress_frame_rate, set_window_presence, window_presence,
+    PacedSpinner, WindowPresence, pace_for_software_ui, progress_frame_interval,
+    progress_frame_interval_override, request_frame_after, set_progress_frame_rate,
+    set_window_presence, window_presence,
 };
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -436,6 +437,12 @@ pub struct Foxy {
     startup_pending_restore_worker: Option<std::thread::JoinHandle<()>>,
     pub startup_repository_layout_logged: bool,
     pub startup_recheck_queue: VecDeque<(String, String, SyncMode)>,
+    /// The previous app version's check cache was discarded this launch, so
+    /// startup must remote-recheck instead of reusing a local quick scan.
+    startup_remote_recheck_after_app_update: bool,
+    /// Unanswered startup-probe repositories that still owe a remote recheck
+    /// after an app update once their server responds on retry.
+    startup_probe_retry_force_remote_recheck: HashSet<api::StartupRepositoryInstance>,
     pub repository_space_sync_queue: VecDeque<repository::space_actions::QueuedRepositorySpaceSync>,
     pub repository_visual_folder_sync_queue:
         VecDeque<repository::space_actions::QueuedRepositoryVisualFolderSync>,

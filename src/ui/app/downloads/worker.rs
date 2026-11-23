@@ -38,7 +38,7 @@ impl Foxy {
                 false
             }
         };
-        let client = match crate::core::utils::proxy::blocking_client_builder().build() {
+        let client = match crate::core::tasks::create_web_client::create_direct_download_client() {
             Ok(client) => client,
             Err(err) => {
                 log::error!(

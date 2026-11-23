@@ -327,6 +327,7 @@ impl Foxy {
             || self.backup_inventory_refresh_requested
             || self.backup_inventory_refresh_in_progress
             || self.backup_cleanup_in_flight
+            || self.backend_worker.is_some()
         {
             Self::merge_repaint_interval(&mut interval, PERSISTENCE_REPAINT_INTERVAL);
         }
@@ -633,6 +634,7 @@ impl Foxy {
             self.process_repository_space_sync_queue();
             self.process_repository_visual_folder_sync_queue();
             self.process_scheduled_jobs(&ctx);
+            self.flush_deferred_quick_scans();
             self.process_addon_selection_checks();
             self.process_addon_hash_recalc_queue();
         }
@@ -654,7 +656,7 @@ impl Foxy {
             crate::ui::app::request_frame_after(&ctx, delay);
             self.needs_repaint = false;
         } else if let Some(repaint_interval) = self.next_visible_repaint_interval() {
-            ctx.request_repaint_after(repaint_interval);
+            ctx.request_repaint_after(crate::ui::app::pace_for_software_ui(repaint_interval));
         }
 
         self.reap_client_worker_handles();

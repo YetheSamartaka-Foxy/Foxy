@@ -1179,6 +1179,11 @@ pub struct SettingsSetArgs {
     pub auto_quick_scan_on_launch: Option<bool>,
     #[arg(
         long,
+        help = "After a Foxy update, discard saved repository check results and remote-recheck on startup (true/false)"
+    )]
+    pub recheck_repositories_after_app_update: Option<bool>,
+    #[arg(
+        long,
         help = "Automatically retry temporary download failures in the desktop app (true/false)"
     )]
     pub retry_failed_downloads: Option<bool>,

@@ -371,6 +371,27 @@ impl Foxy {
                     });
                 }
 
+                if !pending.suggestions.is_empty() || !pending.ambiguous.is_empty() {
+                    ui.add_space(8.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let before = pending.save_local_addon_selections;
+                        let save_checkbox = Self::ui_state_checkbox(
+                            ui,
+                            &mut pending.save_local_addon_selections,
+                            self.t("Save enabled addons for future launches"),
+                        )
+                        .on_hover_text(self.t(
+                            "When checked, enabled addons from this repository are saved to the active profile before launching.",
+                        ));
+                        if save_checkbox.hovered() {
+                            ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                        }
+                        if pending.save_local_addon_selections != before {
+                            pending_changed = true;
+                        }
+                    });
+                }
+
                 if !pending.known_remote.is_empty() {
                     ui.add_space(10.0);
                     self.join_preflight_section(ui, |ui| {
@@ -758,6 +779,7 @@ impl Foxy {
 
             self.pending_join_preflight = None;
             self.prelaunch_process_checks = Default::default();
+            self.persist_saved_join_preflight_selections(&pending);
             let selected_repository = Self::repository_with_join_preflight_selections(&pending);
             let result = self.launch_repository_with_database_guard(
                 &selected_repository,

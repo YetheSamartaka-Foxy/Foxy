@@ -484,6 +484,8 @@ impl Foxy {
             frame_cost: Default::default(),
             frame_cost_at_sync_start: None,
             startup_recheck_queue: VecDeque::new(),
+            startup_remote_recheck_after_app_update: false,
+            startup_probe_retry_force_remote_recheck: HashSet::new(),
             repository_space_sync_queue: VecDeque::new(),
             repository_visual_folder_sync_queue: VecDeque::new(),
             addon_hash_recalc_queue: VecDeque::new(),
@@ -819,11 +821,20 @@ impl Foxy {
         let active_renderer = if let Some(render_state) = cc.wgpu_render_state.as_ref() {
             // Reaching here means the instance, adapter and device all came up on
             // this backend, so it is safe to pin the next launch to it.
-            crate::core::utils::renderer_fallback::remember_graphics_backend(
-                render_state.adapter.get_info().backend.to_str(),
-            );
+            let info = render_state.adapter.get_info();
+            crate::core::utils::software_gl::note_software_renderer(&info.name);
+            if info.device_type == eframe::wgpu::DeviceType::Cpu {
+                crate::core::utils::software_gl::mark_software_ui();
+            }
+            crate::core::utils::renderer_fallback::remember_graphics_backend(info.backend.to_str());
             "wgpu"
         } else {
+            if let Some(gl) = cc.gl.as_ref() {
+                use eframe::glow::HasContext;
+                // GL_RENDERER, before the first progress frame.
+                let name = unsafe { gl.get_parameter_string(0x1F01) };
+                crate::core::utils::software_gl::note_software_renderer(&name);
+            }
             "glow"
         };
         app.initialize_agent_gui(&cc.egui_ctx, &agent_gui, active_renderer);
@@ -833,6 +844,7 @@ impl Foxy {
             app.sync_app_mode_navigation();
             return app;
         }
+        app.discard_stale_repository_check_cache();
         app.load_repositories();
         if app.load_repository_spaces() {
             app.reconcile_repository_space_paths();

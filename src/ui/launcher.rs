@@ -25,6 +25,19 @@ pub(crate) fn main(
     debug_modals: Vec<DebugModal>,
     mode_override: Option<crate::core::app_mode::AppMode>,
 ) {
+    if crate::core::utils::software_gl::configure_bundled_mesa() {
+        log::info!(
+            "CPU drawing is next to Foxy (opengl32.dll). Set GALLIUM_DRIVER or LP_NUM_THREADS to override it, or delete those libraries to use a graphics driver."
+        );
+    }
+    #[cfg(windows)]
+    if !crate::core::utils::software_gl::hardware_display_present()
+        && !crate::core::utils::software_gl::mesa_libraries_beside_exe()
+    {
+        log::warn!(
+            "No hardware display adapter was found. Windows virtual adapters only offer OpenGL 1.1, so the window may not open. Run the install command again to add CPU drawing."
+        );
+    }
     let icon = include_bytes!("icons/foxy_256.png");
     let image = match image::load_from_memory(icon) {
         Ok(img) => img.to_rgba8(),
@@ -80,9 +93,35 @@ pub(crate) fn main(
 
     if let Err(err) = result {
         log::error!("Failed to start Foxy UI: {}", err);
-        eprintln!("FATAL: Failed to start Foxy UI: {}", err);
-        eprintln!("This may be caused by graphics driver issues.");
+        let detail = err.to_string();
+        eprintln!("FATAL: Failed to start Foxy UI: {detail}");
+        if let Some(hint) = crate::core::utils::software_gl::graphics_startup_hint(&detail) {
+            eprintln!("{hint}");
+            show_graphics_startup_hint(&hint);
+        } else {
+            eprintln!("This may be caused by graphics driver issues.");
+        }
         std::process::exit(1);
+    }
+}
+
+fn show_graphics_startup_hint(hint: &str) {
+    #[cfg(windows)]
+    {
+        let text: Vec<u16> = hint.encode_utf16().chain(std::iter::once(0)).collect();
+        let title: Vec<u16> = "Foxy".encode_utf16().chain(std::iter::once(0)).collect();
+        unsafe {
+            winapi::um::winuser::MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                winapi::um::winuser::MB_OK | winapi::um::winuser::MB_ICONERROR,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hint;
     }
 }
 
@@ -246,6 +285,12 @@ fn preferred_renderer(stage: GraphicsLaunchStage) -> PreferredRenderer {
             "Ignoring unsupported FOXY_RENDERER value {:?}; expected wgpu or glow",
             renderer
         );
+    }
+
+    if crate::core::utils::software_gl::mesa_libraries_beside_exe() {
+        return PreferredRenderer::Glow {
+            reason: "CPU drawing libraries are next to Foxy.exe".to_string(),
+        };
     }
 
     if had_wgpu_crash_marker {

@@ -45,6 +45,14 @@ pub(super) enum ExternalAddonContextAction {
     Delete,
 }
 
+pub(super) fn should_toggle_addon_row_on_card_click(
+    card_clicked: bool,
+    popup_open_before_rows: bool,
+    child_control_interacted: bool,
+) -> bool {
+    card_clicked && !popup_open_before_rows && !child_control_interacted
+}
+
 pub(super) fn normalize_local_path_for_compare(path: &str) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -1334,5 +1342,222 @@ mod tests {
             "C:/mods/tfr-old",
             "C:/mods/tfr-new"
         ));
+    }
+
+    #[test]
+    fn dismissing_addon_context_menu_by_clicking_row_does_not_toggle_enabled_state() {
+        use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
+        use eframe::egui::{Event, PointerButton, Pos2, Rect, Sense, Vec2};
+
+        assert!(!should_toggle_addon_row_on_card_click(true, true, false));
+        assert!(!should_toggle_addon_row_on_card_click(true, false, true));
+        assert!(should_toggle_addon_row_on_card_click(true, false, false));
+
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0));
+        let mut enabled = [true, true];
+
+        let run_pass = |enabled: &mut [bool], events: Vec<Event>| -> (Pos2, Pos2) {
+            let mut row0_click_pos = Pos2::ZERO;
+            let mut row1_dismiss_pos = Pos2::ZERO;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let popup_open_before_rows = egui::Popup::is_any_open(ui.ctx());
+                    for (idx, row_enabled) in enabled.iter_mut().enumerate() {
+                        let (_, rect) = ui.allocate_space(Vec2::new(400.0, 40.0));
+                        let row_id = ui.make_persistent_id(("test_addon_row", idx));
+                        let response = ui.interact(rect, row_id, Sense::click());
+                        if idx == 0 {
+                            row0_click_pos = Pos2::new(rect.left() + 20.0, rect.center().y);
+                        } else {
+                            row1_dismiss_pos = Pos2::new(rect.right() - 20.0, rect.center().y);
+                        }
+                        if should_toggle_addon_row_on_card_click(
+                            response.clicked(),
+                            popup_open_before_rows,
+                            false,
+                        ) {
+                            *row_enabled = !*row_enabled;
+                        }
+                        let mut chosen = None;
+                        attach_context_menu(
+                            &response,
+                            &[ContextMenuItem::new(
+                                0u8,
+                                "Open addon directory".to_string(),
+                            )],
+                            &mut chosen,
+                        );
+                    }
+                },
+            );
+            output.textures_delta.clear();
+            (row0_click_pos, row1_dismiss_pos)
+        };
+
+        let (row0_click_pos, row1_dismiss_pos) = run_pass(&mut enabled, Vec::new());
+        run_pass(
+            &mut enabled,
+            vec![
+                Event::PointerMoved(row0_click_pos),
+                Event::PointerButton {
+                    pos: row0_click_pos,
+                    button: PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                Event::PointerButton {
+                    pos: row0_click_pos,
+                    button: PointerButton::Secondary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        run_pass(&mut enabled, Vec::new());
+        assert!(egui::Popup::is_any_open(&ctx));
+
+        run_pass(
+            &mut enabled,
+            vec![
+                Event::PointerMoved(row1_dismiss_pos),
+                Event::PointerButton {
+                    pos: row1_dismiss_pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                Event::PointerButton {
+                    pos: row1_dismiss_pos,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        run_pass(&mut enabled, Vec::new());
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert_eq!(enabled, [true, true]);
+
+        run_pass(
+            &mut enabled,
+            vec![
+                Event::PointerMoved(row0_click_pos),
+                Event::PointerButton {
+                    pos: row0_click_pos,
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                Event::PointerButton {
+                    pos: row0_click_pos,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        assert_eq!(enabled, [false, true]);
+    }
+
+    #[test]
+    fn addon_row_overlapping_checkbox_toggles_once_per_click() {
+        use crate::ui::context_menu::{ContextMenuItem, attach_context_menu};
+        use eframe::egui::{
+            Align, Event, Layout, PointerButton, Pos2, Rect, Sense, UiBuilder, Vec2,
+        };
+
+        let ctx = egui::Context::default();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 200.0));
+        let mut enabled = true;
+
+        let run_pass = |enabled: &mut bool, events: Vec<Event>| -> (Pos2, Pos2) {
+            let mut card_pos = Pos2::ZERO;
+            let mut checkbox_pos = Pos2::ZERO;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(viewport),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let popup_open_before_rows = egui::Popup::is_any_open(ui.ctx());
+                    let (_, card_rect) = ui.allocate_space(Vec2::new(400.0, 44.0));
+                    let row_id = ui.make_persistent_id(("test_overlap_row", 0usize));
+                    let context_response = ui.interact(card_rect, row_id, Sense::click());
+                    let checkbox_rect = Rect::from_min_size(
+                        Pos2::new(card_rect.right() - 28.0, card_rect.center().y - 10.0),
+                        Vec2::splat(20.0),
+                    );
+                    card_pos = Pos2::new(card_rect.left() + 24.0, card_rect.center().y);
+                    checkbox_pos = checkbox_rect.center();
+
+                    let mut row_enabled = *enabled;
+                    let checkbox_response = ui
+                        .scope_builder(
+                            UiBuilder::new()
+                                .max_rect(checkbox_rect)
+                                .layout(Layout::left_to_right(Align::Center)),
+                            |ui| Foxy::ui_state_checkbox(ui, &mut row_enabled, ""),
+                        )
+                        .inner;
+                    let checkbox_clicked = checkbox_response.clicked();
+                    if checkbox_response.changed() {
+                        *enabled = row_enabled;
+                    }
+                    if should_toggle_addon_row_on_card_click(
+                        context_response.clicked(),
+                        popup_open_before_rows,
+                        checkbox_clicked || checkbox_response.changed(),
+                    ) {
+                        *enabled = !*enabled;
+                    }
+                    let mut chosen = None;
+                    attach_context_menu(
+                        &context_response,
+                        &[ContextMenuItem::new(
+                            0u8,
+                            "Open addon directory".to_string(),
+                        )],
+                        &mut chosen,
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            (card_pos, checkbox_pos)
+        };
+
+        let (card_pos, checkbox_pos) = run_pass(&mut enabled, Vec::new());
+        let click_at = |enabled: &mut bool, pos: Pos2| {
+            run_pass(
+                enabled,
+                vec![
+                    Event::PointerMoved(pos),
+                    Event::PointerButton {
+                        pos,
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                    Event::PointerButton {
+                        pos,
+                        button: PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        };
+
+        click_at(&mut enabled, checkbox_pos);
+        assert!(!enabled);
+
+        click_at(&mut enabled, card_pos);
+        assert!(enabled);
     }
 }

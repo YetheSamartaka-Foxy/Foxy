@@ -356,12 +356,57 @@ fn refresh_game_build(idx: usize) -> Result<(), CommandError> {
     state.save_repositories()
 }
 
+fn apply_remote_addon_manifest(
+    repo: &mut Repository,
+    addon_manifest: &Value,
+    client_side_supported: bool,
+) {
+    let mut remote_client_side_addons = Vec::new();
+    let parse_list = |key: &str, default_enabled: bool, client_side: &mut Vec<String>| {
+        addon_manifest
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|mods| {
+                mods.iter()
+                    .filter_map(|m| {
+                        let name = m.get("modName").and_then(Value::as_str)?;
+                        let enabled = m
+                            .get("enabled")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(default_enabled);
+                        if m.get("clientSide")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                        {
+                            client_side.push(name.to_string());
+                        }
+                        Some((name.to_string(), enabled))
+                    })
+                    .collect::<Vec<_>>()
+            })
+    };
+
+    if let Some(addons) = parse_list("requiredMods", true, &mut remote_client_side_addons) {
+        repo.addons = addons;
+    }
+    if let Some(optional_addons) = parse_list("optionalMods", false, &mut remote_client_side_addons)
+    {
+        repo.optional_addons = optional_addons;
+    }
+    repo.remote_client_side_addons = if client_side_supported {
+        remote_client_side_addons
+    } else {
+        Vec::new()
+    };
+}
+
 fn populate_repo_from_remote_metadata(
     repo: &mut Repository,
     apply_client_parameters: bool,
     apply_dlc_content: bool,
 ) -> Result<(), String> {
-    let repo_url = format!("{}/repo.json", repo.address.trim_end_matches('/'));
+    let base_url = repo.address.trim_end_matches('/');
+    let repo_url = format!("{base_url}/repo.json");
     let response = get(&repo_url).map_err(|e| format!("Failed to fetch {}: {}", repo_url, e))?;
     if !response.status().is_success() {
         return Err(format!(
@@ -373,26 +418,37 @@ fn populate_repo_from_remote_metadata(
         .json::<Value>()
         .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-    if let Some(required_mods) = json.get("requiredMods").and_then(Value::as_array) {
-        repo.addons = required_mods
-            .iter()
-            .filter_map(|m| {
-                let name = m.get("modName").and_then(Value::as_str)?;
-                let enabled = m.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                Some((name.to_string(), enabled))
-            })
-            .collect();
+    let mut addon_manifest = json.clone();
+    if json
+        .get("foxyMode")
+        .and_then(Value::as_str)
+        .is_some_and(|mode| !mode.trim().is_empty())
+    {
+        let foxy_addons_url = format!("{base_url}/foxy_addons.json");
+        match get(&foxy_addons_url).and_then(reqwest::blocking::Response::error_for_status) {
+            Ok(addons_response) => match addons_response.json::<Value>() {
+                Ok(foxy_addons) => addon_manifest = foxy_addons,
+                Err(err) => log::warn!(
+                    "Failed to parse foxy_addons.json for {} ({}); using repo.json: {}",
+                    repo.name,
+                    foxy_addons_url,
+                    err
+                ),
+            },
+            Err(err) => log::warn!(
+                "Failed to fetch foxy_addons.json for {} ({}); using repo.json: {}",
+                repo.name,
+                foxy_addons_url,
+                err
+            ),
+        }
     }
-    if let Some(optional_mods) = json.get("optionalMods").and_then(Value::as_array) {
-        repo.optional_addons = optional_mods
-            .iter()
-            .filter_map(|m| {
-                let name = m.get("modName").and_then(Value::as_str)?;
-                let enabled = m.get("enabled").and_then(Value::as_bool).unwrap_or(false);
-                Some((name.to_string(), enabled))
-            })
-            .collect();
-    }
+
+    let client_side_supported = crate::core::game::registry()
+        .active()
+        .capabilities()
+        .client_side_addons;
+    apply_remote_addon_manifest(repo, &addon_manifest, client_side_supported);
     if let Some(servers) = json.get("servers").and_then(Value::as_array) {
         repo.servers = servers
             .iter()
@@ -465,5 +521,48 @@ fn repo_sync_mode_to_backend(mode: RepoSyncMode) -> SyncMode {
         RepoSyncMode::Recheck => SyncMode::RecheckOnly,
         RepoSyncMode::RecheckIntegrity => SyncMode::RecheckIntegrity,
         RepoSyncMode::Download => SyncMode::Download,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_remote_addon_manifest_reads_enabled_and_client_side_flags() {
+        let mut repo = Repository::default();
+        let manifest = json!({
+            "requiredMods": [
+                {"modName": "@ace", "enabled": true},
+                {"modName": "@disabled_mod", "enabled": false},
+                {"modName": "@client_req", "clientSide": true}
+            ],
+            "optionalMods": [
+                {"modName": "@opt_disabled", "enabled": false, "clientSide": true},
+                {"modName": "@opt_enabled", "enabled": true}
+            ]
+        });
+
+        apply_remote_addon_manifest(&mut repo, &manifest, true);
+
+        assert_eq!(
+            repo.addons,
+            vec![
+                ("@ace".to_string(), true),
+                ("@disabled_mod".to_string(), false),
+                ("@client_req".to_string(), true),
+            ]
+        );
+        assert_eq!(
+            repo.optional_addons,
+            vec![
+                ("@opt_disabled".to_string(), false),
+                ("@opt_enabled".to_string(), true),
+            ]
+        );
+        assert_eq!(
+            repo.remote_client_side_addons,
+            vec!["@client_req".to_string(), "@opt_disabled".to_string()]
+        );
     }
 }
