@@ -149,10 +149,65 @@ pub(crate) struct FileUpsertResult {
     previous: HashMap<String, FoxyModFile>,
 }
 
+enum LocalFilePresence {
+    Ready,
+    DifferentOrUnreadable,
+    Missing,
+}
+
+fn inspect_local_file_presence(path: &str, expected_len: u64) -> LocalFilePresence {
+    match crate::core::utils::profiling::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() == expected_len => LocalFilePresence::Ready,
+        Ok(_) => LocalFilePresence::DifferentOrUnreadable,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LocalFilePresence::Missing,
+        Err(_) => LocalFilePresence::DifferentOrUnreadable,
+    }
+}
+
+#[cfg(test)]
 fn file_present_with_expected_len(path: &str, expected_len: u64) -> bool {
-    crate::core::utils::profiling::fs::metadata(path)
-        .map(|meta| meta.is_file() && meta.len() == expected_len)
-        .unwrap_or(false)
+    matches!(
+        inspect_local_file_presence(path, expected_len),
+        LocalFilePresence::Ready
+    )
+}
+
+async fn clear_stale_local_state_for_missing_files(db: &FoxyDb, file_ids: &[i64]) {
+    if file_ids.is_empty() {
+        return;
+    }
+    let chunk_size = read_chunk_ids();
+    for chunk in file_ids.chunks(chunk_size) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
+        if let Err(err) = db
+            .execute_retry(
+                "clear missing file local checksum",
+                &format!(
+                    "UPDATE files SET local_checksum = '', local_content_hash = '' \
+                     WHERE id IN ({placeholders})"
+                ),
+                values.clone(),
+            )
+            .await
+        {
+            warn!("Failed to clear stale local checksums for missing files: {err}");
+            continue;
+        }
+        if let Err(err) = db
+            .execute_retry(
+                "clear missing subfile local checksum",
+                &format!(
+                    "UPDATE subfiles SET local_checksum = '', local_length = 0, local_start = 0 \
+                     WHERE file_id IN ({placeholders})"
+                ),
+                values,
+            )
+            .await
+        {
+            warn!("Failed to clear stale local part checksums for missing files: {err}");
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -481,7 +536,8 @@ pub(crate) async fn flush_pending_addon_file_links(context: Arc<FoxyContext>) {
                 let sql = format!(
                     "UPDATE addons SET remote_checksum = '' WHERE id IN ({id_placeholders})"
                 );
-                let id_values: Vec<DbValue> = id_chunk.iter().copied().map(DbValue::from).collect();
+                let id_values: Vec<DbValue> =
+                    id_chunk.iter().copied().map(DbValue::from).collect();
                 let _ = db
                     .execute_retry("invalidate failed addon links", &sql, id_values)
                     .await;
@@ -781,6 +837,10 @@ pub(crate) async fn apply_mod_file_rows(
             })
             .collect();
         let file_graph_states = load_file_remote_graph_states(&db, &manifest_file_ids).await;
+        let addon_dir_present = !mod_parent.local_path.trim().is_empty()
+            && crate::core::utils::profiling::fs::metadata(&mod_parent.local_path)
+                .is_ok_and(|meta| meta.is_dir());
+        let mut stale_missing_file_ids: Vec<i64> = Vec::new();
 
         for row in file_keys {
             let key = file_identity_key(&row.remote_path, &row.local_path);
@@ -801,8 +861,14 @@ pub(crate) async fn apply_mod_file_rows(
                     .copied()
                     .unwrap_or_default()
                     .complete();
-                let local_file_ready =
-                    file_present_with_expected_len(&file.local_path, file.length);
+                let presence = inspect_local_file_presence(&file.local_path, file.length);
+                let local_file_ready = matches!(presence, LocalFilePresence::Ready);
+                if addon_dir_present
+                    && matches!(presence, LocalFilePresence::Missing)
+                    && (!file.local_checksum.is_empty() || !file.local_content_hash.is_empty())
+                {
+                    stale_missing_file_ids.push(file.id as i64);
+                }
                 if remote_graph_unchanged
                     && !context
                         .forced_mod_refreshes
@@ -822,11 +888,25 @@ pub(crate) async fn apply_mod_file_rows(
                     );
                     continue;
                 }
-                all_rows_with_json.push((file.clone(), previous.cloned(), row.parts));
+                let mut current_file = file.clone();
+                let previous_for_parts =
+                    if addon_dir_present && matches!(presence, LocalFilePresence::Missing) {
+                        current_file.local_checksum.clear();
+                        current_file.local_content_hash.clear();
+                        None
+                    } else {
+                        previous.cloned()
+                    };
+                all_rows_with_json.push((current_file, previous_for_parts, row.parts));
             } else {
                 warn!("File record missing after upsert: {}", row.remote_path);
                 can_prune_file_links = false;
             }
+        }
+        if !stale_missing_file_ids.is_empty() {
+            stale_missing_file_ids.sort_unstable();
+            stale_missing_file_ids.dedup();
+            clear_stale_local_state_for_missing_files(&db, &stale_missing_file_ids).await;
         }
     }
 
@@ -1459,5 +1539,95 @@ mod tests {
             .unwrap();
         assert_eq!(addon.get_string("remote_checksum").unwrap(), "");
         assert!(context.has_transient_metadata_failure());
+    }
+
+    #[tokio::test]
+    async fn apply_mod_file_rows_clears_stale_local_checksum_for_missing_file_when_addon_exists() {
+        use crate::core::tasks::db_turso::build_test_database;
+
+        let dir = tempfile::tempdir().unwrap();
+        let addon_dir = dir.path().join("@mod_01");
+        std::fs::create_dir_all(&addon_dir).unwrap();
+        let missing_path = addon_dir.join("rolled_back.bisign");
+
+        let context = Arc::new(FoxyContext::new(
+            build_test_database().await,
+            reqwest::Client::new(),
+        ));
+        let db = context.db();
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, required, enabled, remote_checksum) \
+             VALUES (1, '@mod_01', 'https://repo.example.invalid/@mod_01', ?, 1, 1, 'NEW')",
+            params![addon_dir.to_string_lossy().to_string()],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) \
+             VALUES (10, 'rolled_back.bisign', 'https://repo.example.invalid/@mod_01/rolled_back.bisign', ?, 'OLD_MATCH', 'OLD_MATCH', 'OLD_CONTENT', 565, 0)",
+            params![missing_path.to_string_lossy().to_string()],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO subfiles (id, file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) \
+             VALUES (100, 10, 'p0', 565, 0, 565, 0, 'PART_OK', 'PART_OK', 0)",
+            params![],
+        )
+        .await
+        .unwrap();
+
+        let staged = StagedModFiles {
+            mod_parent: Arc::new(FoxyMod {
+                id: 1,
+                name: "@mod_01".to_string(),
+                remote_path: "https://repo.example.invalid/@mod_01".to_string(),
+                local_path: addon_dir.to_string_lossy().to_string(),
+                remote_checksum: "NEW".to_string(),
+                ..Default::default()
+            }),
+            file_keys: vec![StagedFileKey {
+                name: "rolled_back.bisign".to_string(),
+                remote_checksum: "OLD_MATCH".to_string(),
+                length: 565,
+                remote_path: "https://repo.example.invalid/@mod_01/rolled_back.bisign".to_string(),
+                local_path: missing_path.to_string_lossy().to_string(),
+                parts: vec![ManifestPart {
+                    path: "p0".to_string(),
+                    checksum: "PART_OK".to_string(),
+                    start: 0,
+                    length: 565,
+                }],
+                data_order: 0,
+            }],
+            http_download_duration: std::time::Duration::ZERO,
+            http_response_bytes: 0,
+            http_parse_duration: std::time::Duration::ZERO,
+            manifest_cached: false,
+            mod_start: Instant::now(),
+        };
+
+        let upsert = upsert_file_rows_batch(&db, std::slice::from_ref(&staged)).await;
+        apply_mod_file_rows(context, staged, &upsert).await;
+
+        let file = db
+            .query_one(
+                "SELECT local_checksum, local_content_hash FROM files WHERE id = 10",
+                params![],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(file.get_string("local_checksum").unwrap(), "");
+        assert_eq!(file.get_string("local_content_hash").unwrap(), "");
+        let part = db
+            .query_one(
+                "SELECT local_checksum FROM subfiles WHERE file_id = 10",
+                params![],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(part.get_string("local_checksum").unwrap(), "");
     }
 }

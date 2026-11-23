@@ -210,20 +210,21 @@ protected by `require_no_other_foxy`, not by a lock. See
 [`examples/perf-startup.example.json`](examples/perf-startup.example.json).
 
 Foxy ties saved repository check results and pending-update plans to the app
-version that wrote them. The record is `check_cache_app_version.json` in each
-game space. When that file is missing or names a different version than the
+build that wrote them. The record is `check_cache_app_version.json` in each
+game space (`app_version`, `git_hash`, `build_kind`, and `exe_blake3` of the
+running binary). When that file is missing or does not match the running
 binary, and `recheck_repositories_after_app_update` is on (the default, in
 `app_settings.json`), startup deletes those results and the pending-update
 rows, then remote-rechecks repositories that check on launch and writes a new
-cache for the running version. A `config_seed` is copied once per run, so
+cache for the running build. A `config_seed` is copied once per run, so
 iteration 0 of a startup case is that cold remote recheck whenever the seed's
 stamp does not match, and later iterations in the same run see the new stamp.
 Those later iterations no longer have the pending updates the seed started
 with. For a warm startup or recheck that must keep the seed's saved updates,
 set `recheck_repositories_after_app_update` to false in the seed, or write
-`{"app_version":"<running version>"}` into each seeded game space's
-`check_cache_app_version.json` before the run. Turning the setting off keeps
-the previous version's cache.
+the running binary's `app_version`, `git_hash`, `build_kind`, and `exe_blake3`
+into each seeded game space's `check_cache_app_version.json` before the run.
+Turning the setting off keeps the previous build's cache.
 
 ## Measuring memory
 

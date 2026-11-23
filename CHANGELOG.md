@@ -8,7 +8,7 @@
 
 ## Changed
 - Standalone Direct Downloads (in the desktop app and `foxy direct-download`) now use larger HTTP/2 flow-control windows for faster HTTPS transfers.
-- After Foxy is updated, saved repository check results and update plans from the previous version are discarded, and startup runs a fresh remote recheck for repositories that check on launch. The new results belong to the installed version. This is on by default and can be turned off in Application settings or with `foxy settings set --recheck-repositories-after-app-update false`.
+- After Foxy is updated or replaced with a different build (matching version, commit, build type, and binary BLAKE3 hash), saved repository check results and update plans from the previous build are discarded, and startup runs a fresh remote recheck for repositories that check on launch. The new results belong to the installed build. This is on by default and can be turned off in Application settings or with `foxy settings set --recheck-repositories-after-app-update false`.
 - Server tool: `create-space --layout pool --clean` no longer requires `--yes` (`--yes` is still accepted, and `--clean --dry-run` still previews removals without writing).
 
 ## Fixed
@@ -17,6 +17,7 @@
 - The update dialog no longer pushes its Update action button below the window when known local differences and the backup checkbox are displayed.
 - Compatible updates in repository spaces and shared folders are no longer falsely blocked by outdated local file metadata; Foxy refreshes the affected sibling addon manifests before checking for shared-file conflicts.
 - Files removed from a server's addon manifest remain listed as zero-byte deletions (including alongside addons with downloads) until removed in an approved update, without distorting download size estimates or deleting files still owned by another addon or repository.
+- Startup and quick repository checks now detect missing files that were previously installed and later removed (such as when a server rolls an addon back to an earlier version), reporting them as additions with matching file counts and transfer estimates instead of hiding them behind stale database checksums until download preparation.
 - Repositories sharing a folder now clean up obsolete files and complete remote checks without false cleanup prompts or failed refreshes; Foxy retries transient database snapshot conflicts automatically, re-verifies full mod state during integrity rechecks and forced redownloads with consistent addon-name matching across platforms, and stops promptly on cancellation right after checking the server.
 - Server tool: `create-space --per-repo-keys` with `--additional-keys` now writes keys only into each repository's own `keys` folder instead of also creating the combined keys folder. Add `--collect-keys` to get the combined folder as well.
 - Server tool: an explicit `modName` in `config.json` now overrides a wildcard match for the same source folder (for `enabled`, `clientSide`, or moving between `requiredMods` and `optionalMods`) instead of publishing a duplicate entry and leaving disabled mods in the server launch line. Other duplicate published mod names are rejected during `create` and `create-space` as well as `validate`.

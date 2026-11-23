@@ -1406,6 +1406,109 @@ async fn try_settle_empty_queue_clean(
     true
 }
 
+async fn clear_local_state_for_removed_paths(
+    db: &crate::core::db::FoxyDb,
+    repo_url: &str,
+    unexpected_by_mod: &HashMap<String, Vec<String>>,
+) {
+    let mut normalized_targets: HashSet<String> = HashSet::new();
+    let mut lookup_paths: Vec<String> = Vec::new();
+    for path in unexpected_by_mod.values().flatten() {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        normalized_targets.insert(crate::core::utils::content_hash::normalize_path(trimmed));
+        lookup_paths.push(trimmed.to_string());
+        let slash_variant = trimmed.replace('\\', "/");
+        if slash_variant != trimmed {
+            lookup_paths.push(slash_variant);
+        }
+    }
+    if normalized_targets.is_empty() {
+        return;
+    }
+    lookup_paths.sort();
+    lookup_paths.dedup();
+
+    let chunk_size = crate::core::tasks::init_database::read_chunk_ids();
+    let mut file_ids: Vec<i64> = Vec::new();
+    for chunk in lookup_paths.chunks(chunk_size) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT id FROM files \
+             WHERE local_path IN ({placeholders}) \
+             AND (local_checksum != '' OR local_content_hash != '') \
+             AND NOT EXISTS (SELECT 1 FROM addon_files af WHERE af.file_id = files.id)"
+        );
+        let values: Vec<DbValue> = chunk.iter().cloned().map(DbValue::from).collect();
+        if let Ok(rows) = db.query_all(&sql, values).await {
+            file_ids.extend(rows.iter().filter_map(|row| row.get_i64("id").ok()));
+        }
+    }
+
+    let prefix = format!("{}/", repo_url.trim_end_matches('/'));
+    let upper_bound = format!("{}0", repo_url.trim_end_matches('/'));
+    if let Ok(rows) = db
+        .query_all(
+            "SELECT id, local_path FROM files \
+             WHERE remote_path >= ? AND remote_path < ? \
+             AND (local_checksum != '' OR local_content_hash != '') \
+             AND NOT EXISTS (SELECT 1 FROM addon_files af WHERE af.file_id = files.id)",
+            params![prefix, upper_bound],
+        )
+        .await
+    {
+        for row in rows {
+            if let (Ok(id), Ok(local_path)) = (row.get_i64("id"), row.get_string("local_path"))
+                && normalized_targets.contains(&crate::core::utils::content_hash::normalize_path(
+                    &local_path,
+                ))
+            {
+                file_ids.push(id);
+            }
+        }
+    }
+
+    file_ids.sort_unstable();
+    file_ids.dedup();
+    if file_ids.is_empty() {
+        return;
+    }
+
+    for chunk in file_ids.chunks(chunk_size) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
+        if let Err(err) = db
+            .execute_retry(
+                "clear removed file local state",
+                &format!(
+                    "UPDATE files SET local_checksum = '', local_content_hash = '' \
+                     WHERE id IN ({placeholders})"
+                ),
+                values.clone(),
+            )
+            .await
+        {
+            warn!("Failed to clear local state for removed files: {err}");
+            continue;
+        }
+        if let Err(err) = db
+            .execute_retry(
+                "clear removed subfile local state",
+                &format!(
+                    "UPDATE subfiles SET local_checksum = '', local_length = 0, local_start = 0 \
+                     WHERE file_id IN ({placeholders})"
+                ),
+                values,
+            )
+            .await
+        {
+            warn!("Failed to clear local part state for removed files: {err}");
+        }
+    }
+}
+
 async fn settle_cleanup_only_addons_after_removal(
     context: Arc<FoxyContext>,
     repo_url: &str,
@@ -4534,6 +4637,8 @@ async fn run_repository_pipeline(
         )
         .await;
     }
+    clear_local_state_for_removed_paths(&context.db(), &normalized_repo_url, &unexpected_by_mod)
+        .await;
     let mut post_cleanup_diff = settle_cleanup_only_addons_after_removal(
         context.clone(),
         &normalized_repo_url,
@@ -6210,5 +6315,80 @@ mod tests {
             shared_file.exists(),
             "file still published by refreshed sibling must stay on disk"
         );
+    }
+
+    #[tokio::test]
+    async fn clearing_local_state_for_removed_paths_resets_unlinked_rows_only() {
+        let db = FoxyDb::from_turso(crate::core::tasks::db_turso::build_test_database().await);
+        db.execute(
+            "INSERT INTO addons (id, name, remote_path, local_path, required, enabled) VALUES (1, '@mod_01', 'https://repo.example.invalid/@mod_01', 'R:/Mods/MainRepo/@mod_01', 1, 1)",
+            params![],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) VALUES \
+             (10, 'old.bisign', 'https://repo.example.invalid/@mod_01/old.bisign', 'R:/Mods/MainRepo/@mod_01/old.bisign', 'OLD', 'OLD', 'HASH', 10, 0), \
+             (11, 'kept.pbo', 'https://repo.example.invalid/@mod_01/kept.pbo', 'R:/Mods/MainRepo/@mod_01/kept.pbo', 'KEPT', 'KEPT', 'HASH', 10, 1)",
+            params![],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO addon_files (addon_id, file_id) VALUES (1, 11)",
+            params![],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO subfiles (id, file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) VALUES \
+             (100, 10, 'p0', 10, 0, 10, 0, 'PART_OLD', 'PART_OLD', 0), \
+             (101, 11, 'p0', 10, 0, 10, 0, 'PART_KEPT', 'PART_KEPT', 0)",
+            params![],
+        )
+        .await
+        .unwrap();
+
+        let mut unexpected = HashMap::new();
+        unexpected.insert(
+            "@mod_01".to_string(),
+            vec![
+                r"R:\Mods\MainRepo\@mod_01\old.bisign".to_string(),
+                r"R:\Mods\MainRepo\@mod_01\kept.pbo".to_string(),
+            ],
+        );
+        clear_local_state_for_removed_paths(&db, "https://repo.example.invalid/", &unexpected)
+            .await;
+
+        let unlinked = db
+            .query_one(
+                "SELECT local_checksum, local_content_hash FROM files WHERE id = 10",
+                params![],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unlinked.get_string("local_checksum").unwrap(), "");
+        assert_eq!(unlinked.get_string("local_content_hash").unwrap(), "");
+        let unlinked_part = db
+            .query_one(
+                "SELECT local_checksum FROM subfiles WHERE file_id = 10",
+                params![],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unlinked_part.get_string("local_checksum").unwrap(), "");
+
+        let linked = db
+            .query_one(
+                "SELECT local_checksum, local_content_hash FROM files WHERE id = 11",
+                params![],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(linked.get_string("local_checksum").unwrap(), "KEPT");
+        assert_eq!(linked.get_string("local_content_hash").unwrap(), "HASH");
     }
 }
