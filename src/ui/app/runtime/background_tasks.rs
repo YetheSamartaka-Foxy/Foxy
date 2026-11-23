@@ -691,24 +691,84 @@ impl Foxy {
             return;
         }
 
-        if self.pending_quick_scan_urls.is_empty() {
-            return;
+        self.flush_deferred_quick_scans();
+    }
+
+    fn take_ready_deferred_quick_scan_batch(
+        deferred_fs_scan: &mut HashSet<String>,
+        fs_watch_scan_urls: &mut HashSet<String>,
+        pending_quick_scan_urls: &mut HashSet<String>,
+        pending_quick_scan_prevalidated_urls: &mut HashSet<String>,
+        pending_quick_scan_force_fresh_addon_hash_urls: &mut HashSet<String>,
+        pending_repository_db_wipes: &HashSet<String>,
+    ) -> Option<(Vec<String>, HashSet<String>, HashSet<String>)> {
+        if !deferred_fs_scan.is_empty() {
+            for repo_url in deferred_fs_scan.drain() {
+                if repo_url.trim().is_empty() {
+                    continue;
+                }
+                let normalized = Self::normalize_repo_url(&repo_url);
+                fs_watch_scan_urls.insert(normalized.clone());
+                pending_quick_scan_urls.insert(normalized.clone());
+                pending_quick_scan_prevalidated_urls.remove(&normalized);
+                pending_quick_scan_force_fresh_addon_hash_urls.insert(normalized);
+            }
         }
 
-        let repo_urls: Vec<String> = self.pending_quick_scan_urls.drain().collect();
+        if pending_quick_scan_urls.is_empty() {
+            return None;
+        }
+
+        // A scan racing a purge of the same repository would write its
+        // verdict and hashes back over the rows being wiped.
+        let (repo_urls, held_urls): (Vec<String>, Vec<String>) = pending_quick_scan_urls
+            .drain()
+            .partition(|url| !pending_repository_db_wipes.contains(&Self::normalize_repo_url(url)));
+        pending_quick_scan_urls.extend(held_urls);
+        if repo_urls.is_empty() {
+            return None;
+        }
+
         let prevalidated_repo_urls: HashSet<String> = repo_urls
             .iter()
-            .filter(|url| self.pending_quick_scan_prevalidated_urls.remove(*url))
+            .filter(|url| pending_quick_scan_prevalidated_urls.remove(*url))
             .cloned()
             .collect();
         let force_fresh_addon_hash_repo_urls: HashSet<String> = repo_urls
             .iter()
-            .filter(|url| {
-                self.pending_quick_scan_force_fresh_addon_hash_urls
-                    .remove(*url)
-            })
+            .filter(|url| pending_quick_scan_force_fresh_addon_hash_urls.remove(*url))
             .cloned()
             .collect();
+        Some((
+            repo_urls,
+            prevalidated_repo_urls,
+            force_fresh_addon_hash_repo_urls,
+        ))
+    }
+
+    pub(in crate::ui::app) fn flush_deferred_quick_scans(&mut self) {
+        if self.database_updates_blocked()
+            || self.repository_sync_active()
+            || self.retained_files_cleanup_in_flight
+            || self.pending_retained_file_removal.is_some()
+            || self.quick_scan_worker.is_some()
+        {
+            return;
+        }
+
+        let Some((repo_urls, prevalidated_repo_urls, force_fresh_addon_hash_repo_urls)) =
+            Self::take_ready_deferred_quick_scan_batch(
+                &mut self.deferred_fs_scan,
+                &mut self.fs_watch_scan_urls,
+                &mut self.pending_quick_scan_urls,
+                &mut self.pending_quick_scan_prevalidated_urls,
+                &mut self.pending_quick_scan_force_fresh_addon_hash_urls,
+                &self.pending_repository_db_wipes,
+            )
+        else {
+            return;
+        };
+
         info!(
             "Starting quick scan worker for {} repositories",
             repo_urls.len()
@@ -888,49 +948,7 @@ impl Foxy {
                 self.quick_scan_progress_by_instance.clear();
                 self.needs_repaint = true;
             }
-            if !self.database_updates_blocked()
-                && self.syncing_repository.is_none()
-                && !self.pending_quick_scan_urls.is_empty()
-            {
-                // A scan racing a purge of the same repository would write its
-                // verdict and hashes back over the rows being wiped.
-                let (repo_urls, held_urls): (Vec<String>, Vec<String>) =
-                    self.pending_quick_scan_urls.drain().partition(|url| {
-                        !self
-                            .pending_repository_db_wipes
-                            .contains(&Self::normalize_repo_url(url))
-                    });
-                self.pending_quick_scan_urls.extend(held_urls);
-                if repo_urls.is_empty() {
-                    return;
-                }
-                let prevalidated_repo_urls: HashSet<String> = repo_urls
-                    .iter()
-                    .filter(|url| self.pending_quick_scan_prevalidated_urls.remove(*url))
-                    .cloned()
-                    .collect();
-                let force_fresh_addon_hash_repo_urls: HashSet<String> = repo_urls
-                    .iter()
-                    .filter(|url| {
-                        self.pending_quick_scan_force_fresh_addon_hash_urls
-                            .remove(*url)
-                    })
-                    .cloned()
-                    .collect();
-                info!(
-                    "Restarting quick scan worker for {} queued repositories",
-                    repo_urls.len()
-                );
-                self.mark_quick_scan_urls_active(&repo_urls);
-                self.quick_scan_worker = Some(api::spawn_quick_local_scan(
-                    repo_urls,
-                    prevalidated_repo_urls,
-                    force_fresh_addon_hash_repo_urls,
-                    self.quick_scan_tx.clone(),
-                    Some(self.quick_scan_progress_tx.clone()),
-                    self.repaint_ctx.clone(),
-                ));
-            }
+            self.flush_deferred_quick_scans();
         }
     }
 
@@ -1628,5 +1646,36 @@ mod tests {
         assert_eq!(pending, 0);
         assert_eq!(forced, 1);
         assert_eq!(force_remote_recheck, HashSet::from([still_offline]));
+    }
+
+    #[test]
+    fn deferred_quick_scan_batch_preserves_flags_merges_fs_scans_and_holds_wiped_repos() {
+        let sibling_a = "https://repo.example.invalid/sibling_a/".to_string();
+        let sibling_b = "https://repo.example.invalid/sibling_b/".to_string();
+        let fs_repo = "https://repo.example.invalid/fs_repo/".to_string();
+        let mut deferred_fs_scan = HashSet::from([fs_repo.clone()]);
+        let mut fs_watch_scan_urls = HashSet::new();
+        let mut pending_quick_scan_urls = HashSet::from([sibling_a.clone(), sibling_b.clone()]);
+        let mut prevalidated = HashSet::from([sibling_a.clone(), fs_repo.clone()]);
+        let mut force_fresh = HashSet::from([sibling_a.clone()]);
+        let wipes = HashSet::from([sibling_b.clone()]);
+
+        let (urls, prevalidated_out, force_fresh_out) = Foxy::take_ready_deferred_quick_scan_batch(
+            &mut deferred_fs_scan,
+            &mut fs_watch_scan_urls,
+            &mut pending_quick_scan_urls,
+            &mut prevalidated,
+            &mut force_fresh,
+            &wipes,
+        )
+        .expect("ready batch");
+
+        let url_set: HashSet<String> = urls.into_iter().collect();
+        assert_eq!(url_set, HashSet::from([sibling_a.clone(), fs_repo.clone()]));
+        assert_eq!(pending_quick_scan_urls, HashSet::from([sibling_b]));
+        assert!(deferred_fs_scan.is_empty());
+        assert_eq!(fs_watch_scan_urls, HashSet::from([fs_repo.clone()]));
+        assert_eq!(prevalidated_out, HashSet::from([sibling_a.clone()]));
+        assert_eq!(force_fresh_out, HashSet::from([sibling_a, fs_repo]));
     }
 }

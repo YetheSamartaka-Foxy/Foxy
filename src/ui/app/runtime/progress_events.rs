@@ -1232,6 +1232,7 @@ impl Foxy {
                         let path = repo.path.clone();
                         self.clear_quick_scan_instance_active(&address, &path);
                         if finished_successfully {
+                            self.clear_queued_quick_scan_for_url(&address);
                             if last_mode == Some(SyncMode::Download) {
                                 self.set_repo_state_for_address(&address, &path, RepoState::Synced);
                             } else if had_updates {
@@ -1331,17 +1332,6 @@ impl Foxy {
                     self.recheck_progress_floor = None;
                     self.recheck_hash_estimate = None;
                     self.memory_diagnostics_last_logged_stage_key = None;
-                    if self.syncing_repository.is_none() && !self.deferred_fs_scan.is_empty() {
-                        let repo_urls: Vec<String> = self.deferred_fs_scan.drain().collect();
-                        self.queue_quick_scan_for_urls_from_fs(repo_urls);
-                    }
-                    if self.syncing_repository.is_none()
-                        && self.quick_scan_worker.is_none()
-                        && !self.pending_quick_scan_urls.is_empty()
-                    {
-                        let repo_urls: Vec<String> = self.pending_quick_scan_urls.drain().collect();
-                        self.queue_quick_scan_for_urls(repo_urls);
-                    }
                     self.needs_repaint = true;
                 }
                 ProgressEvent::Stage { label, percent } => {
