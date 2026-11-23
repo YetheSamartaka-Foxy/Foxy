@@ -172,12 +172,36 @@ fn file_present_with_expected_len(path: &str, expected_len: u64) -> bool {
     )
 }
 
-async fn clear_stale_local_state_for_missing_files(db: &FoxyDb, file_ids: &[i64]) {
-    if file_ids.is_empty() {
+async fn clear_stale_local_state_for_missing_files(
+    db: &FoxyDb,
+    file_ids: &[i64],
+    missing_local_paths: &[String],
+) {
+    let mut target_ids: Vec<i64> = file_ids.to_vec();
+    let chunk_size = read_chunk_ids();
+    for chunk in missing_local_paths.chunks(chunk_size) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT id FROM files \
+             WHERE local_path IN ({placeholders}) \
+             AND (local_checksum != '' OR local_content_hash != '')"
+        );
+        let values: Vec<DbValue> = chunk.iter().cloned().map(DbValue::from).collect();
+        match db.query_all(&sql, values).await {
+            Ok(rows) => {
+                target_ids.extend(rows.iter().filter_map(|row| row.get_i64("id").ok()));
+            }
+            Err(err) => {
+                warn!("Failed to look up sibling missing files to clear local checksums: {err}");
+            }
+        }
+    }
+    target_ids.sort_unstable();
+    target_ids.dedup();
+    if target_ids.is_empty() {
         return;
     }
-    let chunk_size = read_chunk_ids();
-    for chunk in file_ids.chunks(chunk_size) {
+    for chunk in target_ids.chunks(chunk_size) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let values: Vec<DbValue> = chunk.iter().copied().map(DbValue::from).collect();
         if let Err(err) = db
@@ -536,8 +560,7 @@ pub(crate) async fn flush_pending_addon_file_links(context: Arc<FoxyContext>) {
                 let sql = format!(
                     "UPDATE addons SET remote_checksum = '' WHERE id IN ({id_placeholders})"
                 );
-                let id_values: Vec<DbValue> =
-                    id_chunk.iter().copied().map(DbValue::from).collect();
+                let id_values: Vec<DbValue> = id_chunk.iter().copied().map(DbValue::from).collect();
                 let _ = db
                     .execute_retry("invalidate failed addon links", &sql, id_values)
                     .await;
@@ -841,6 +864,7 @@ pub(crate) async fn apply_mod_file_rows(
             && crate::core::utils::profiling::fs::metadata(&mod_parent.local_path)
                 .is_ok_and(|meta| meta.is_dir());
         let mut stale_missing_file_ids: Vec<i64> = Vec::new();
+        let mut missing_local_paths: Vec<String> = Vec::new();
 
         for row in file_keys {
             let key = file_identity_key(&row.remote_path, &row.local_path);
@@ -863,11 +887,13 @@ pub(crate) async fn apply_mod_file_rows(
                     .complete();
                 let presence = inspect_local_file_presence(&file.local_path, file.length);
                 let local_file_ready = matches!(presence, LocalFilePresence::Ready);
-                if addon_dir_present
-                    && matches!(presence, LocalFilePresence::Missing)
-                    && (!file.local_checksum.is_empty() || !file.local_content_hash.is_empty())
-                {
-                    stale_missing_file_ids.push(file.id as i64);
+                if addon_dir_present && matches!(presence, LocalFilePresence::Missing) {
+                    if !file.local_path.trim().is_empty() {
+                        missing_local_paths.push(file.local_path.clone());
+                    }
+                    if !file.local_checksum.is_empty() || !file.local_content_hash.is_empty() {
+                        stale_missing_file_ids.push(file.id as i64);
+                    }
                 }
                 if remote_graph_unchanged
                     && !context
@@ -903,10 +929,15 @@ pub(crate) async fn apply_mod_file_rows(
                 can_prune_file_links = false;
             }
         }
-        if !stale_missing_file_ids.is_empty() {
-            stale_missing_file_ids.sort_unstable();
-            stale_missing_file_ids.dedup();
-            clear_stale_local_state_for_missing_files(&db, &stale_missing_file_ids).await;
+        if !stale_missing_file_ids.is_empty() || !missing_local_paths.is_empty() {
+            missing_local_paths.sort();
+            missing_local_paths.dedup();
+            clear_stale_local_state_for_missing_files(
+                &db,
+                &stale_missing_file_ids,
+                &missing_local_paths,
+            )
+            .await;
         }
     }
 
@@ -1564,14 +1595,19 @@ mod tests {
         .unwrap();
         db.execute(
             "INSERT INTO files (id, name, remote_path, local_path, local_checksum, remote_checksum, local_content_hash, length, data_order) \
-             VALUES (10, 'rolled_back.bisign', 'https://repo.example.invalid/@mod_01/rolled_back.bisign', ?, 'OLD_MATCH', 'OLD_MATCH', 'OLD_CONTENT', 565, 0)",
-            params![missing_path.to_string_lossy().to_string()],
+             VALUES (10, 'rolled_back.bisign', 'https://repo.example.invalid/@mod_01/rolled_back.bisign', ?, 'OLD_MATCH', 'OLD_MATCH', 'OLD_CONTENT', 565, 0), \
+                    (11, 'rolled_back.bisign', 'https://repo.example.invalid/sibling/@mod_01/rolled_back.bisign', ?, 'OLD_MATCH', 'OLD_MATCH', 'OLD_CONTENT', 565, 0)",
+            params![
+                missing_path.to_string_lossy().to_string(),
+                missing_path.to_string_lossy().to_string()
+            ],
         )
         .await
         .unwrap();
         db.execute(
             "INSERT INTO subfiles (id, file_id, path, local_length, local_start, remote_length, remote_start, local_checksum, remote_checksum, data_order) \
-             VALUES (100, 10, 'p0', 565, 0, 565, 0, 'PART_OK', 'PART_OK', 0)",
+             VALUES (100, 10, 'p0', 565, 0, 565, 0, 'PART_OK', 'PART_OK', 0), \
+                    (101, 11, 'p0', 565, 0, 565, 0, 'PART_OK', 'PART_OK', 0)",
             params![],
         )
         .await
@@ -1610,24 +1646,26 @@ mod tests {
         let upsert = upsert_file_rows_batch(&db, std::slice::from_ref(&staged)).await;
         apply_mod_file_rows(context, staged, &upsert).await;
 
-        let file = db
-            .query_one(
-                "SELECT local_checksum, local_content_hash FROM files WHERE id = 10",
-                params![],
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(file.get_string("local_checksum").unwrap(), "");
-        assert_eq!(file.get_string("local_content_hash").unwrap(), "");
-        let part = db
-            .query_one(
-                "SELECT local_checksum FROM subfiles WHERE file_id = 10",
-                params![],
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(part.get_string("local_checksum").unwrap(), "");
+        for file_id in [10i64, 11i64] {
+            let file = db
+                .query_one(
+                    "SELECT local_checksum, local_content_hash FROM files WHERE id = ?",
+                    params![file_id],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(file.get_string("local_checksum").unwrap(), "");
+            assert_eq!(file.get_string("local_content_hash").unwrap(), "");
+            let part = db
+                .query_one(
+                    "SELECT local_checksum FROM subfiles WHERE file_id = ?",
+                    params![file_id],
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(part.get_string("local_checksum").unwrap(), "");
+        }
     }
 }
