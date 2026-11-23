@@ -634,6 +634,160 @@ fn wildcard_with_explicit_disabled_override_excludes_mod_from_server_line() {
     assert_eq!(mod_02["enabled"], false);
 }
 
+#[test]
+fn create_prunes_stale_output_keys_but_preserves_external_keys_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods");
+    for (mod_name, key) in [("@mod_01", "one.bikey"), ("@mod_02", "two.bikey")] {
+        std::fs::create_dir_all(mods.join(mod_name).join("keys")).unwrap();
+        std::fs::write(mods.join(mod_name).join("data.txt"), mod_name).unwrap();
+        std::fs::write(mods.join(mod_name).join("keys").join(key), key).unwrap();
+    }
+    let config = dir.path().join("config.json");
+    write_json(
+        &config,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": mods,
+            "requiredMods": [{"modName": "@mod_01"}, {"modName": "@mod_02"}]
+        }),
+    );
+    let output = dir.path().join("output");
+    let external_keys = dir.path().join("external-keys");
+    std::fs::create_dir_all(&external_keys).unwrap();
+    std::fs::write(external_keys.join("manual.bikey"), b"manual").unwrap();
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let run = |extra_args: &[&str]| {
+        let mut cmd = Command::new(bin);
+        cmd.arg("create")
+            .arg(&config)
+            .arg(&output)
+            .arg("--no-progress")
+            .args(extra_args);
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    run(&["--collect-keys"]);
+    assert!(output.join("keys").join("one.bikey").exists());
+    assert!(output.join("keys").join("two.bikey").exists());
+
+    write_json(
+        &config,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": mods,
+            "requiredMods": [{"modName": "@mod_01"}]
+        }),
+    );
+
+    run(&["--collect-keys"]);
+    assert!(output.join("keys").join("one.bikey").exists());
+    assert!(!output.join("keys").join("two.bikey").exists());
+
+    let ext = external_keys.to_string_lossy().into_owned();
+    run(&["--keys-output", &ext]);
+    assert!(external_keys.join("one.bikey").exists());
+    assert!(external_keys.join("manual.bikey").exists());
+}
+
+#[test]
+fn space_clean_removes_orphan_pool_mod_and_stale_keys_without_yes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods");
+    for (mod_name, key) in [("@mod_01", "one.bikey"), ("@mod_02", "two.bikey")] {
+        std::fs::create_dir_all(mods.join(mod_name).join("keys")).unwrap();
+        std::fs::write(mods.join(mod_name).join("data.txt"), mod_name).unwrap();
+        std::fs::write(mods.join(mod_name).join("keys").join(key), key).unwrap();
+    }
+    let repo_cfg = dir.path().join("one.json");
+    write_json(
+        &repo_cfg,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": mods,
+            "requiredMods": [{"modName": "@mod_01"}, {"modName": "@mod_02"}]
+        }),
+    );
+    let space = dir.path().join("space.json");
+    write_json(
+        &space,
+        json!({
+            "name": "MainSpace",
+            "baseUrl": "https://repo.example.invalid/space/",
+            "repositories": [{"config": "one.json", "folder": "one"}]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+
+    let first = Command::new(bin)
+        .arg("create-space")
+        .arg(&space)
+        .arg(&output)
+        .args([
+            "--layout",
+            "pool",
+            "--collect-keys",
+            "--per-repo-keys",
+            "--no-progress",
+        ])
+        .output()
+        .unwrap();
+    if !first.status.success() {
+        let stderr = String::from_utf8_lossy(&first.stderr);
+        if cfg!(windows) && stderr.contains("privilege") {
+            return;
+        }
+        panic!("first create-space failed: {stderr}");
+    }
+    assert!(output.join("pool").join("@mod_02").exists());
+    assert!(output.join("keys").join("two.bikey").exists());
+    assert!(output.join("one").join("keys").join("two.bikey").exists());
+
+    write_json(
+        &repo_cfg,
+        json!({
+            "repoName": "MainRepo",
+            "basePath": mods,
+            "requiredMods": [{"modName": "@mod_01"}]
+        }),
+    );
+
+    // Run --clean without --yes and verify orphan mod, symlink, and stale keys are all removed.
+    let second = Command::new(bin)
+        .arg("create-space")
+        .arg(&space)
+        .arg(&output)
+        .args([
+            "--layout",
+            "pool",
+            "--clean",
+            "--collect-keys",
+            "--per-repo-keys",
+            "--no-progress",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(output.join("pool").join("@mod_01").exists());
+    assert!(!output.join("pool").join("@mod_02").exists());
+    assert!(std::fs::symlink_metadata(output.join("one").join("@mod_02")).is_err());
+    assert!(output.join("keys").join("one.bikey").exists());
+    assert!(!output.join("keys").join("two.bikey").exists());
+    assert!(output.join("one").join("keys").join("one.bikey").exists());
+    assert!(!output.join("one").join("keys").join("two.bikey").exists());
+}
+
 fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed;
     (0..len)

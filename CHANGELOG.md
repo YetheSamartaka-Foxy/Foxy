@@ -4,10 +4,12 @@
 - On a Windows server or virtual machine with only a basic or virtual display adapter, the install command adds CPU drawing next to Foxy so the window can open without a graphics driver. Drawing uses at most 4 processor threads, and the picture updates about 4 times a second.
 - When joining a server requires enabling disabled local addons from the repository, the confirmation dialog now offers an option to save those newly enabled addons to your active profile before launching (checked by default when disabled required addons are listed).
 - Server tool: `create` and `create-space` now accept `--no-mod-line-files` to skip checking and rewriting `modLineFiles` for a run, useful for test builds.
+- Static direct-download links for the newest Foxy installer are now available on the install site (`https://yethesamartaka-foxy.github.io/Foxy/download/` for auto-detection, or `/download/windows/`, `/download/linux/`, `/download/linux-arm64/`, and `/download/macos/`).
 
 ## Changed
 - Standalone Direct Downloads (in the desktop app and `foxy direct-download`) now use larger HTTP/2 flow-control windows for faster HTTPS transfers.
 - After Foxy is updated, saved repository check results and update plans from the previous version are discarded, and startup runs a fresh remote recheck for repositories that check on launch. The new results belong to the installed version. This is on by default and can be turned off in Application settings or with `foxy settings set --recheck-repositories-after-app-update false`.
+- Server tool: `create-space --layout pool --clean` no longer requires `--yes` (`--yes` is still accepted, and `--clean --dry-run` still previews removals without writing).
 
 ## Fixed
 - Newly added mods keep their published `enabled` default in existing saved profiles, and `foxy repo add` now reads `foxy_addons.json` for FoxyMode repositories so published `enabled` flags apply there too.
@@ -18,6 +20,7 @@
 - Repositories sharing a folder now clean up obsolete files and complete remote checks without false cleanup prompts or failed refreshes; Foxy retries transient database snapshot conflicts automatically, re-verifies full mod state during integrity rechecks and forced redownloads with consistent addon-name matching across platforms, and stops promptly on cancellation right after checking the server.
 - Server tool: `create-space --per-repo-keys` with `--additional-keys` now writes keys only into each repository's own `keys` folder instead of also creating the combined keys folder. Add `--collect-keys` to get the combined folder as well.
 - Server tool: an explicit `modName` in `config.json` now overrides a wildcard match for the same source folder (for `enabled`, `clientSide`, or moving between `requiredMods` and `optionalMods`) instead of publishing a duplicate entry and leaving disabled mods in the server launch line. Other duplicate published mod names are rejected during `create` and `create-space` as well as `validate`.
+- Server tool: collecting keys into output-managed folders (`<output>/keys` and `<output>/<folder>/keys`) now clears stale `.bikey` files from removed mods while keeping external `--keys-output` folders non-destructive, and `create-space --layout pool --clean` also removes stale repository symlinks when a shared mod is dropped from one repository.
 
 # 1.2.2
 ## Added

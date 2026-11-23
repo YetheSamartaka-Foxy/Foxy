@@ -886,9 +886,6 @@ pub fn cmd_create_space(
     if clean && layout != SpaceLayout::Pool {
         bail!("--clean requires --layout pool");
     }
-    if clean && !dry_run && !yes {
-        bail!("--clean removes generated files; preview with --dry-run or re-run with --yes");
-    }
     if !only.is_empty() && clean {
         bail!(
             "--only cannot be combined with --clean because other repositories still use the pool"
@@ -1012,7 +1009,7 @@ pub fn cmd_create_space(
             plan.add("replace-output", output_dir, 0);
         }
         if clean {
-            let cleanup = cleanup::plan_cleanup(output_dir, &pool_dir, &groups)?;
+            let cleanup = cleanup::plan_cleanup(output_dir, &pool_dir, &space.repos, &groups)?;
             for link in cleanup.links() {
                 plan.add("remove-link", link, 0);
             }
@@ -1035,6 +1032,7 @@ pub fn cmd_create_space(
                 &dest,
                 &key_collection.additional_sources,
                 prune_unused_optionals,
+                keys::path_is_within(&dest, output_dir),
             )?;
         }
         if per_repo_keys {
@@ -1044,6 +1042,7 @@ pub fn cmd_create_space(
                     &output_dir.join(&repo.folder).join(DEFAULT_KEYS_DIR),
                     &key_collection.additional_sources,
                     prune_unused_optionals,
+                    true,
                 )?;
             }
         }
@@ -1096,7 +1095,7 @@ pub fn cmd_create_space(
         )?;
     }
     if clean {
-        cleanup::plan_cleanup(output_dir, &pool_dir, &groups)?;
+        cleanup::plan_cleanup(output_dir, &pool_dir, &space.repos, &groups)?;
     }
 
     let progress = crate::progress_bar(no_progress);
@@ -1154,6 +1153,7 @@ pub fn cmd_create_space(
             &keys::KeyCollectionOptions {
                 dest: &keys_dir,
                 additional_sources: &key_collection.additional_sources,
+                prune_stale: keys::path_is_within(&keys_dir, output_dir),
             },
         )?;
         for name in &report.conflicts {
@@ -1178,6 +1178,7 @@ pub fn cmd_create_space(
                 &keys::KeyCollectionOptions {
                     dest: &dest,
                     additional_sources: &key_collection.additional_sources,
+                    prune_stale: true,
                 },
             )?;
             for name in &report.conflicts {
@@ -1219,7 +1220,7 @@ pub fn cmd_create_space(
 
     if layout == SpaceLayout::Pool {
         if clean {
-            let report = cleanup::plan_cleanup(output_dir, &pool_dir, &groups)?;
+            let report = cleanup::plan_cleanup(output_dir, &pool_dir, &space.repos, &groups)?;
             report.execute()?;
             report.print(false);
         }
@@ -1269,6 +1270,9 @@ pub fn cmd_create_space(
     }
     if let Some(report) = &key_report {
         println!("  Keys:       {} in {}", report.copied, keys_dir.display());
+        if report.removed > 0 {
+            println!("              {} stale keys removed", report.removed);
+        }
         if report.duplicates > 0 {
             println!("              {} duplicate keys skipped", report.duplicates);
         }
@@ -1282,6 +1286,9 @@ pub fn cmd_create_space(
     }
     for (dest, report) in &repo_key_reports {
         println!("  Keys:       {} in {}", report.copied, dest.display());
+        if report.removed > 0 {
+            println!("              {} stale keys removed", report.removed);
+        }
         if report.duplicates > 0 {
             println!("              {} duplicate keys skipped", report.duplicates);
         }

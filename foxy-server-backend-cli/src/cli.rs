@@ -128,10 +128,10 @@ pub enum Command {
         /// Shared mod folder for --layout pool (default: <output>/pool)
         #[arg(long, value_name = "DIR")]
         pool_dir: Option<PathBuf>,
-        /// Accept source manifest writes with link, output pruning, or pool cleanup
+        /// Accept source manifest writes with link, output pruning, or atomic replacement
         #[arg(long)]
         yes: bool,
-        /// Remove orphaned generated pool mods and their repository symlinks
+        /// Remove orphaned generated pool mods and their repository symlinks (does not require --yes)
         #[arg(long)]
         clean: bool,
         /// Preview generation, overwrites, pruning, and optional cleanup without writing

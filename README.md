@@ -3,7 +3,7 @@
 Foxy is a modern repository updater (Intended primarily for Arma 3 from the start) built from the ground up for speed, reliability, and automation.
 It ships as a single binary with both a full desktop UI and a scriptable CLI, runs on Windows and Linux (with early experimental macOS support), and is designed to replace legacy updaters without leaving anyone behind.
 
-**[Install Foxy](https://yethesamartaka-foxy.github.io/Foxy/)** · [All install options](#installation)
+**[Install Foxy](https://yethesamartaka-foxy.github.io/Foxy/)** · [Direct download](https://yethesamartaka-foxy.github.io/Foxy/download/) · [All install options](#installation)
 
 Install with one command (run it again to update):
 
@@ -75,7 +75,7 @@ These are planned directions for Foxy. They are not listed in any particular ord
 
 ## Installation
 
-The install page is [https://yethesamartaka-foxy.github.io/Foxy/](https://yethesamartaka-foxy.github.io/Foxy/). The [User Guide](wiki/User-Guide.md#installing-foxy) has the same steps with the folders Foxy uses.
+The install page is [https://yethesamartaka-foxy.github.io/Foxy/](https://yethesamartaka-foxy.github.io/Foxy/). Static direct-download links for the newest installer are at [download/](https://yethesamartaka-foxy.github.io/Foxy/download/) (auto-detect), [download/windows/](https://yethesamartaka-foxy.github.io/Foxy/download/windows/), [download/linux/](https://yethesamartaka-foxy.github.io/Foxy/download/linux/), [download/linux-arm64/](https://yethesamartaka-foxy.github.io/Foxy/download/linux-arm64/), and [download/macos/](https://yethesamartaka-foxy.github.io/Foxy/download/macos/). The [User Guide](wiki/User-Guide.md#installing-foxy) has the same steps with the folders Foxy uses.
 
 The one-command install downloads the newest [release](https://github.com/YetheSamartaka-Foxy/Foxy/releases/latest), checks its SHA-256, and installs it. Running it again updates that copy. Saved repositories, settings, and databases stay in Foxy's config folder. Downloaded mods stay in the folders you chose. A current-user install needs no administrator permission.
 
@@ -465,7 +465,10 @@ foxy-server-backend-cli create config.json ./output   --collect-keys   --keys-ou
 a directory of keys (repeatable) for things Foxy does not generate, such as
 `a3.bikey` and the Creator DLC keys. Both imply `--collect-keys`. Keys are flattened
 by file name: byte-identical duplicates are skipped, and a name clash between two
-different keys keeps the first one and is reported.
+different keys keeps the first one and is reported. Output-managed keys folders
+(`<output>/keys` and `<output>/<folder>/keys`) automatically remove stale `.bikey`
+files from removed mods; an external `--keys-output` folder outside `<output>`
+keeps existing files untouched.
 
 ### Repository spaces in one command
 
@@ -507,8 +510,9 @@ paths resolve from the space config file; each repository's `basePath` keeps the
 | `link` | Every repository symlinks straight to the source mod folder; nothing is copied. Requires `--yes`: the per-mod manifests are written into the source folders, and any later change there silently breaks the published checksums until `create-space` runs again. | Only when the sources are already the served copy and never edited in place. |
 
 For pool output, `--clean --dry-run` lists orphaned generated pool folders and
-symlinks that would be removed. Run `--clean --yes` to remove them after a
-successful regeneration. Cleanup does not remove unrelated directories. A pool
+symlinks that would be removed. Run `--clean` to remove them after a successful
+regeneration (`--yes` is not required for pool cleanup, though still accepted).
+Cleanup does not remove unrelated directories. A pool
 outside the output directory needs an inventory from a previous `create-space`
 run before cleanup is allowed. `--prune-unused-optionals` also works with
 `copy` and `pool` layouts, but cannot be used with `link`, which publishes the

@@ -327,6 +327,7 @@ fn cmd_create(
                 &dest,
                 &options.keys.additional_sources,
                 options.prune_unused_optionals,
+                keys::path_is_within(&dest, output_dir),
             )?;
         }
         if !options.no_mod_line_files {
@@ -481,6 +482,7 @@ fn run_create(
             &keys::KeyCollectionOptions {
                 dest: &dest,
                 additional_sources: &key_collection.additional_sources,
+                prune_stale: keys::path_is_within(&dest, output_dir),
             },
         )?;
         for name in &report.conflicts {
@@ -523,6 +525,9 @@ fn run_create(
     }
     if let Some((dest, report)) = &key_report {
         println!("  Keys:       {} in {}", report.copied, dest.display());
+        if report.removed > 0 {
+            println!("              {} stale keys removed", report.removed);
+        }
         if report.duplicates > 0 {
             println!("              {} duplicate keys skipped", report.duplicates);
         }

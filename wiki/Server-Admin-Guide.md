@@ -265,7 +265,7 @@ A listed file that is missing, is not UTF-8 text, or has no such parameter fails
 foxy-server-backend-cli create config.json ./output --collect-keys --keys-output ./server/keys --additional-keys ./a3-keys
 ```
 
-`--keys-output` picks the destination, and `--additional-keys` (repeatable) adds a key file or folder that the generator does not produce, such as `a3.bikey` and the Creator DLC keys. Both imply `--collect-keys`. Keys are flattened by file name: identical duplicates are skipped, and a name clash between two different keys keeps the first one and is reported. Collection never deletes anything already in the destination.
+`--keys-output` picks the destination, and `--additional-keys` (repeatable) adds a key file or folder that the generator does not produce, such as `a3.bikey` and the Creator DLC keys. Both imply `--collect-keys`. Keys are flattened by file name: identical duplicates are skipped, and a name clash between two different keys keeps the first one and is reported. Output-managed keys folders (`<output>/keys` and `<output>/<folder>/keys`) automatically remove stale `.bikey` files when mods are removed; an external `--keys-output` folder outside `<output>` keeps existing files untouched.
 
 ---
 
@@ -547,7 +547,7 @@ A mod name that appears in several repositories must hash identically in all of 
 - `--collect-keys` gathers the keys of the whole space into `<output>/keys`. `--per-repo-keys` writes each repository's keys (plus `--additional-keys`) into `<output>/<folder>/keys`, so a server can symlink one repository's keys folder directly. With `--per-repo-keys`, `--additional-keys` no longer implies `--collect-keys`: add `--collect-keys` or `--keys-output` to also build the combined folder.
 - `--only <folder>` (repeatable) regenerates only the selected repositories and keeps the full space manifest. It refuses mods shared with repositories you did not select, and it cannot rebuild the combined keys folder.
 - `--prune-unused-optionals` works with `copy` and `pool`, not with `link`.
-- For pool output, `--clean --dry-run` lists orphaned generated pool folders and their symlinks, and `--clean --yes` removes them after a successful generation. Cleanup never touches unrelated folders, and a pool outside the output needs an inventory from an earlier `create-space` run.
+- For pool output, `--clean --dry-run` lists orphaned generated pool folders and stale repository symlinks, and `--clean` removes them after a successful generation (`--yes` is not required for pool cleanup, though still accepted). Cleanup never touches unrelated folders, and a pool outside the output needs an inventory from an earlier `create-space` run.
 
 ### The generated `repository_space.json`
 
@@ -1078,7 +1078,7 @@ Creating symlinks on Windows needs Developer Mode or an elevated shell. Use `--l
 
 ### "--yes" is required
 
-Some actions remove published data or write into your sources: `--layout link`, `--clean`, `--atomic`, and `--prune-unused-optionals` when earlier optionals are published. Run with `--dry-run` first to see what would change, then add `--yes`.
+Some actions remove published data or write into your sources: `--layout link`, `--atomic`, and `--prune-unused-optionals` when earlier optionals are published. Run with `--dry-run` first to see what would change, then add `--yes`.
 
 ### Clients see no update after rebuild
 

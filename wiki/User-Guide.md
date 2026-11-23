@@ -41,7 +41,7 @@ Use **Search help** to find topics by their titles and text in the current langu
 
 ## Installing Foxy
 
-Install with one command (run it again to update). The same instructions are on the [install page](https://yethesamartaka-foxy.github.io/Foxy/).
+Install with one command (run it again to update). The same instructions are on the [install page](https://yethesamartaka-foxy.github.io/Foxy/), or use a static direct-download link for the newest installer: [auto-detect](https://yethesamartaka-foxy.github.io/Foxy/download/), [Windows](https://yethesamartaka-foxy.github.io/Foxy/download/windows/), [Linux (x86_64)](https://yethesamartaka-foxy.github.io/Foxy/download/linux/), [Linux (ARM64)](https://yethesamartaka-foxy.github.io/Foxy/download/linux-arm64/), or [macOS (Apple Silicon)](https://yethesamartaka-foxy.github.io/Foxy/download/macos/).
 
 ```powershell
 # Windows, in PowerShell
