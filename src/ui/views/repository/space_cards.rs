@@ -188,6 +188,18 @@ impl Foxy {
                     },
                 );
 
+                if let Some(description) = entry
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|desc| !desc.is_empty())
+                {
+                    ui.add_space(4.0);
+                    ui.add(
+                        Label::new(RichText::new(description).color(self.color_text_gray())).wrap(),
+                    );
+                }
+
                 if instances.is_empty() {
                     return;
                 }

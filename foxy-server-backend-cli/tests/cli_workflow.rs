@@ -436,6 +436,95 @@ fn only_rebuilds_selected_repository_and_preserves_space_manifest() {
 }
 
 #[test]
+fn create_space_writes_optional_repository_descriptions_non_destructively() {
+    let dir = tempfile::tempdir().unwrap();
+    let mods = dir.path().join("mods");
+    for (repo_name, mod_name) in [("main", "@main"), ("events", "@events")] {
+        let mod_dir = mods.join(mod_name);
+        std::fs::create_dir_all(&mod_dir).unwrap();
+        std::fs::write(mod_dir.join("data.txt"), repo_name.as_bytes()).unwrap();
+        write_json(
+            &dir.path().join(format!("{repo_name}.json")),
+            json!({
+                "repoName": repo_name,
+                "basePath": mods,
+                "requiredMods": [{"modName": mod_name}]
+            }),
+        );
+    }
+    let space = dir.path().join("space.json");
+    write_json(
+        &space,
+        json!({
+            "name": "Test Space",
+            "baseUrl": "https://example.com/repos/",
+            "repositories": [
+                {"config": "main.json", "folder": "main", "description": "Core weekly operations modset"},
+                {"config": "events.json", "folder": "events", "required": false}
+            ]
+        }),
+    );
+    let output = dir.path().join("output");
+    let bin = env!("CARGO_BIN_EXE_foxy-server-backend-cli");
+    let first = Command::new(bin)
+        .arg("create-space")
+        .arg(&space)
+        .arg(&output)
+        .arg("--no-progress")
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(output.join("repository_space.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        manifest["entries"][0]["Description"],
+        "Core weekly operations modset"
+    );
+    assert!(manifest["entries"][1].get("Description").is_none());
+    let checksum_with_desc = manifest["spaceChecksum"].as_str().unwrap().to_string();
+
+    write_json(
+        &space,
+        json!({
+            "name": "Test Space",
+            "baseUrl": "https://example.com/repos/",
+            "repositories": [
+                {"config": "main.json", "folder": "main", "description": "Updated operations modset"},
+                {"config": "events.json", "folder": "events", "required": false}
+            ]
+        }),
+    );
+    let second = Command::new(bin)
+        .arg("create-space")
+        .arg(&space)
+        .arg(&output)
+        .arg("--no-progress")
+        .output()
+        .unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let updated: Value =
+        serde_json::from_slice(&std::fs::read(output.join("repository_space.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        updated["entries"][0]["Description"],
+        "Updated operations modset"
+    );
+    assert_ne!(
+        updated["spaceChecksum"].as_str().unwrap(),
+        checksum_with_desc
+    );
+}
+
+#[test]
 fn space_prune_asks_for_yes_only_when_published_optionals_exist() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("mods").join("@one");

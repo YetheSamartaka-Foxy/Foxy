@@ -66,7 +66,11 @@ impl Foxy {
                         self.repo_installed_state_tag(&entry.address, &space.shared_path);
                     detail_filter
                         .matches_with_tags(
-                            &[entry.name.as_str(), entry.address.as_str()],
+                            &[
+                                entry.name.as_str(),
+                                entry.address.as_str(),
+                                entry.description.as_deref().unwrap_or(""),
+                            ],
                             &[
                                 installed_tag,
                                 crate::ui::search_filter::STATE_KEYWORD_ATTACHED,

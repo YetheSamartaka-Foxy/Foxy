@@ -515,6 +515,29 @@ impl Foxy {
                     ui.separator();
                     ui.add_space(10.0);
 
+                    if let Some(description) = self
+                        .repository_space_entry_description_for_repo(
+                            &self.repository_view_state.repositories[selected_idx],
+                        )
+                        .map(str::to_string)
+                    {
+                        Frame::NONE
+                            .fill(self.color_card_bg())
+                            .stroke(egui::Stroke::new(1.0, self.color_widget_bg()))
+                            .corner_radius(CornerRadius::same(8))
+                            .inner_margin(Margin::symmetric(12, 8))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(description).color(self.color_text_gray()),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        ui.add_space(10.0);
+                    }
+
                     if is_local {
                         ui.label(self.t("This local repository has no server. Checks and downloads are unavailable. Removing it keeps existing mod files."));
                         ui.label(self.t("Select mods in External Addons. Enable Include Steam Addons for Steam Workshop mods. Add other mod folders in Game space settings."));

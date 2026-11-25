@@ -5,8 +5,8 @@
   "iconImagePath": "icon.png",
   "repoImagePath": "space.png",
   "repositories": [
-    { "config": "modern/config.json", "folder": "modern", "required": true },
-    { "config": "vietnam/config.json", "folder": "vietnam", "name": "Vietnam", "required": true },
+    { "config": "modern/config.json", "folder": "modern", "required": true, "description": "Core modset used for regular weekly operations." },
+    { "config": "vietnam/config.json", "folder": "vietnam", "name": "Vietnam", "required": true, "description": "Vietnam campaign and training mods." },
     { "config": "ww2/config.json", "folder": "ww2", "required": false, "address": "https://cdn.example.com/ww2/" }
   ]
 }

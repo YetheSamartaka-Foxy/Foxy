@@ -711,6 +711,12 @@ pub fn sanitize_repository_space_paths(space: &mut RepositorySpace) {
     space.source_base_url = space.source_base_url.trim().to_string();
     for entry in &mut space.entries {
         entry.address = entry.address.trim().to_string();
+        entry.description = entry
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|desc| !desc.is_empty())
+            .map(str::to_string);
     }
 }
 

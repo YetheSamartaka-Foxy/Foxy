@@ -178,7 +178,9 @@ impl Foxy {
     }
 
     pub(super) fn heap_bytes_of_repository_space_entry(entry: &RepositorySpaceEntry) -> usize {
-        Self::heap_bytes_of_string(&entry.name) + Self::heap_bytes_of_string(&entry.address)
+        Self::heap_bytes_of_string(&entry.name)
+            + Self::heap_bytes_of_string(&entry.address)
+            + Self::heap_bytes_of_option_string(&entry.description)
     }
 
     pub(super) fn heap_bytes_of_repository_space(space: &RepositorySpace) -> usize {

@@ -1193,9 +1193,9 @@ foxy-server-backend-cli create-space space.json ./www --layout pool
   "iconImagePath": "icon.png",
   "repoImagePath": "space.png",
   "repositories": [
-    { "config": "modern/config.json", "folder": "modern", "required": true },
+    { "config": "modern/config.json", "folder": "modern", "required": true, "description": "Core modset for regular operations." },
     { "config": "vietnam/config.json", "folder": "vietnam", "name": "Vietnam", "required": true },
-    { "config": "ww2/config.json", "folder": "ww2", "required": false, "address": "https://cdn.example.com/ww2/" }
+    { "config": "ww2/config.json", "folder": "ww2", "required": false, "address": "https://cdn.example.com/ww2/", "description": "Optional WW2 event modset." }
   ]
 }
 ```
@@ -1211,6 +1211,7 @@ foxy-server-backend-cli create-space space.json ./www --layout pool
 | `repositories[].name` | Display name (defaults to the repository's `repoName`) |
 | `repositories[].address` | Public URL (defaults to `<baseUrl>/<folder>/`) |
 | `repositories[].required` | Whether players must take this repository (default `true`) |
+| `repositories[].description` | Optional short description shown to players on the space and repository views (omitted from `repository_space.json` when unset or blank) |
 
 Each repository lands in `<output>/<folder>/`. Each repository's `basePath` keeps the `create` meaning and resolves from the working directory.
 
@@ -1248,9 +1249,9 @@ A mod name that appears in several repositories must hash identically in all of 
   "spaceChecksum": "<sha1>",
   "appUpdateUrl": "https://mods.example.com/foxy/",
   "entries": [
-    { "Name": "Modern", "Address": "https://mods.example.com/repos/modern/", "Requiered": true },
+    { "Name": "Modern", "Address": "https://mods.example.com/repos/modern/", "Requiered": true, "Description": "Core modset for regular operations." },
     { "Name": "Vietnam", "Address": "https://mods.example.com/repos/vietnam/", "Requiered": true },
-    { "Name": "WW2", "Address": "https://cdn.example.com/ww2/", "Requiered": false }
+    { "Name": "WW2", "Address": "https://cdn.example.com/ww2/", "Requiered": false, "Description": "Optional WW2 event modset." }
   ]
 }
 ```
@@ -1265,8 +1266,9 @@ A mod name that appears in several repositories must hash identically in all of 
 | `entries[].Name` | Display name for the repository |
 | `entries[].Address` | Full URL of the repository root (where `repo.json` lives) |
 | `entries[].Requiered` | `true` for required repositories, `false` for optional ones (the legacy spelling is intentional) |
+| `entries[].Description` | Optional description shown in the space and repository views (omitted when unset; older clients ignore it) |
 
-`spaceChecksum` is the lowercase hex SHA-1 of the compact JSON array `[name, imageChecksum, iconChecksum, [[Name, Address, Requiered], ...]]`, built from the values exactly as they appear in the file, with the entries in file order. For the example above with real checksums that is the SHA-1 of `["My Community","<sha1>","<sha1>",[["Modern","https://mods.example.com/repos/modern/",true],...]]`. Changing the name, either image, or any entry (including its order or required flag) changes it; `appUpdateUrl` and the image paths are not covered.
+`spaceChecksum` is the lowercase hex SHA-1 of the compact JSON array `[name, imageChecksum, iconChecksum, [[Name, Address, Requiered], ...]]`, built from the values exactly as they appear in the file, with the entries in file order. Entries with a non-empty `Description` append the trimmed description as a fourth element (`[Name, Address, Requiered, Description]`), so spaces without descriptions keep the exact legacy checksum. Changing the name, either image, or any entry (including its order, required flag, or description) changes it; `appUpdateUrl` and the image paths are not covered.
 
 You can still write this file by hand if you generate repositories separately; keep the same shape. When you edit it by hand, either regenerate `spaceChecksum` or delete the field. Foxy recomputes the checksum from the content anyway and logs a warning when the published value is stale, so a stale value never hides a change, but deleting it keeps the file honest.
 

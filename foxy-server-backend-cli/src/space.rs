@@ -53,6 +53,8 @@ pub struct SpaceRepoRef {
     pub address: Option<String>,
     #[serde(default = "default_true")]
     pub required: bool,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -65,6 +67,7 @@ pub struct SpaceRepo {
     pub name: String,
     pub address: String,
     pub required: bool,
+    pub description: Option<String>,
     pub config: RepoConfig,
     /// The repository config file, kept so its relative entries (`modLineFiles`)
     /// resolve from the same directory as under `create`.
@@ -138,11 +141,19 @@ pub fn load_space_config(path: &Path) -> Result<LoadedSpace> {
             },
         };
 
+        let description = repo_ref
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|desc| !desc.is_empty())
+            .map(str::to_string);
+
         repos.push(SpaceRepo {
             folder,
             name,
             address,
             required: repo_ref.required,
+            description,
             config: repo_config,
             config_path: repo_config_path,
             mods,
@@ -458,9 +469,12 @@ struct RepositorySpaceEntryJson<'a> {
     address: &'a str,
     #[serde(rename = "Requiered")]
     required: bool,
+    #[serde(rename = "Description", skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
 }
 
-/// Hash the compact JSON array [name, imageChecksum, iconChecksum, [[Name, Address, Requiered], ...]] in published order.
+/// Hash the compact JSON array [name, imageChecksum, iconChecksum, [[Name, Address, Requiered, ...], ...]] in published order.
+/// Entry arrays append a trimmed non-empty Description as a 4th item only when set, keeping legacy manifests hash-identical.
 /// The desktop client's repository_space_manifest_checksum must use the same SHA-1 contract.
 fn space_manifest_checksum(
     name: &str,
@@ -470,7 +484,18 @@ fn space_manifest_checksum(
 ) -> String {
     let entries: Vec<serde_json::Value> = entries
         .iter()
-        .map(|entry| serde_json::json!([entry.name, entry.address, entry.required]))
+        .map(|entry| {
+            match entry
+                .description
+                .map(str::trim)
+                .filter(|desc| !desc.is_empty())
+            {
+                Some(description) => {
+                    serde_json::json!([entry.name, entry.address, entry.required, description])
+                }
+                None => serde_json::json!([entry.name, entry.address, entry.required]),
+            }
+        })
         .collect();
     let canonical = serde_json::json!([name, image_checksum, icon_checksum, entries]).to_string();
     hex::encode(Sha1::digest(canonical.as_bytes()))
@@ -494,6 +519,7 @@ fn write_space_manifest(
             name: &repo.name,
             address: &repo.address,
             required: repo.required,
+            description: repo.description.as_deref(),
         })
         .collect();
     let space_checksum = space_manifest_checksum(name, &image_checksum, &icon_checksum, &entries);
@@ -1474,6 +1500,7 @@ mod tests {
             name: folder.to_string(),
             address: format!("https://repo.example.invalid/{folder}/"),
             required: true,
+            description: None,
             config: serde_json::from_str(r#"{"repoName":"Test","basePath":"."}"#).unwrap(),
             config_path: PathBuf::from("config.json"),
             mods: vec![ResolvedMod {
@@ -1529,11 +1556,20 @@ mod tests {
 
     #[test]
     fn space_manifest_uses_legacy_entry_keys() {
-        let entries = vec![RepositorySpaceEntryJson {
-            name: "Modern",
-            address: "https://example.com/repos/modern/",
-            required: true,
-        }];
+        let entries = vec![
+            RepositorySpaceEntryJson {
+                name: "Modern",
+                address: "https://example.com/repos/modern/",
+                required: true,
+                description: None,
+            },
+            RepositorySpaceEntryJson {
+                name: "WW2",
+                address: "https://example.com/repos/ww2/",
+                required: false,
+                description: Some("Optional WW2 event pack"),
+            },
+        ];
         let manifest = RepositorySpaceJson {
             name: "Space",
             image: "",
@@ -1551,6 +1587,8 @@ mod tests {
             "https://example.com/repos/modern/"
         );
         assert_eq!(json["entries"][0]["Requiered"], true);
+        assert!(json["entries"][0].get("Description").is_none());
+        assert_eq!(json["entries"][1]["Description"], "Optional WW2 event pack");
         assert_eq!(json["spaceChecksum"], "abc");
         assert!(json.get("appUpdateUrl").is_none());
     }
@@ -1561,11 +1599,13 @@ mod tests {
                 name: "RepoAlpha",
                 address: "http://repo.example.invalid:8080/space/RepoAlpha/",
                 required: true,
+                description: None,
             },
             RepositorySpaceEntryJson {
                 name: "RepoBeta",
                 address: "http://repo.example.invalid:8080/space/RepoBeta/",
                 required: false,
+                description: None,
             },
         ]
     }
@@ -1575,6 +1615,47 @@ mod tests {
         assert_eq!(
             space_manifest_checksum("MainSpace", "aa", "bb", &checksum_entries()),
             "580e1de5482e306432a52e2850ba74eda311c69d"
+        );
+        let example_entries = vec![
+            RepositorySpaceEntryJson {
+                name: "Modern",
+                address: "https://example.com/repos/modern",
+                required: true,
+                description: Some("Core modset used for regular weekly operations."),
+            },
+            RepositorySpaceEntryJson {
+                name: "Vietnam",
+                address: "https://example.com/repos/vietnam",
+                required: true,
+                description: None,
+            },
+            RepositorySpaceEntryJson {
+                name: "WW2",
+                address: "https://example.com/repos/ww2",
+                required: false,
+                description: Some("Optional World War 2 event modset."),
+            },
+            RepositorySpaceEntryJson {
+                name: "WW1",
+                address: "https://example.com/repos/ww1",
+                required: false,
+                description: None,
+            },
+            RepositorySpaceEntryJson {
+                name: "Sci-Fi",
+                address: "https://example.com/repos/sci-fi",
+                required: false,
+                description: None,
+            },
+        ];
+        assert_eq!(
+            space_manifest_checksum(
+                "Example Repository Space",
+                "5d41402abc4b2a76b9719d911017c592",
+                "7d793037a0760186574b0282f2f435e7",
+                &example_entries,
+            ),
+            "c82e12eac0ccaef7225fd93b2c930541dd5bb714"
         );
     }
 
@@ -1604,6 +1685,18 @@ mod tests {
         assert_ne!(
             base,
             space_manifest_checksum("MainSpace", "aa", "bb", &reordered)
+        );
+        let mut blank_description = checksum_entries();
+        blank_description[0].description = Some("   ");
+        assert_eq!(
+            base,
+            space_manifest_checksum("MainSpace", "aa", "bb", &blank_description)
+        );
+        let mut described = checksum_entries();
+        described[0].description = Some("Main operations pack");
+        assert_ne!(
+            base,
+            space_manifest_checksum("MainSpace", "aa", "bb", &described)
         );
     }
 
@@ -1640,8 +1733,8 @@ mod tests {
               "name": "Test Space",
               "baseUrl": "https://example.com/repos",
               "repositories": [
-                { "config": "modern.json" },
-                { "config": "ww2.json", "folder": "WW2", "name": "World War 2", "required": false, "address": "https://cdn.example.com/ww2" }
+                { "config": "modern.json", "description": "   " },
+                { "config": "ww2.json", "folder": "WW2", "name": "World War 2", "required": false, "address": "https://cdn.example.com/ww2", "description": "  Optional WW2 campaign mods  " }
               ]
             }"#,
         )
@@ -1653,10 +1746,15 @@ mod tests {
         assert_eq!(space.repos[0].name, "modern");
         assert_eq!(space.repos[0].address, "https://example.com/repos/modern/");
         assert!(space.repos[0].required);
+        assert_eq!(space.repos[0].description, None);
         assert_eq!(space.repos[1].folder, "WW2");
         assert_eq!(space.repos[1].name, "World War 2");
         assert_eq!(space.repos[1].address, "https://cdn.example.com/ww2/");
         assert!(!space.repos[1].required);
+        assert_eq!(
+            space.repos[1].description.as_deref(),
+            Some("Optional WW2 campaign mods")
+        );
 
         let groups = group_shared_mods(&space.repos);
         assert_eq!(groups.len(), 2);

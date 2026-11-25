@@ -667,7 +667,12 @@ impl Foxy {
             || truncated_name,
         );
 
-        let resp = ui
+        let space_description = self
+            .repository_space_entry_description_for_repo(
+                &self.repository_view_state.repositories[repo_index],
+            )
+            .map(str::to_string);
+        let mut resp = ui
             .horizontal(|ui| {
                 if indented {
                     ui.add_space(indent);
@@ -736,6 +741,10 @@ impl Foxy {
                 }
             })
             .inner;
+
+        if let Some(description) = space_description {
+            resp = resp.on_hover_text(description);
+        }
 
         let drag_resp = resp.interact(Sense::drag());
         if drag_resp.drag_started() {

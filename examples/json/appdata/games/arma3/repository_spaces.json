@@ -17,12 +17,14 @@
       {
         "name": "Example Main",
         "address": "https://repo.example.com/mods/example_main",
-        "required": true
+        "required": true,
+        "description": "Core modset used for regular weekly operations."
       },
       {
         "name": "Example WW2",
         "address": "https://repo.example.com/mods/example_ww2",
-        "required": false
+        "required": false,
+        "description": "Optional World War 2 event modset."
       },
       {
         "name": "Example CW",

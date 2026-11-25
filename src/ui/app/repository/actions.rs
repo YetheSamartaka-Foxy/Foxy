@@ -413,6 +413,12 @@ impl Foxy {
                                 },
                                 address: normalized_address,
                                 required: entry.required,
+                                description: entry
+                                    .description
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|desc| !desc.is_empty())
+                                    .map(str::to_string),
                             })
                         })
                         .collect();
@@ -479,6 +485,34 @@ impl Foxy {
             &[("name", space.name.clone())],
         ));
         space_id
+    }
+
+    pub(crate) fn repository_space_entry_description<'a>(
+        spaces: &'a [RepositorySpace],
+        repo: &Repository,
+    ) -> Option<&'a str> {
+        let space_id = repo.repository_space_id.as_deref()?;
+        let space = spaces.iter().find(|space| space.id == space_id)?;
+        let match_address = repo
+            .repository_space_entry_address
+            .as_deref()
+            .filter(|address| !address.trim().is_empty())
+            .unwrap_or(&repo.address);
+        let key = Self::repo_url_match_key(match_address);
+        space
+            .entries
+            .iter()
+            .find(|entry| Self::repo_url_match_key(&entry.address) == key)
+            .and_then(|entry| entry.description.as_deref())
+            .map(str::trim)
+            .filter(|desc| !desc.is_empty())
+    }
+
+    pub(crate) fn repository_space_entry_description_for_repo(
+        &self,
+        repo: &Repository,
+    ) -> Option<&str> {
+        Self::repository_space_entry_description(&self.repository_spaces, repo)
     }
 
     pub(in crate::ui::app) fn merged_repository_space(

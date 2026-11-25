@@ -313,11 +313,13 @@ mod tests {
                 name: "RepoAlpha".to_string(),
                 address: "http://repo.example.invalid:8080/mods/Repo_alpha".to_string(),
                 required: true,
+                description: None,
             },
             RepositorySpaceEntry {
                 name: "RepoBeta".to_string(),
                 address: "http://repo.example.invalid:8080/mods/Repo_Beta".to_string(),
                 required: false,
+                description: None,
             },
         ];
         let repositories = vec![

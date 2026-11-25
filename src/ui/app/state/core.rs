@@ -245,6 +245,8 @@ pub struct RepositorySpaceManifestEntry {
     pub address: String,
     #[serde(rename = "Requiered", alias = "Required", alias = "required", default)]
     pub required: bool,
+    #[serde(rename = "Description", alias = "description", default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

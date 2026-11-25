@@ -346,6 +346,7 @@ mod tests {
                 name: folder.to_string(),
                 address: format!("https://repo.example.invalid/{folder}/"),
                 required: true,
+                description: None,
                 config: serde_json::from_str(r#"{"repoName":"Test","basePath":"."}"#).unwrap(),
                 config_path: PathBuf::from("config.json"),
                 mods,

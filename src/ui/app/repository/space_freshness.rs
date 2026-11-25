@@ -16,7 +16,19 @@ pub fn repository_space_manifest_checksum(manifest: &RepositorySpaceManifest) ->
     let entries: Vec<serde_json::Value> = manifest
         .entries
         .iter()
-        .map(|entry| serde_json::json!([entry.name, entry.address, entry.required]))
+        .map(|entry| {
+            match entry
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|desc| !desc.is_empty())
+            {
+                Some(description) => {
+                    serde_json::json!([entry.name, entry.address, entry.required, description])
+                }
+                None => serde_json::json!([entry.name, entry.address, entry.required]),
+            }
+        })
         .collect();
     let canonical = serde_json::json!([
         manifest.name,
@@ -411,6 +423,7 @@ mod tests {
             name: name.to_string(),
             address: address.to_string(),
             required,
+            description: None,
         }
     }
 
@@ -436,6 +449,7 @@ mod tests {
             name: name.to_string(),
             address: address.to_string(),
             required,
+            description: None,
         }
     }
 
@@ -487,6 +501,38 @@ mod tests {
             false,
         ));
         assert_ne!(repository_space_manifest_checksum(&added), base);
+
+        let mut blank_description = checksum_manifest();
+        blank_description.entries[0].description = Some("   ".to_string());
+        assert_eq!(repository_space_manifest_checksum(&blank_description), base);
+
+        let mut described = checksum_manifest();
+        described.entries[0].description = Some("Main weekly operations modset".to_string());
+        assert_ne!(repository_space_manifest_checksum(&described), base);
+    }
+
+    #[test]
+    fn manifest_entry_description_parses_both_casings_and_defaults_to_none() {
+        let manifest: RepositorySpaceManifest = serde_json::from_str(
+            r#"{
+                "name": "MainSpace",
+                "entries": [
+                    {"Name": "RepoAlpha", "Address": "http://repo.example.invalid:8080/space/RepoAlpha/", "Requiered": true, "Description": "Core modset"},
+                    {"Name": "RepoBeta", "Address": "http://repo.example.invalid:8080/space/RepoBeta/", "Requiered": false, "description": "Optional training pack"},
+                    {"Name": "RepoGamma", "Address": "http://repo.example.invalid:8080/space/RepoGamma/", "Requiered": false}
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.entries[0].description.as_deref(),
+            Some("Core modset")
+        );
+        assert_eq!(
+            manifest.entries[1].description.as_deref(),
+            Some("Optional training pack")
+        );
+        assert_eq!(manifest.entries[2].description, None);
     }
 
     #[test]
@@ -625,5 +671,67 @@ mod tests {
         let delta = repository_space_delta(&local, &remote);
         assert_eq!(delta.added, vec!["http://x/a".to_string()]);
         assert!(delta.removed.is_empty());
+    }
+
+    #[test]
+    fn space_entry_description_lookup_matches_space_entry_case_insensitively() {
+        let spaces = vec![RepositorySpace {
+            id: "space-main".to_string(),
+            name: "MainSpace".to_string(),
+            local_name_override: None,
+            collapsed: false,
+            source_address: String::new(),
+            source_base_url: String::new(),
+            shared_path: String::new(),
+            icon_image_path: String::new(),
+            icon_image_checksum: String::new(),
+            repo_image_path: String::new(),
+            repo_image_checksum: String::new(),
+            app_update_url: String::new(),
+            manifest_checksum: String::new(),
+            entries: vec![
+                RepositorySpaceEntry {
+                    name: "RepoAlpha".to_string(),
+                    address: "https://repo.example.invalid/Alpha".to_string(),
+                    required: true,
+                    description: Some("  Core weekly ops  ".to_string()),
+                },
+                RepositorySpaceEntry {
+                    name: "RepoBeta".to_string(),
+                    address: "https://repo.example.invalid/Beta/".to_string(),
+                    required: false,
+                    description: Some("   ".to_string()),
+                },
+            ],
+        }];
+
+        let mut repo = crate::ui::types::Repository {
+            address: "https://repo.example.invalid/alpha/".to_string(),
+            repository_space_id: Some("space-main".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            Foxy::repository_space_entry_description(&spaces, &repo),
+            Some("Core weekly ops")
+        );
+
+        repo.address = "https://repo.example.invalid/beta".to_string();
+        assert_eq!(
+            Foxy::repository_space_entry_description(&spaces, &repo),
+            None
+        );
+
+        repo.repository_space_entry_address =
+            Some("https://repo.example.invalid/ALPHA/".to_string());
+        assert_eq!(
+            Foxy::repository_space_entry_description(&spaces, &repo),
+            Some("Core weekly ops")
+        );
+
+        repo.repository_space_id = None;
+        assert_eq!(
+            Foxy::repository_space_entry_description(&spaces, &repo),
+            None
+        );
     }
 }

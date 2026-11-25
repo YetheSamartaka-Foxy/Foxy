@@ -280,7 +280,7 @@ Repository spaces group several repositories under one shared manifest. Communit
 
 When you add a repository space, it appears as a collapsible section in the sidebar under **Spaces**. Click the space header to open its detail page, which shows:
 - The space name and shared path.
-- A list of **Available repositories** defined by the space, each with an **Add** button and a filter field.
+- A list of **Available repositories** defined by the space, each with an **Add** button, optional server-provided description, and a filter field. When a repository has a description, Foxy also shows it on that repository's page and when hovering its sidebar entry.
 - A **Matching existing repositories** section that can associate repositories you added earlier with the space.
 
 Foxy rereads each space's manifest from the server at launch and every 30 minutes while it runs, so repositories the community adds to the space appear in **Available repositories** without re-adding the space. To reread it right away, click the globe **Refresh from server** button on the space page, or right-click the space in the sidebar and choose **Refresh from server**. A refresh updates the list of repositories the space offers, its name, and its images; it never installs or removes a repository on your disk.

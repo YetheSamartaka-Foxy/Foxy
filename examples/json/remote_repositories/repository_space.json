@@ -4,13 +4,14 @@
   "imageChecksum": "5d41402abc4b2a76b9719d911017c592",
   "icon": "icon.png",
   "iconChecksum": "7d793037a0760186574b0282f2f435e7",
-  "spaceChecksum": "c66249077d7dfc0f88fff60d58b1d24140363d8f",
+  "spaceChecksum": "c82e12eac0ccaef7225fd93b2c930541dd5bb714",
   "appUpdateUrl": "http://myserver.com/foxy/",
   "entries": [
     {
       "Name": "Modern",
       "Address": "https://example.com/repos/modern",
-      "Requiered": true
+      "Requiered": true,
+      "Description": "Core modset used for regular weekly operations."
     },
     {
       "Name": "Vietnam",
@@ -20,7 +21,8 @@
     {
       "Name": "WW2",
       "Address": "https://example.com/repos/ww2",
-      "Requiered": false
+      "Requiered": false,
+      "Description": "Optional World War 2 event modset."
     },
     {
       "Name": "WW1",

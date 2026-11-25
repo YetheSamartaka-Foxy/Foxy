@@ -1090,6 +1090,7 @@ fn sanitize_repository_space_paths_trims_entry_addresses() {
             name: "Entry".to_string(),
             address: "  http://example.invalid/mody/Entry  ".to_string(),
             required: false,
+            description: Some("  Main campaign modset  ".to_string()),
         }],
     };
 
@@ -1101,6 +1102,32 @@ fn sanitize_repository_space_paths_trims_entry_addresses() {
         space.entries[0].address,
         "http://example.invalid/mody/Entry"
     );
+    assert_eq!(
+        space.entries[0].description.as_deref(),
+        Some("Main campaign modset")
+    );
+}
+
+#[test]
+fn repository_space_entry_description_is_backwards_compatible_and_omitted_when_none() {
+    let legacy: RepositorySpaceEntry = serde_json::from_str(
+        r#"{"name":"RepoAlpha","address":"https://repo.example.invalid/alpha/","required":true}"#,
+    )
+    .expect("legacy entry without description");
+    assert_eq!(legacy.description, None);
+    let legacy_json = serde_json::to_value(&legacy).expect("serialize legacy entry");
+    assert!(legacy_json.get("description").is_none());
+
+    let described: RepositorySpaceEntry = serde_json::from_str(
+        r#"{"name":"RepoBeta","address":"https://repo.example.invalid/beta/","required":false,"description":"Optional event pack"}"#,
+    )
+    .expect("described entry");
+    assert_eq!(
+        described.description.as_deref(),
+        Some("Optional event pack")
+    );
+    let described_json = serde_json::to_value(&described).expect("serialize described entry");
+    assert_eq!(described_json["description"], "Optional event pack");
 }
 
 #[test]
