@@ -15,56 +15,84 @@ impl Foxy {
     }
     pub(in crate::ui::views) fn render_server_editor(&mut self, ui: &mut Ui) {
         let Some(mut editor) = self.server_view.editor.take() else {
-            ui.label(self.t("Select a server draft to edit its configuration."));
+            self.server_section(ui, |app, ui| {
+                app.server_note(
+                    ui,
+                    app.t("Select a server draft to edit its configuration."),
+                );
+            });
             return;
         };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(self.t_fmt(
-                "Revision: {revision}",
-                &[("revision", editor.draft.revision.to_string())],
-            ))
-            .on_hover_text(editor.draft.id.as_str());
-        });
-        ui.label(self.t("Draft validation does not establish deployment or launch readiness."));
         let invalid = arma3::has_invalid_edits(ui.ctx(), editor.field_scope());
         let dirty = editor.dirty() || invalid;
         let mut change = None;
         let mut discard = false;
         let mut dialog = None;
-        if invalid {
-            ui.colored_label(
-                ui.visuals().error_fg_color,
-                self.t("Correct the highlighted fields before saving. Invalid text is not saved."),
-            );
-        }
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(dirty && !invalid, egui::Button::new(self.t("Save draft")))
-                .clicked()
-            {
-                change = Some(DraftChange::Replace {
-                    instance: editor.draft.clone(),
-                    expected_revision: editor.baseline.revision,
-                });
-            }
-            if ui
-                .add_enabled(dirty, egui::Button::new(self.t("Discard changes")))
-                .clicked()
-            {
-                discard = true;
-            }
-            ui.add_enabled_ui(!dirty, |ui| {
-                for (label, action) in [
-                    ("Rename draft", ServerDialog::Rename),
-                    ("Clone draft", ServerDialog::Clone),
-                    ("Remove draft", ServerDialog::Remove),
-                ] {
-                    if ui.button(self.t(label)).clicked() {
-                        dialog = Some(action);
-                    }
+        let card = self.server_card_frame();
+        card.show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                let save = self.add_sized_primary_button(
+                    ui,
+                    egui::Vec2::ZERO,
+                    egui::Button::new(self.t("Save draft")),
+                    dirty && !invalid,
+                );
+                Self::focus_outline(ui, &save);
+                if save.clicked() {
+                    change = Some(DraftChange::Replace {
+                        instance: editor.draft.clone(),
+                        expected_revision: editor.baseline.revision,
+                    });
                 }
+                if ui
+                    .add_enabled(dirty, egui::Button::new(self.t("Discard changes")))
+                    .clicked()
+                {
+                    discard = true;
+                }
+                ui.separator();
+                ui.add_enabled_ui(!dirty, |ui| {
+                    for (label, action) in [
+                        ("Rename draft", ServerDialog::Rename),
+                        ("Clone draft", ServerDialog::Clone),
+                    ] {
+                        if ui.button(self.t(label)).clicked() {
+                            dialog = Some(action);
+                        }
+                    }
+                    if ui
+                        .button(
+                            egui::RichText::new(self.t("Remove draft")).color(self.color_error()),
+                        )
+                        .clicked()
+                    {
+                        dialog = Some(ServerDialog::Remove);
+                    }
+                });
             });
+            if invalid {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    self.t(
+                        "Correct the highlighted fields before saving. Invalid text is not saved.",
+                    ),
+                );
+            }
+            self.server_note(
+                ui,
+                format!(
+                    "{}  {}",
+                    self.t_fmt(
+                        "Revision: {revision}",
+                        &[("revision", editor.draft.revision.to_string())],
+                    ),
+                    self.t("Draft validation does not establish deployment or launch readiness."),
+                ),
+            )
+            .on_hover_text(editor.draft.id.as_str());
         });
+        ui.add_space(10.0);
         let field_scope = editor.field_scope();
         let headless_clients = crate::core::game::registry()
             .get(&crate::core::game::spaces::active_game_space().game_id)
@@ -88,34 +116,43 @@ impl Foxy {
                 .and_then(|snapshot| snapshot.document.as_ref()),
         };
         if operator_owned {
-            ui.label(tr("Operator-owned files are authoritative. Import a replacement or explicitly convert them to managed configuration to edit their fields."));
-            if let ServerDefinition::Arma3(settings) = &mut editor.draft.definition {
-                number(ui, "Game port", &mut settings.game_port, u16::MAX);
-                ui.checkbox(
-                    &mut settings.auto_init,
-                    tr("Initialize mission automatically"),
-                );
-            }
+            card.show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                self.server_callout(ui, super::chrome::Tone::Info, &tr("Operator-owned files are authoritative. Import a replacement or explicitly convert them to managed configuration to edit their fields."), |_| {});
+                if let ServerDefinition::Arma3(settings) = &mut editor.draft.definition {
+                    number(ui, "Game port", &mut settings.game_port, u16::MAX);
+                    ui.checkbox(
+                        &mut settings.auto_init,
+                        tr("Initialize mission automatically"),
+                    );
+                }
+            });
+            ui.add_space(10.0);
         }
+        let note = self.color_text_dim();
         ui.add_enabled_ui(!operator_owned, |ui| {
             ui.push_id(field_scope, |ui| {
                 match &mut editor.draft.definition {
                     ServerDefinition::Arma3(settings) => {
                         arma3::render(
                             ui,
+                            card,
                             settings,
                             &mut editor.mission_keys,
                             &mut editor.next_row_key,
                             field_scope,
-                            headless_clients,
-                            headless_profiles,
+                            headless_clients.then_some(headless_profiles),
                         );
-                        ui.label(tr(
-                            "Use configuration import for operator files and protected password binding.",
-                        ));
+                        ui.label(
+                            egui::RichText::new(tr(
+                                "Use configuration import for operator files and protected password binding.",
+                            ))
+                            .color(note),
+                        );
                     }
                     ServerDefinition::Reforger(settings) => reforger::render(
                         ui,
+                        card,
                         settings,
                         &mut editor.addon_keys,
                         &mut editor.next_row_key,

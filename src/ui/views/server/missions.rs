@@ -20,9 +20,8 @@ impl Foxy {
             return;
         }
 
-        ui.separator();
         ui.heading(tr("Mission library"));
-        ui.label(tr("Review mission payloads in the game-space library, then add an exact revision to the server draft cycle."));
+        ui.weak(tr("Review mission payloads in the game-space library, then add an exact revision to the server draft cycle."));
 
         let busy = self.server_view.busy();
         let operator_owned = self.server_view.editor.as_ref().is_some_and(|editor| {

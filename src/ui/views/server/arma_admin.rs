@@ -134,9 +134,8 @@ impl Foxy {
             .filter(|record| record.instance_id == id.as_str())
             .cloned();
 
-        ui.separator();
         ui.heading(tr("Arma administration"));
-        ui.label(tr(
+        ui.weak(tr(
             "Typed BattlEye RCon actions for the running Arma server.",
         ));
         let Some(run_generation) = snapshot.run_generation else {

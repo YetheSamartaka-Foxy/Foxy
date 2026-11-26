@@ -178,7 +178,7 @@ impl Foxy {
         }
     }
 
-    pub(in crate::ui::app) fn blend_color(start: Color32, end: Color32, factor: f32) -> Color32 {
+    pub(in crate::ui) fn blend_color(start: Color32, end: Color32, factor: f32) -> Color32 {
         let factor = factor.clamp(0.0, 1.0);
         let blend = |a: u8, b: u8| -> u8 {
             (a as f32 + (b as f32 - a as f32) * factor)

@@ -18,7 +18,7 @@ pub(super) fn render(
     profiles: HeadlessProfiles<'_>,
 ) {
     ui.heading(tr("Headless clients"));
-    ui.label(tr("Headless clients run this server installation in client mode, connect from 127.0.0.1 and start only after the server answers its query port. Foxy does not verify mission slots or AI offload."));
+    ui.weak(tr("Headless clients run this server installation in client mode, connect from 127.0.0.1 and start only after the server answers its query port. Foxy does not verify mission slots or AI offload."));
     let mut remove = None;
     for (index, client) in clients.iter_mut().enumerate() {
         let scope = field_scope.with(("headless", client.id.as_str()));

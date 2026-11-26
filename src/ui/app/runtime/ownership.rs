@@ -795,18 +795,18 @@ impl Foxy {
             });
         }
         if let Some(error) = self.mode_ownership.error.clone() {
-            ui.label(self.t(&error));
+            ui.colored_label(self.color_error(), self.t(&error));
             if ui.button(self.t("Retry ownership connection")).clicked() {
                 self.retry_mode_ownership();
             }
         }
         if let Some(error) = &self.mode_ownership.cleanup_error {
-            ui.label(error);
+            ui.colored_label(self.color_error(), error);
         }
         if self.mode_ownership.snapshot.is_some() {
-            ui.label(self.t("Authenticated server owner. Client database access and repository schedules are paused."));
+            ui.weak(self.t("Authenticated server owner. Client database access and repository schedules are paused."));
             if let Some(snapshot) = self.mode_ownership.snapshot.as_ref() {
-                ui.label(self.t(match snapshot.lifetime {
+                ui.weak(self.t(match snapshot.lifetime {
                     owner::OwnerLifetime::Foreground => "Foreground owner closes with this window.",
                     owner::OwnerLifetime::ParentBound => "Parent-bound owner stops when its parent closes.",
                     owner::OwnerLifetime::Detached => "Detached owner keeps supervising server processes after this window closes.",

@@ -34,7 +34,6 @@ impl Foxy {
         let publication = &mut self.server_view.publication;
         let mut action = None;
 
-        ui.separator();
         ui.heading(tr("Player content publication"));
         if is_arma {
             ui.label(tr("Create a separate offline repository from the selected committed deployment record."));

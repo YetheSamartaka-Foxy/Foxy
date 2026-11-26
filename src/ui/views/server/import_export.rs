@@ -21,7 +21,6 @@ impl Foxy {
         if !capabilities.configuration_import && !capabilities.instance_packs {
             return;
         }
-        ui.separator();
         ui.heading(tr("Configuration import and instance packs"));
         let mut inputs = Vec::new();
         if capabilities.configuration_import {
@@ -159,7 +158,6 @@ impl Foxy {
             return;
         }
 
-        ui.separator();
         ui.heading(tr("Foxy server instance pack"));
         ui.horizontal_wrapped(|ui| {
             ui.add(
@@ -253,7 +251,7 @@ impl Foxy {
         };
         ui.separator();
         ui.heading(tr("Reforger server.json"));
-        ui.label(tr(
+        ui.weak(tr(
             "Import keeps typed fields and unknown JSON. Secret values are removed. Save the draft after using an import.",
         ));
         ui.horizontal_wrapped(|ui| {
@@ -347,7 +345,7 @@ impl Foxy {
         }
         ui.separator();
         ui.heading(tr("Scenario listing"));
-        ui.label(tr(
+        ui.weak(tr(
             "A failed listing is not stored and does not change the selected scenario.",
         ));
         ui.horizontal_wrapped(|ui| {

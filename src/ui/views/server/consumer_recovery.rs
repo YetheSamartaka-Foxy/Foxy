@@ -31,9 +31,8 @@ impl Foxy {
             self.server_view.consumer_recovery_confirmation = false;
         }
 
-        ui.separator();
         ui.heading(tr("Consumer recovery"));
-        ui.label(tr("Review crash cleanup records for this installation. Recovery preserves unknown consumers."));
+        ui.weak(tr("Review crash cleanup records for this installation. Recovery preserves unknown consumers."));
         if dirty {
             ui.label(tr(
                 "Save or discard server draft edits before reviewing consumer recovery.",
@@ -67,7 +66,7 @@ impl Foxy {
                 "Installation: {installation}; inspection complete: {complete}; owner authenticated: {authenticated}",
                 &[
                     ("installation", plan.installation_id.as_str().to_owned()),
-                    ("complete", plan.inspection_complete.to_string()),
+                    ("complete", super::chrome::yes_no(plan.inspection_complete)),
                     ("authenticated", plan.owner_authenticated.to_string()),
                 ],
             ));
@@ -111,7 +110,7 @@ impl Foxy {
                                 "Receipt: {state}; registration present: {present}",
                                 &[
                                     ("state", entry.receipt_state.clone()),
-                                    ("present", entry.registration_present.to_string()),
+                                    ("present", super::chrome::yes_no(entry.registration_present)),
                                 ],
                             ));
                             ui.label(if entry.eligible {
@@ -201,8 +200,8 @@ impl Foxy {
                 &[
                     ("retired", outcome.retired_count.to_string()),
                     ("remaining", outcome.remaining_records.to_string()),
-                    ("writes", outcome.writes_performed.to_string()),
-                    ("cancelled", outcome.cancelled.to_string()),
+                    ("writes", super::chrome::yes_no(outcome.writes_performed)),
+                    ("cancelled", super::chrome::yes_no(outcome.cancelled)),
                 ],
             ));
             if outcome.cancelled {

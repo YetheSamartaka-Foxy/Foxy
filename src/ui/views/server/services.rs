@@ -17,7 +17,6 @@ impl Foxy {
             .clone();
         self.server_view.services.ensure_space(&space_id);
 
-        ui.separator();
         ui.collapsing(tr("Unattended owner export"), |ui| {
             let format = Self::server_service_export_format();
             match format {

@@ -54,10 +54,9 @@ impl Foxy {
         let alias = self.server_view.steam_auth.alias.trim().to_owned();
         let mut action = None;
         let mut confirm = false;
-        ui.separator();
         let anchor = ui.push_id("server.native-install-controls", |ui| {
             ui.heading(tr("Managed installation from Steam"));
-            ui.label(tr("Download the dedicated server with a prepared native Steam session into a new folder. Every file is verified against the depot manifests before the folder is published and bound to this instance."));
+            ui.weak(tr("Download the dedicated server with a prepared native Steam session into a new folder. Every file is verified against the depot manifests before the folder is published and bound to this instance."));
             let state = &mut self.server_view;
             let mut maintenance_anchor = None;
             ui.horizontal_wrapped(|ui| {

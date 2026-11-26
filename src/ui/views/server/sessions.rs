@@ -20,12 +20,11 @@ impl Foxy {
         if state.mode.is_empty() {
             state.mode = "configured".into();
         }
-        ui.separator();
         let response = ui.push_id(editor.field_scope().with("sessions"), |ui| {
             let mut anchor = ui.heading(tr("Reforger sessions"));
-            ui.label(tr("Review local save points and choose the next launch intent. This does not start or stop the server."));
-            ui.label(tr("Session intent changes require a stopped server with an idle persistence writer."));
-            ui.label(tr("Automatic save selection covers local default persistence. Use server configuration to keep a custom provider unchanged."));
+            ui.weak(tr("Review local save points and choose the next launch intent. This does not start or stop the server."));
+            ui.weak(tr("Session intent changes require a stopped server with an idle persistence writer."));
+            ui.weak(tr("Automatic save selection covers local default persistence. Use server configuration to keep a custom provider unchanged."));
             if dirty {
                 ui.label(tr("Save or discard server draft edits before reviewing a session intent."));
             }

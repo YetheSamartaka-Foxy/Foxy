@@ -123,10 +123,9 @@ impl Foxy {
                 .invalidate_deployment_record_selection_plan();
         }
 
-        ui.separator();
         ui.push_id("server.deployment-record-controls", |ui| {
             ui.heading(tr("Offline deployment records"));
-            ui.label(tr("Save verified configuration and content archive identities as an offline selection. This does not activate a deployment or start a server."));
+            ui.weak(tr("Save verified configuration and content archive identities as an offline selection. This does not activate a deployment or start a server."));
             let busy = self.server_view.busy();
             let prepare_enabled = !dirty
                 && !busy
@@ -188,7 +187,7 @@ impl Foxy {
                         }
                     });
                     ui.label(tr_fmt("Composition review fingerprint: {fingerprint}", &[("fingerprint", plan.review.fingerprint.clone())]));
-                    ui.label(tr_fmt("Configuration verified: {value}; content verified: {content}; configuration matches saved draft: {matches}", &[("value", plan.review.configuration.integrity_verified.to_string()), ("content", plan.review.content.integrity_verified.to_string()), ("matches", plan.review.configuration.matches_current_draft.map_or_else(|| tr("Unknown"), |value| value.to_string()))]));
+                    ui.label(tr_fmt("Configuration verified: {value}; content verified: {content}; configuration matches saved draft: {matches}", &[("value", super::chrome::yes_no(plan.review.configuration.integrity_verified)), ("content", super::chrome::yes_no(plan.review.content.integrity_verified)), ("matches", plan.review.configuration.matches_current_draft.map_or_else(|| tr("Unknown"), super::chrome::yes_no))]));
                     if !plan.review.blockers.is_empty() {
                         ui.label(tr_fmt("Runtime readiness gates in this review: {count}", &[("count", plan.review.blockers.len().to_string())]));
                         for blocker in &plan.review.blockers {
@@ -259,9 +258,9 @@ impl Foxy {
             }
             if let Some(report) = &self.server_view.deployment_record_verification {
                 ui.collapsing(tr("Deployment record verification result"), |ui| {
-                    ui.label(tr_fmt("Record ID: {id}; integrity verified: {integrity}", &[("id", report.record_id.clone()), ("integrity", report.integrity_verified.to_string())]));
+                    ui.label(tr_fmt("Record ID: {id}; integrity verified: {integrity}", &[("id", report.record_id.clone()), ("integrity", super::chrome::yes_no(report.integrity_verified))]));
                     ui.label(tr_fmt("Manifest schema version: {version}", &[("version", report.manifest.schema_version.to_string())]));
-                    ui.label(tr_fmt("Configuration verified: {configuration}; content verified: {content}", &[("configuration", report.configuration_verified.to_string()), ("content", report.content_verified.to_string())]));
+                    ui.label(tr_fmt("Configuration verified: {configuration}; content verified: {content}", &[("configuration", super::chrome::yes_no(report.configuration_verified)), ("content", super::chrome::yes_no(report.content_verified))]));
                     ui.label(tr_fmt("Configuration revision: {revision}; content stage: {stage}", &[("revision", report.manifest.configuration_revision.clone()), ("stage", report.manifest.content_stage_id.clone())]));
                     ui.label(tr_fmt("Game space: {space}; game: {game}; instance: {instance}", &[("space", report.manifest.game_space_id.clone()), ("game", report.manifest.game_id.clone()), ("instance", report.manifest.instance_id.as_str().to_owned())]));
                     ui.label(tr_fmt("Instance revision: {revision}; catalog revision: {catalog}; catalog fingerprint: {fingerprint}", &[("revision", report.manifest.instance_revision.to_string()), ("catalog", report.manifest.catalog_revision.to_string()), ("fingerprint", report.manifest.catalog_fingerprint.clone())]));
@@ -278,11 +277,11 @@ impl Foxy {
                         }
                     });
                     ui.label(tr("Verification is independent of current draft, saved bindings, and selected record state."));
-                    ui.label(tr_fmt("Deployment ready: {ready}; writes performed: {writes}; active deployment changed: {changed}", &[("ready", report.deployment_ready.to_string()), ("writes", report.writes_performed.to_string()), ("changed", report.active_deployment_changed.to_string())]));
+                    ui.label(tr_fmt("Deployment ready: {ready}; writes performed: {writes}; active deployment changed: {changed}", &[("ready", super::chrome::yes_no(report.deployment_ready)), ("writes", super::chrome::yes_no(report.writes_performed)), ("changed", super::chrome::yes_no(report.active_deployment_changed))]));
                 });
             }
             if let Some(commit) = &self.server_view.deployment_record_commit {
-                ui.label(tr_fmt("Saved offline selection generation: {generation}; selection changed: {changed}; record published: {published}", &[("generation", commit.state.generation.to_string()), ("changed", commit.selection_changed.to_string()), ("published", commit.published.to_string())]));
+                ui.label(tr_fmt("Saved offline selection generation: {generation}; selection changed: {changed}; record published: {published}", &[("generation", commit.state.generation.to_string()), ("changed", super::chrome::yes_no(commit.selection_changed)), ("published", super::chrome::yes_no(commit.published))]));
                 ui.label(tr("No runtime deployment was activated and no process was started."));
             }
             let focus_anchor = if prepare_enabled { &prepare } else { &refresh };

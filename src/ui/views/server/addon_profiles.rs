@@ -13,7 +13,7 @@ impl Foxy {
         let mut editor = std::mem::take(&mut self.server_view.profile_editor);
         let mut action = None;
         ui.heading(tr("Addon profiles"));
-        ui.label(tr(
+        ui.weak(tr(
             "A profile is a named addon set. Assign it to a server from Server loadout.",
         ));
         if let Some(snapshot) = &self.server_view.content_sources {

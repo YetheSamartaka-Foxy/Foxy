@@ -4,12 +4,13 @@ use eframe::egui::{self, Ui};
 
 pub(super) fn render(
     ui: &mut Ui,
+    card: egui::Frame,
     settings: &mut crate::core::server::ReforgerServerDefinition,
     keys: &mut Vec<u64>,
     next_key: &mut u64,
     field_scope: egui::Id,
 ) {
-    ui.group(|ui| {
+    card.show(ui, |ui| {
         ui.set_min_width(ui.available_width());
     ui.heading(tr("Identity and network"));
     super::text(
@@ -64,8 +65,8 @@ pub(super) fn render(
         super::number(ui, "A2S query port", port, u16::MAX);
     }
     });
-    ui.add_space(6.0);
-    ui.group(|ui| {
+    ui.add_space(10.0);
+    card.show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.heading(tr("Scenario"));
         let mut scenario = settings.scenario_id.clone().unwrap_or_default();
@@ -88,7 +89,9 @@ pub(super) fn render(
             field_scope.with("scenario-end"),
         );
     });
-    ui.add_space(6.0);
+    ui.add_space(10.0);
+    card.show(ui, |ui| {
+    ui.set_min_width(ui.available_width());
     ui.collapsing(tr("Advanced server settings"), |ui| {
     ui.heading(tr("Advanced Reforger fields"));
     tri_state(
@@ -139,11 +142,12 @@ pub(super) fn render(
     );
     ui.label(tr("Distances are measured in meters. An unset value is omitted from generated configuration."));
     });
-    ui.add_space(6.0);
-    ui.group(|ui| {
+    });
+    ui.add_space(10.0);
+    card.show(ui, |ui| {
         ui.set_min_width(ui.available_width());
     ui.heading(tr("Addon intent"));
-    ui.label(tr("These are server-selected addon requirements by GUID. They are separate from player recommendations and from save-session selection."));
+    ui.weak(tr("These are server-selected addon requirements by GUID. They are separate from player recommendations and from save-session selection."));
     let mut remove = None;
     for (index, addon) in settings.addons.iter_mut().enumerate() {
         ui.push_id(("addon", keys[index]), |ui| {

@@ -19,10 +19,9 @@ impl Foxy {
         let id = editor.baseline.id.clone();
         let dirty = editor.dirty();
         let busy = self.server_view.busy();
-        ui.separator();
         let response = ui.push_id("server.backup-controls", |ui| {
             ui.heading(tr("Server backups and retention"));
-            ui.label(tr("Create bounded verified backups of owned engine references, redacted configuration, content metadata, persistence provider coverage and save files. Plaintext secrets, RCon passwords, owner tokens and transient caches are excluded."));
+            ui.weak(tr("Create bounded verified backups of owned engine references, redacted configuration, content metadata, persistence provider coverage and save files. Plaintext secrets, RCon passwords, owner tokens and transient caches are excluded."));
 
             if dirty {
                 ui.label(tr("Save or discard server draft edits before planning or creating backups."));
@@ -139,7 +138,7 @@ impl Foxy {
                         "Consistency: {mode}; stopped verified: {stopped}; owner running: {owner}; active consumers: {consumers}; files: {files}; uncompressed bytes: {bytes}",
                         &[
                             ("mode", plan.consistency.mode.as_str().to_owned()),
-                            ("stopped", plan.consistency.stopped_verified.to_string()),
+                            ("stopped", super::chrome::yes_no(plan.consistency.stopped_verified)),
                             ("owner", plan.consistency.owner_running.to_string()),
                             ("consumers", plan.consistency.active_consumers.to_string()),
                             ("files", plan.planned_files.to_string()),
@@ -191,7 +190,7 @@ impl Foxy {
                         ),
                         (
                             "stopped",
-                            outcome.manifest.consistency.stopped_verified.to_string(),
+                            super::chrome::yes_no(outcome.manifest.consistency.stopped_verified),
                         ),
                         ("bytes", outcome.archive_bytes.to_string()),
                         ("pruned", outcome.pruned_backups.len().to_string()),
@@ -341,7 +340,7 @@ impl Foxy {
                         &[
                             ("id", summary.backup_id.clone()),
                             ("mode", summary.mode.as_str().to_owned()),
-                            ("stopped", summary.stopped_verified.to_string()),
+                            ("stopped", super::chrome::yes_no(summary.stopped_verified)),
                             ("pinned", summary.pinned.to_string()),
                             ("files", summary.total_files.to_string()),
                             ("bytes", summary.archive_bytes.to_string()),

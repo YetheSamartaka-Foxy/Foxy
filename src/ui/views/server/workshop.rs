@@ -41,10 +41,9 @@ impl Foxy {
         let alias = self.server_view.steam_auth.alias.trim().to_owned();
         let mut action = None;
         let mut confirm = false;
-        ui.separator();
         let anchor = ui.push_id("server.workshop-controls", |ui| {
             ui.heading(tr("Workshop items for servers"));
-            ui.label(tr("Download Arma 3 Workshop items with a prepared native Steam session into verified revisions. Each pinned item becomes the already-present content profile workshop-<id> for content bindings."));
+            ui.weak(tr("Download Arma 3 Workshop items with a prepared native Steam session into verified revisions. Each pinned item becomes the already-present content profile workshop-<id> for content bindings."));
             let state = &mut self.server_view;
             ui.horizontal_wrapped(|ui| {
                 let label = ui.label(tr("Workshop item ids or links"));

@@ -139,9 +139,8 @@ impl Foxy {
             return;
         };
 
-        ui.separator();
         ui.heading(tr("Reforger administration"));
-        ui.label(tr("Typed RCon actions for the running Reforger server."));
+        ui.weak(tr("Typed RCon actions for the running Reforger server."));
         let Some(run_generation) = snapshot.run_generation else {
             state.confirmation = None;
             self.server_view.reforger_admin = state;

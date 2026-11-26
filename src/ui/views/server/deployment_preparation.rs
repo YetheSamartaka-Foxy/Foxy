@@ -32,18 +32,25 @@ impl Foxy {
             self.server_view.preparation_plan = None;
         }
         let busy = self.server_view.busy();
-        ui.separator();
         Some(ui.push_id("server.deployment-preparation-controls", |ui| {
             ui.heading(tr("Offline deployment preparation"));
-            ui.label(tr("Create and verify an immutable offline copy. This does not activate a deployment or start a server."));
-            let plan_button = ui.add_enabled(!busy && selected.is_some(), egui::Button::new(tr("Plan preparation")));
+            ui.weak(tr("Create and verify an immutable offline copy. This does not activate a deployment or start a server."));
+            let (plan_button, refresh) = ui.horizontal_wrapped(|ui| {
+                (
+                    ui.add_enabled(!busy && selected.is_some(), egui::Button::new(tr("Plan preparation"))),
+                    ui.add_enabled(!busy, egui::Button::new(tr("Refresh prepared generations"))),
+                )
+            }).inner;
             if plan_button.clicked() && let Some(expected_generation) = generation {
                 self.start_server_task(ServerTaskAction::PlanDeploymentPreparation { id: id.clone(), expected_generation });
+            }
+            if refresh.clicked() {
+                self.start_server_task(ServerTaskAction::ListDeploymentPreparations(id.clone()));
             }
             if let Some(selected) = &selected {
                 ui.label(tr_fmt("Selected record: {id}", &[("id", selected.clone())]));
             } else {
-                ui.label(tr("Load a saved offline record selection before planning preparation."));
+                ui.weak(tr("Load a saved offline record selection before planning preparation."));
             }
             if let Some(plan) = &self.server_view.preparation_plan {
                 egui::CollapsingHeader::new(tr("Reviewed preparation plan")).default_open(true).show(ui, |ui| {
@@ -71,12 +78,8 @@ impl Foxy {
                     self.start_server_task(ServerTaskAction::BuildDeploymentPreparation(plan));
                 }
             }
-            let refresh = ui.add_enabled(!busy, egui::Button::new(tr("Refresh prepared generations")));
-            if refresh.clicked() {
-                self.start_server_task(ServerTaskAction::ListDeploymentPreparations(id.clone()));
-            }
             if let Some(list) = &self.server_view.preparation_list {
-                ui.label(tr("Prepared generation inventory is not integrity evidence."));
+                ui.weak(tr("Prepared generation inventory is not integrity evidence."));
                 ui.label(tr_fmt("Unrecognized preparation entries: {count}", &[("count", list.unrecognized_entries.to_string())]));
                 for preparation_id in list.preparation_ids.iter().take(1024) {
                     let selected = self.server_view.preparation_selection.as_deref() == Some(preparation_id.as_str());
@@ -93,7 +96,7 @@ impl Foxy {
             }
             if let Some(report) = &self.server_view.preparation_report {
                 ui.label(tr_fmt("Prepared generation: {id}", &[("id", report.preparation_id.clone())]));
-                ui.label(tr_fmt("Files: {files}; bytes: {bytes}; verified: {verified}; published: {published}; reused: {reused}", &[("files", report.files.to_string()), ("bytes", report.bytes.to_string()), ("verified", report.integrity_verified.to_string()), ("published", report.published.to_string()), ("reused", report.reused_existing.to_string())]));
+                ui.label(tr_fmt("Files: {files}; bytes: {bytes}; verified: {verified}; published: {published}; reused: {reused}", &[("files", report.files.to_string()), ("bytes", report.bytes.to_string()), ("verified", super::chrome::yes_no(report.integrity_verified)), ("published", super::chrome::yes_no(report.published)), ("reused", super::chrome::yes_no(report.reused_existing))]));
                 ui.label(tr("Deployment ready: no. Active deployment changed: no. Process started: no."));
             }
             if plan_button.enabled() { plan_button } else { refresh }

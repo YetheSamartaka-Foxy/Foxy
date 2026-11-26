@@ -65,9 +65,8 @@ impl Foxy {
         }
         ui.ctx().request_repaint_after(REFRESH_INTERVAL);
 
-        ui.separator();
         ui.heading(tr("RCon"));
-        ui.label(tr(
+        ui.weak(tr(
             "RCon lets the server owner send administration commands to a running server. The password is kept in protected storage and is written only into private runtime state when the server starts. Changes apply after commit, prepare, activate and a restart.",
         ));
         if let Some(error) = &self.server_view.rcon.load_error {

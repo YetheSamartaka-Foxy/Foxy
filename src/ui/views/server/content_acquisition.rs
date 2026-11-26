@@ -20,12 +20,11 @@ impl Foxy {
         let id = editor.baseline.id.clone();
         let dirty = editor.dirty();
         let busy = self.server_view.busy();
-        ui.separator();
         Some(ui.push_id("server-content-acquisition-controls", |ui| {
             ui.heading(tr("Acquire repository content"));
-            ui.label(tr("Download selected repository profiles into a retained content stage. Acquisition does not activate a deployment or change client enablement."));
-            ui.label(tr("Already present profiles can be added through the existing local content staging action."));
-            ui.label(tr("A plan reviews local intent and works offline. Current remote publication is resolved when acquisition starts, so the preview does not pin remote content."));
+            ui.weak(tr("Download selected repository profiles into a retained content stage. Acquisition does not activate a deployment or change client enablement."));
+            ui.weak(tr("Already present profiles can be added through the existing local content staging action."));
+            ui.weak(tr("A plan reviews local intent and works offline. Current remote publication is resolved when acquisition starts, so the preview does not pin remote content."));
 
             ui.horizontal_wrapped(|ui| {
                 let seed_label = ui.label(tr("Seed stage id (optional)"));
@@ -137,7 +136,7 @@ impl Foxy {
                                     &[
                                         ("name", addon.name.clone()),
                                         ("checksum", addon.checksum.clone()),
-                                        ("verified", addon.verified.to_string()),
+                                        ("verified", super::chrome::yes_no(addon.verified)),
                                     ],
                                 ));
                             }
@@ -152,7 +151,7 @@ impl Foxy {
                         "Retained stage: {id}; verified: {verified}; files: {files}; bytes: {bytes}",
                         &[
                             ("id", stage.stage_id.clone()),
-                            ("verified", stage.verified.to_string()),
+                            ("verified", super::chrome::yes_no(stage.verified)),
                             ("files", stage.files.to_string()),
                             ("bytes", stage.bytes.to_string()),
                         ],

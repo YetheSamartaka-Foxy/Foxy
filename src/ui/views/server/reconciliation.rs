@@ -16,10 +16,9 @@ impl Foxy {
         let id = editor.baseline.id.clone();
         let dirty = editor.dirty();
         let busy = self.server_view.busy();
-        ui.separator();
         let response = ui.push_id("server.reconciliation-controls", |ui| {
             ui.heading(tr("Content consumers and storage reconciliation"));
-            ui.label(tr("Review shared content sources, saved profiles and repository instances across game spaces. URL matches alone do not identify the same repository."));
+            ui.weak(tr("Review shared content sources, saved profiles and repository instances across game spaces. URL matches alone do not identify the same repository."));
 
             let refresh = ui.add_enabled(!busy, egui::Button::new(tr("Refresh content consumer report")));
             if refresh.clicked() {
@@ -31,7 +30,7 @@ impl Foxy {
                     .max_height(240.0)
                     .show(ui, |ui| {
                         ui.label(tr_fmt("Game space: {space}; source profiles: {count}", &[("space", report.game_space_id.clone()), ("count", report.sources.len().to_string())]));
-                        ui.label(tr_fmt("Inspection complete: {complete}; discovery scope: {scope}", &[("complete", report.inspection_complete.to_string()), ("scope", report.source_discovery_scope.to_owned())]));
+                        ui.label(tr_fmt("Inspection complete: {complete}; discovery scope: {scope}", &[("complete", super::chrome::yes_no(report.inspection_complete)), ("scope", report.source_discovery_scope.to_owned())]));
                         for source in &report.sources {
                             ui.collapsing(tr_fmt("Profile {profile}", &[("profile", source.profile.clone())]), |ui| {
                                 ui.label(tr_fmt("Identity: {url} at {path}; folder {folder}", &[("url", source.remote_url.clone()), ("path", source.local_path.clone()), ("folder", source.folder_id.clone())]));
@@ -45,7 +44,7 @@ impl Foxy {
                         for diagnostic in &report.diagnostics { ui.label(tr_fmt("Diagnostic: {message}", &[("message", diagnostic.clone())])); }
                         ui.label(tr("Persistent installation consumer registrations"));
                         for inspection in &report.installation_consumers {
-                            ui.label(tr_fmt("Installation {id}: inspection complete {complete}; recorded consumers {count}; cleanup required {cleanup}; liveness verified {live}; maintenance authorized {authorized}", &[("id", inspection.installation_id.as_str().to_owned()), ("complete", inspection.inspection_complete.to_string()), ("count", inspection.recorded_consumers.len().to_string()), ("cleanup", inspection.cleanup_required.map_or_else(|| tr("Unknown"), |value| value.to_string())), ("live", inspection.liveness_verified.to_string()), ("authorized", inspection.exclusive_maintenance_authorized.to_string())]));
+                            ui.label(tr_fmt("Installation {id}: inspection complete {complete}; recorded consumers {count}; cleanup required {cleanup}; liveness verified {live}; maintenance authorized {authorized}", &[("id", inspection.installation_id.as_str().to_owned()), ("complete", super::chrome::yes_no(inspection.inspection_complete)), ("count", inspection.recorded_consumers.len().to_string()), ("cleanup", inspection.cleanup_required.map_or_else(|| tr("Unknown"), super::chrome::yes_no)), ("live", super::chrome::yes_no(inspection.liveness_verified)), ("authorized", super::chrome::yes_no(inspection.exclusive_maintenance_authorized))]));
                             for consumer in &inspection.recorded_consumers {
                                 ui.label(tr_fmt("Consumer space {space}; instance {instance}; operation {operation}; run generation {generation}", &[("space", consumer.session.game_space_id.clone()), ("instance", consumer.session.instance_id.clone()), ("operation", consumer.session.operation_id.clone()), ("generation", consumer.session.run_generation.to_string())]));
                             }

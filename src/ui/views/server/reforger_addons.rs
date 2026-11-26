@@ -35,11 +35,10 @@ impl Foxy {
         }
         let busy = self.server_view.busy();
 
-        ui.separator();
         Some(ui.push_id("server-reforger-addon-controls", |ui| {
             ui.heading(tr("Reforger addon revisions"));
-            ui.label(tr("Resolve requested addons using the accepted Reforger engine. The review is read-only and starts no process."));
-            ui.label(tr("Only the stable addon channel is currently supported."));
+            ui.weak(tr("Resolve requested addons using the accepted Reforger engine. The review is read-only and starts no process."));
+            ui.weak(tr("Only the stable addon channel is currently supported."));
             if !ready {
                 ui.label(tr("Save the selected Reforger server draft before reviewing addon acquisition."));
             }
@@ -90,8 +89,8 @@ impl Foxy {
                     ("provider", plan.scenario_provider.clone().unwrap_or_else(|| tr("Not specified"))),
                 ]));
                 ui.label(tr_fmt("Plan effects: writes performed {writes}; process started {process}", &[
-                    ("writes", plan.writes_performed.to_string()),
-                    ("process", plan.process_started.to_string()),
+                    ("writes", super::chrome::yes_no(plan.writes_performed)),
+                    ("process", super::chrome::yes_no(plan.process_started)),
                 ]));
                 if !plan.blockers.is_empty() {
                     ui.label(tr("Acquisition blockers"));

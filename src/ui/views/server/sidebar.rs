@@ -1,7 +1,7 @@
 use crate::core::server::ServerInstanceId;
 use crate::ui::app::Foxy;
 use crate::ui::app::server::ServerPage;
-use crate::ui::i18n::tr;
+use crate::ui::i18n::{is_rtl, tr};
 use eframe::egui::{self, Ui};
 
 impl Foxy {
@@ -26,22 +26,38 @@ impl Foxy {
                     self.open_game_spaces_view();
                 }
                 self.render_server_add_button(ui, !busy && !dirty, compact);
-                self.render_server_reload_button(ui, !busy && !dirty);
             });
         } else {
             self.render_game_space_header(ui);
             self.render_server_add_button(ui, !busy && !dirty, compact);
         }
+        ui.add_space(4.0);
+        let reload_size = Self::toolbar_icon_button_size(16.0);
         let label = tr("Filter servers");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.server_view.instance_filter)
-                .hint_text(&label)
-                .desired_width(ui.available_width()),
-        )
-        .accessible_name(label);
-        if !compact {
-            self.render_server_reload_button(ui, !busy && !dirty);
+        if is_rtl() {
+            ui.horizontal(|ui| {
+                self.render_server_reload_button(ui, !busy && !dirty, reload_size);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.server_view.instance_filter)
+                        .hint_text(&label)
+                        .desired_width(ui.available_width()),
+                )
+                .accessible_name(label);
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.server_view.instance_filter)
+                        .hint_text(&label)
+                        .desired_width(
+                            ui.available_width() - reload_size.x - ui.spacing().item_spacing.x,
+                        ),
+                )
+                .accessible_name(label);
+                self.render_server_reload_button(ui, !busy && !dirty, reload_size);
+            });
         }
+        ui.add_space(4.0);
 
         let search = self.server_view.instance_filter.trim().to_lowercase();
         let rows = self
@@ -74,7 +90,7 @@ impl Foxy {
             } else {
                 "No server drafts in this game space."
             };
-            ui.label(tr(label));
+            self.server_note(ui, tr(label));
             return;
         }
 
@@ -91,18 +107,47 @@ impl Foxy {
                     let current = self.server_view.selected.as_ref() == Some(id);
                     let response = ui
                         .push_id(("server-row", id.as_str()), |ui| {
-                            let phase = self
-                                .observed_server_status(id)
-                                .map(|status| super::lifecycle::runtime_phase_label(status.phase))
-                                .unwrap_or_else(|| tr("Unknown"));
+                            ui.spacing_mut().button_padding = egui::vec2(10.0, 4.0);
+                            let (phase, tone) = self.server_runtime_badge(id);
+                            let mut job = egui::text::LayoutJob::default();
+                            let body = egui::TextStyle::Body.resolve(ui.style());
+                            job.append(
+                                name,
+                                0.0,
+                                egui::TextFormat::simple(body.clone(), self.color_text_normal()),
+                            );
+                            job.append(
+                                &format!("\n{phase}"),
+                                0.0,
+                                egui::TextFormat::simple(
+                                    egui::FontId::new(body.size * 0.86, body.family),
+                                    self.color_text_dim(),
+                                ),
+                            );
                             let response = ui
                                 .add(
-                                    egui::Button::selectable(current, format!("{name}\n{phase}"))
-                                        .min_size(egui::vec2(ui.available_width(), 34.0))
+                                    egui::Button::selectable(current, egui::WidgetText::from(job))
+                                        .min_size(egui::vec2(ui.available_width(), 42.0))
                                         .wrap(),
                                 )
                                 .on_hover_text(id.as_str())
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            let edge = if is_rtl() {
+                                egui::Rect::from_min_max(
+                                    response.rect.right_top() - egui::vec2(3.0, 0.0),
+                                    response.rect.right_bottom(),
+                                )
+                            } else {
+                                egui::Rect::from_min_max(
+                                    response.rect.left_top(),
+                                    response.rect.left_bottom() + egui::vec2(3.0, 0.0),
+                                )
+                            };
+                            ui.painter().rect_filled(
+                                edge,
+                                egui::CornerRadius::same(1),
+                                self.server_tone_color(tone),
+                            );
                             Self::focus_outline(ui, &response);
                             response
                         })
@@ -193,8 +238,16 @@ impl Foxy {
         }
     }
 
-    fn render_server_reload_button(&mut self, ui: &mut Ui, editable: bool) {
-        let reload = ui.add_enabled(editable, egui::Button::new(tr("Reload drafts")));
+    fn render_server_reload_button(&mut self, ui: &mut Ui, editable: bool, size: egui::Vec2) {
+        let label = tr("Reload drafts");
+        let reload = ui
+            .add_enabled(
+                editable,
+                egui::Button::new(egui::RichText::new("\u{21bb}").size(16.0)).min_size(size),
+            )
+            .accessible_name(&label)
+            .on_hover_text(&label)
+            .on_disabled_hover_text(&label);
         Self::focus_outline(ui, &reload);
         if reload.clicked() {
             self.start_server_draft_task(None);

@@ -44,27 +44,35 @@ impl Foxy {
             self.server_view.activation_plan = None;
         }
         let busy = self.server_view.busy() || self.server_view.dirty();
-        ui.separator();
         Some(ui.push_id("server.deployment-activation-controls", |ui| {
             ui.heading(tr("Native deployment activation"));
-            ui.label(tr("Create an immutable native runtime copy from a reviewed preparation. The adopted installation and preparation source remain unchanged; activation does not start a process."));
-            ui.label(tr(if crate::core::game::registry().active().server_capabilities().key_trust {
+            ui.weak(tr("Create an immutable native runtime copy from a reviewed preparation. The adopted installation and preparation source remain unchanged; activation does not start a process."));
+            ui.weak(tr(if crate::core::game::registry().active().server_capabilities().key_trust {
                 "Activation copies reviewed required and server-only addons, the tested base key and explicitly trusted public keys. Optional addons are not loaded."
             } else {
                 "Reforger activation copies the reviewed base engine and server.json. Choose explicit IPv4/game/A2S endpoints and a built-in scenario with no addon intent or staged addon content."
             }));
-            if self.server_view.activation_status.as_ref().is_none_or(|status| status.instance_id != id) {
-                ui.label(tr("Load activation status before planning so the current activation generation can be checked."));
-            }
-            let status_button = ui.add_enabled(!busy, egui::Button::new(tr("Refresh activation status")));
+            let ready_to_plan = generation.is_some()
+                && activation_generation.is_some()
+                && preparation_id.is_some()
+                && self.server_view.activation_status.as_ref().is_some_and(|status| status.instance_id == id && !status.recovery_required);
+            let (status_button, plan_button) = ui.horizontal_wrapped(|ui| {
+                (
+                    ui.add_enabled(!busy, egui::Button::new(tr("Refresh activation status"))),
+                    ui.add_enabled(!busy && ready_to_plan, egui::Button::new(tr("Plan activation"))),
+                )
+            }).inner;
             if status_button.clicked() {
                 self.start_server_task(ServerTaskAction::InspectNativeActivation(id.clone()));
+            }
+            if self.server_view.activation_status.as_ref().is_none_or(|status| status.instance_id != id) {
+                ui.weak(tr("Load activation status before planning so the current activation generation can be checked."));
             }
             if let Some(status) = self.server_view.activation_status.as_ref().filter(|status| status.instance_id == id) {
                 ui.label(tr_fmt("Activation generation: {generation}; runtime integrity verified: {verified}; recovery required: {recovery}", &[
                     ("generation", status.activation_generation.to_string()),
-                    ("verified", status.integrity_verified.to_string()),
-                    ("recovery", status.recovery_required.to_string()),
+                    ("verified", super::chrome::yes_no(status.integrity_verified)),
+                    ("recovery", super::chrome::yes_no(status.recovery_required)),
                 ]));
                 if let Some(runtime) = &status.runtime {
                     ui.label(tr_fmt("Active runtime: {runtime}; manifest fingerprint: {fingerprint}", &[
@@ -73,11 +81,6 @@ impl Foxy {
                     ]));
                 }
             }
-            let ready_to_plan = generation.is_some()
-                && activation_generation.is_some()
-                && preparation_id.is_some()
-                && self.server_view.activation_status.as_ref().is_some_and(|status| status.instance_id == id && !status.recovery_required);
-            let plan_button = ui.add_enabled(!busy && ready_to_plan, egui::Button::new(tr("Plan activation")));
             if plan_button.clicked()
                 && let (Some(expected_selection_generation), Some(expected_activation_generation), Some(preparation_id)) =
                     (generation, activation_generation, preparation_id.clone())
@@ -92,7 +95,7 @@ impl Foxy {
             if let Some(preparation_id) = preparation_id {
                 ui.label(tr_fmt("Selected prepared generation: {id}", &[("id", preparation_id)]));
             } else {
-                ui.label(tr("Select a prepared generation before planning activation."));
+                ui.weak(tr("Select a prepared generation before planning activation."));
             }
             if let Some(plan) = &self.server_view.activation_plan {
                 egui::CollapsingHeader::new(tr("Reviewed activation plan")).default_open(true).show(ui, |ui| {
@@ -136,7 +139,7 @@ impl Foxy {
 
             ui.separator();
             ui.heading(tr("Deployment recovery"));
-            ui.label(tr("Recovery review reads the retained transaction and installation intent. Resolve only the exact reviewed outcome."));
+            ui.weak(tr("Recovery review reads the retained transaction and installation intent. Resolve only the exact reviewed outcome."));
             if ui.add_enabled(!busy, egui::Button::new(tr("Review deployment recovery"))).clicked() {
                 self.start_server_task(ServerTaskAction::PlanNativeRecovery(id.clone()));
             }
@@ -148,7 +151,7 @@ impl Foxy {
                 ui.label(tr_fmt("Activation generation: {generation}; runtime: {runtime}; journal present: {journal}", &[
                     ("generation", review.activation_generation.to_string()),
                     ("runtime", review.runtime_id.clone().unwrap_or_else(|| tr("None"))),
-                    ("journal", review.journal_present.to_string()),
+                    ("journal", super::chrome::yes_no(review.journal_present)),
                 ]));
                 ui.label(tr("Resolution preserves the observed active deployment and retires only the reviewed transaction protection."));
                 if ui.add_enabled(!busy, egui::Button::new(tr("Resolve reviewed recovery"))).clicked()
@@ -164,10 +167,10 @@ impl Foxy {
                     ("runtime", outcome.runtime_id.clone().unwrap_or_else(|| tr("Unknown"))),
                 ]));
                 ui.label(tr_fmt("Runtime verified: {verified}; journal pending: {journal}; installation intent pending: {intent}; process started: {started}", &[
-                    ("verified", outcome.runtime_verified.to_string()),
-                    ("journal", outcome.journal_pending.to_string()),
-                    ("intent", outcome.intent_pending.to_string()),
-                    ("started", outcome.process_started.to_string()),
+                    ("verified", super::chrome::yes_no(outcome.runtime_verified)),
+                    ("journal", super::chrome::yes_no(outcome.journal_pending)),
+                    ("intent", super::chrome::yes_no(outcome.intent_pending)),
+                    ("started", super::chrome::yes_no(outcome.process_started)),
                 ]));
                 if outcome.journal_pending || outcome.intent_pending {
                     ui.label(tr("The transaction may need recovery. Refresh activation status and review recovery before retrying."));

@@ -22,9 +22,8 @@ impl Foxy {
         let dirty = editor.dirty();
         let busy = self.server_view.busy();
 
-        ui.separator();
         ui.heading(tr("Server signature keys"));
-        ui.label(tr("Review public BIKEY candidates from the installation, selected content stage, and operator files. Trust changes are saved only after explicit review and apply."));
+        ui.weak(tr("Review public BIKEY candidates from the installation, selected content stage, and operator files. Trust changes are saved only after explicit review and apply."));
         if dirty {
             ui.label(tr("Save the server draft before reviewing trusted keys."));
         }

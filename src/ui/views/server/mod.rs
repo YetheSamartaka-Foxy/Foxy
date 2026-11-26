@@ -1,6 +1,7 @@
 mod arma_admin;
 mod addon_profiles;
 mod backups;
+mod chrome;
 mod configuration;
 mod consumer_recovery;
 mod content;

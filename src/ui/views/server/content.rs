@@ -36,18 +36,8 @@ impl Foxy {
             self.server_view.content_plan = None;
             self.server_view.content_bindings_plan = None;
         }
-        ui.separator();
         ui.heading(tr("Server loadout"));
-        ui.label(tr("Choose named addon sets for this server. Reviewed changes take effect through deployment."));
-        if ui
-            .button(tr("Addon profiles"))
-            .on_hover_text(tr(
-                "Create named addon sets and manage their source folders.",
-            ))
-            .clicked()
-        {
-            self.server_view.page = ServerPage::Profiles;
-        }
+        ui.weak(tr("Choose named addon sets for this server. Reviewed changes take effect through deployment."));
         let mut action = None;
         if !dirty
             && !self.server_view.busy()
@@ -58,13 +48,25 @@ impl Foxy {
             action = Some(ServerTaskAction::ReloadContentBindings(instance_id.clone()));
         }
         let reload = ui
-            .add_enabled(
-                !dirty && !self.server_view.busy(),
-                egui::Button::new(tr("Reload saved content bindings")),
-            )
-            .on_hover_text(tr(
-                "Replace the current selection with the server's saved addon bindings.",
-            ));
+            .horizontal_wrapped(|ui| {
+                if ui
+                    .button(tr("Addon profiles"))
+                    .on_hover_text(tr(
+                        "Create named addon sets and manage their source folders.",
+                    ))
+                    .clicked()
+                {
+                    self.server_view.page = ServerPage::Profiles;
+                }
+                ui.add_enabled(
+                    !dirty && !self.server_view.busy(),
+                    egui::Button::new(tr("Reload saved content bindings")),
+                )
+                .on_hover_text(tr(
+                    "Replace the current selection with the server's saved addon bindings.",
+                ))
+            })
+            .inner;
         if reload.clicked() && !dirty && !self.server_view.busy() {
             action = Some(ServerTaskAction::ReloadContentBindings(instance_id.clone()));
         }

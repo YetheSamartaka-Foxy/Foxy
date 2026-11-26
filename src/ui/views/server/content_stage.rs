@@ -51,9 +51,8 @@ impl Foxy {
         } else if !bindings_match_saved {
             self.server_view.content_stage_plan = None;
         }
-        ui.separator();
         ui.heading(tr("Verified local content staging"));
-        ui.label(tr("Stages saved local content with hashes. Staging does not download, activate, or change the active deployment."));
+        ui.weak(tr("Stages saved local content with hashes. Staging does not download, activate, or change the active deployment."));
         let saved = self.server_view.saved_content_bindings.as_ref();
         let baseline_ready = !dirty
             && bindings_match_saved
@@ -160,8 +159,8 @@ impl Foxy {
             ui.label(tr_fmt(
                 "Published: {published}; reused existing stage: {reused}",
                 &[
-                    ("published", report.published.to_string()),
-                    ("reused", report.reused_existing.to_string()),
+                    ("published", super::chrome::yes_no(report.published)),
+                    ("reused", super::chrome::yes_no(report.reused_existing)),
                 ],
             ));
             ui.label(tr(if report.verified {
@@ -172,9 +171,9 @@ impl Foxy {
             ui.label(tr_fmt(
                 "Deployment readiness: {ready}. Active deployment changed: {changed}. Downloads started: {downloads}.",
                 &[
-                    ("ready", report.deployment_ready.to_string()),
-                    ("changed", report.active_deployment_changed.to_string()),
-                    ("downloads", report.downloads_started.to_string()),
+                    ("ready", super::chrome::yes_no(report.deployment_ready)),
+                    ("changed", super::chrome::yes_no(report.active_deployment_changed)),
+                    ("downloads", super::chrome::yes_no(report.downloads_started)),
                 ],
             ));
         }

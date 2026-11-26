@@ -27,9 +27,8 @@ impl Foxy {
             self.server_view.preflight = None;
         }
         let mut action = None;
-        ui.separator();
         ui.heading(tr("Existing installation and deployment review"));
-        ui.label(tr("Adoption records an external installation without changing or executing it. It grants no update or removal authority."));
+        ui.weak(tr("Adoption records an external installation without changing or executing it. It grants no update or removal authority."));
         ui.add_enabled_ui(!dirty, |ui| {
             if capabilities.installation_adoption {
                 ui.horizontal_wrapped(|ui| {

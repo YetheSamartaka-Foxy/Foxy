@@ -32,7 +32,6 @@ impl Foxy {
             self.server_view.configuration_preview = None;
             self.server_view.configuration_plan = None;
         }
-        ui.separator();
         ui.heading(tr("Saved configuration revisions"));
         if dirty {
             self.server_view.configuration_plan = None;

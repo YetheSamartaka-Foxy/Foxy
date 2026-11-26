@@ -159,9 +159,8 @@ impl Foxy {
         }
         ui.ctx().request_repaint_after(REFRESH_INTERVAL);
 
-        ui.separator();
         ui.heading(tr("Scheduled maintenance"));
-        ui.label(tr(
+        ui.weak(tr(
             "Maintenance jobs run only while a server owner for this game space is running. A scheduled restart never starts a stopped server, and an occurrence whose owner ended is reported as unknown and never repeated automatically.",
         ));
         if let Some(error) = &self.server_view.maintenance.load_error {

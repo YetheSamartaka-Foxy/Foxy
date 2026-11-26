@@ -107,10 +107,9 @@ impl Foxy {
             self.server_view.invalidate_deployment_composition();
         }
 
-        ui.separator();
         ui.push_id("server.deployment-composition-controls", |ui| {
             ui.heading(tr("Deployment composition review"));
-            ui.label(tr("Review saved configuration and a selected verified content stage together. This report does not deploy or start a server."));
+            ui.weak(tr("Review saved configuration and a selected verified content stage together. This report does not deploy or start a server."));
             let busy = self.server_view.busy();
             let enabled = !dirty && !busy;
             let review = ui.add_enabled(
@@ -141,19 +140,19 @@ impl Foxy {
                     ui.label(tr_fmt("Selected revision: {revision}", &[("revision", report.configuration.revision_id.clone().unwrap_or_else(|| tr("None")))]));
                     ui.label(tr_fmt("Selection fingerprint: {fingerprint}", &[("fingerprint", report.configuration.selection_fingerprint.clone().unwrap_or_else(|| tr("None")))]));
                     ui.label(tr_fmt("Manifest fingerprint: {fingerprint}", &[("fingerprint", report.configuration.manifest_fingerprint.clone().unwrap_or_else(|| tr("None")))]));
-                    ui.label(tr_fmt("Integrity verified: {value}; matches current draft: {matches}", &[("value", report.configuration.integrity_verified.to_string()), ("matches", report.configuration.matches_current_draft.map_or_else(|| tr("Unknown"), |value| value.to_string()))]));
+                    ui.label(tr_fmt("Integrity verified: {value}; matches current draft: {matches}", &[("value", super::chrome::yes_no(report.configuration.integrity_verified)), ("matches", report.configuration.matches_current_draft.map_or_else(|| tr("Unknown"), super::chrome::yes_no))]));
                     if let Some(preview) = &report.configuration.preview {
-                        ui.label(tr_fmt("Configuration preview fingerprint: {fingerprint}; launch ready: {ready}", &[("fingerprint", preview.fingerprint.clone()), ("ready", preview.launch_ready.to_string())]));
+                        ui.label(tr_fmt("Configuration preview fingerprint: {fingerprint}; launch ready: {ready}", &[("fingerprint", preview.fingerprint.clone()), ("ready", super::chrome::yes_no(preview.launch_ready))]));
                     }
                 });
 
                 ui.collapsing(tr("Content stage evidence"), |ui| {
                     ui.label(tr_fmt("Status: {status}; requested stage: {stage}", &[("status", tr(composition_status(report.content.status))), ("stage", report.content.requested_stage_id.clone().unwrap_or_else(|| tr("None")))]));
-                    ui.label(tr_fmt("Integrity verified: {value}; matches saved bindings: {matches}", &[("value", report.content.integrity_verified.to_string()), ("matches", report.content.matches_saved_bindings.map_or_else(|| tr("Unknown"), |value| value.to_string()))]));
+                    ui.label(tr_fmt("Integrity verified: {value}; matches saved bindings: {matches}", &[("value", super::chrome::yes_no(report.content.integrity_verified)), ("matches", report.content.matches_saved_bindings.map_or_else(|| tr("Unknown"), super::chrome::yes_no))]));
                     ui.label(tr_fmt("Current bindings fingerprint: {fingerprint}", &[("fingerprint", report.content.current_bindings.fingerprint.clone().unwrap_or_else(|| tr("None")))]));
                     ui.label(tr_fmt("Current sources fingerprint: {fingerprint}", &[("fingerprint", report.content.current_sources_fingerprint.clone().unwrap_or_else(|| tr("None")))]));
                     if let Some(stage) = &report.content.stage {
-                        ui.label(tr_fmt("Stage {id}: {files} files, {bytes} bytes; verified: {verified}", &[("id", stage.stage_id.clone()), ("files", stage.files.to_string()), ("bytes", stage.bytes.to_string()), ("verified", stage.verified.to_string())]));
+                        ui.label(tr_fmt("Stage {id}: {files} files, {bytes} bytes; verified: {verified}", &[("id", stage.stage_id.clone()), ("files", stage.files.to_string()), ("bytes", stage.bytes.to_string()), ("verified", super::chrome::yes_no(stage.verified))]));
                     }
                     if let Some(bindings) = &report.content.reviewed_bindings {
                         ui.label(tr_fmt("Reviewed saved bindings: {count}", &[("count", bindings.bindings.len().to_string())]));
@@ -217,9 +216,9 @@ impl Foxy {
                 });
                 ui.collapsing(tr("Runtime and installation evidence"), |ui| {
                     ui.label(tr_fmt("Installation: {id}", &[("id", report.installation_id.as_ref().map_or_else(|| tr("None"), |id| id.as_str().to_owned()))]));
-                    ui.label(tr_fmt("Installation verified: {verified}; runtime launch available: {available}", &[("verified", report.installation_verified.to_string()), ("available", report.runtime_prerequisites.launch_available.to_string())]));
+                    ui.label(tr_fmt("Installation verified: {verified}; runtime launch available: {available}", &[("verified", super::chrome::yes_no(report.installation_verified)), ("available", super::chrome::yes_no(report.runtime_prerequisites.launch_available))]));
                     if let Some(consumers) = &report.installation_consumers {
-                        ui.label(tr_fmt("Consumer inspection complete: {complete}; recorded consumers: {count}; cleanup required: {cleanup}; liveness verified: {liveness}; exclusive maintenance authorized: {authorized}", &[("complete", consumers.inspection_complete.to_string()), ("count", consumers.recorded_consumers.len().to_string()), ("cleanup", consumers.cleanup_required.map_or_else(|| tr("Unknown"), |value| value.to_string())), ("liveness", consumers.liveness_verified.to_string()), ("authorized", consumers.exclusive_maintenance_authorized.to_string())]));
+                        ui.label(tr_fmt("Consumer inspection complete: {complete}; recorded consumers: {count}; cleanup required: {cleanup}; liveness verified: {liveness}; exclusive maintenance authorized: {authorized}", &[("complete", super::chrome::yes_no(consumers.inspection_complete)), ("count", consumers.recorded_consumers.len().to_string()), ("cleanup", consumers.cleanup_required.map_or_else(|| tr("Unknown"), super::chrome::yes_no)), ("liveness", super::chrome::yes_no(consumers.liveness_verified)), ("authorized", super::chrome::yes_no(consumers.exclusive_maintenance_authorized))]));
                         if let Some(error) = consumers.inspection_error {
                             ui.label(tr_fmt("Consumer inspection note: {message}", &[("message", tr(error))]));
                         }
@@ -227,7 +226,7 @@ impl Foxy {
                         ui.label(tr("Consumer inspection is unavailable."));
                     }
                 });
-                ui.label(tr_fmt("Deployment ready: {value}; writes performed: {writes}; active deployment changed: {changed}; downloads started: {downloads}; installation leases acquired: {leases}; process started: {process}", &[("value", report.deployment_ready.to_string()), ("writes", report.writes_performed.to_string()), ("changed", report.active_deployment_changed.to_string()), ("downloads", report.downloads_started.to_string()), ("leases", report.installation_leases_acquired.to_string()), ("process", report.process_started.to_string())]));
+                ui.label(tr_fmt("Deployment ready: {value}; writes performed: {writes}; active deployment changed: {changed}; downloads started: {downloads}; installation leases acquired: {leases}; process started: {process}", &[("value", super::chrome::yes_no(report.deployment_ready)), ("writes", super::chrome::yes_no(report.writes_performed)), ("changed", super::chrome::yes_no(report.active_deployment_changed)), ("downloads", super::chrome::yes_no(report.downloads_started)), ("leases", super::chrome::yes_no(report.installation_leases_acquired)), ("process", super::chrome::yes_no(report.process_started))]));
             }
             if self.server_view.pending_focus == Some("server-deployment-composition-controls")
                 && ui.clip_rect().intersects(review.rect)

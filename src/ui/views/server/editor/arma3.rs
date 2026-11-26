@@ -24,15 +24,15 @@ pub(super) fn clear_edit_buffers(ctx: &egui::Context) {
 
 pub(super) fn render(
     ui: &mut Ui,
+    card: egui::Frame,
     settings: &mut crate::core::server::Arma3ServerDefinition,
     keys: &mut Vec<u64>,
     next_key: &mut u64,
     field_scope: egui::Id,
-    headless_clients: bool,
-    profiles: HeadlessProfiles<'_>,
+    headless: Option<HeadlessProfiles<'_>>,
 ) {
     let form = forms::Form { root: field_scope };
-    ui.group(|ui| {
+    card.show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.heading(tr("Identity and network"));
         super::text(
@@ -63,8 +63,8 @@ pub(super) fn render(
             };
         }
     });
-    ui.add_space(6.0);
-    ui.group(|ui| {
+    ui.add_space(10.0);
+    card.show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.heading(tr("Mission cycle"));
         ui.checkbox(&mut settings.persistent, tr("Persistent mission"))
@@ -166,9 +166,9 @@ pub(super) fn render(
         *next_key += 1;
     }
     });
-    if headless_clients {
-        ui.add_space(6.0);
-        ui.group(|ui| {
+    if let Some(profiles) = headless {
+        ui.add_space(10.0);
+        card.show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             headless::render(
                 ui,
@@ -180,11 +180,13 @@ pub(super) fn render(
         });
     }
 
-    ui.add_space(6.0);
+    ui.add_space(10.0);
+    card.show(ui, |ui| {
+    ui.set_min_width(ui.available_width());
     ui.collapsing(tr("Advanced configuration"), |ui| {
     ui.heading(tr("Configuration files"));
-        ui.label(tr("The server profile name selects this instance's Arma settings and difficulty directory. Foxy content profiles are named addon sets."));
-    ui.label(tr(
+        ui.weak(tr("The server profile name selects this instance's Arma settings and difficulty directory. Foxy content profiles are named addon sets."));
+    ui.weak(tr(
         "Unchecked settings are omitted from the generated files, so the engine keeps its own defaults.",
     ));
     forms::render_configuration(
@@ -218,6 +220,7 @@ pub(super) fn render(
             &mut settings.difficulty,
             field_scope.with("difficulty"),
         );
+    });
     });
     });
 }
