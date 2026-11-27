@@ -1938,6 +1938,7 @@
     "Enabled additional/external addons": "Enabled additional/external addons",
     "Launch with addons": "Launch with addons",
     "Launch without additional/external addons": "Launch without additional/external addons",
+    "Ticked addons stay loaded for this editor launch.": "Ticked addons stay loaded for this editor launch.",
     "Sync ignored for {name}: repository URL or local path is not configured.": "Sync ignored for {name}: repository URL or local path is not configured.",
     "Third-party overlays": "Third-party overlays",
     "Third-party overlays such as NVIDIA GeForce Experience, NVIDIA App, Discord, Steam, Bandicam, and similar screen-capture or recording tools can attach to Foxy on startup and cause unwanted pop-ups, performance issues, or rendering glitches.": "Third-party overlays such as NVIDIA GeForce Experience, NVIDIA App, Discord, Steam, Bandicam, and similar screen-capture or recording tools can attach to Foxy on startup and cause unwanted pop-ups, performance issues, or rendering glitches.",

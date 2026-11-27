@@ -155,13 +155,21 @@ pub struct PendingMissionRemoveDependenciesState {
     pub error: Option<String>,
 }
 
+/// An enabled external addon offered for one editor launch; `keep` false leaves it out of that launch only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorLaunchExternalAddon {
+    pub name: String,
+    pub path: String,
+    pub keep: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingMissionEditorLaunchWarningState {
     pub repo_idx: usize,
     pub repo_name: String,
     pub effective_repository: Repository,
     pub mission: crate::core::arma3_missions::EditorMission,
-    pub external_addons: Vec<String>,
+    pub external_addons: Vec<EditorLaunchExternalAddon>,
 
     pub unavailable_enabled: Vec<super::JoinPreflightUnavailableAddon>,
 }

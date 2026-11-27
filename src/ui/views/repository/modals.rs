@@ -1,4 +1,5 @@
 use super::arma3_editor_display_name;
+use super::launch_policy::editor_launch_repository;
 use crate::ui::app::{
     Foxy, JoinPreflightAddonOrigin, JoinPreflightDlcChange, JoinPreflightKnownRemoteAddon,
     JoinPreflightMatchConfidence, PendingJoinPreflightState, PendingRepositoryDuplicateAddAction,
@@ -1225,7 +1226,7 @@ impl Foxy {
         &mut self,
         ctx: &egui::Context,
     ) {
-        let Some(pending) = self.pending_mission_editor_launch_warning.clone() else {
+        let Some(mut pending) = self.pending_mission_editor_launch_warning.clone() else {
             return;
         };
 
@@ -1242,6 +1243,7 @@ impl Foxy {
         let mut launch_with_addons = false;
         let mut launch_without_external_addons = false;
         let mut cancel = false;
+        let mut selection_changed = false;
 
         let title = if pending.external_addons.is_empty() {
             self.t("Some enabled addons are missing")
@@ -1268,13 +1270,27 @@ impl Foxy {
 
                     ui.add_space(10.0);
                     ui.label(RichText::new(self.t("Enabled additional/external addons")).strong());
+                    ui.label(self.t("Ticked addons stay loaded for this editor launch."));
+                    ui.add_space(4.0);
+                    // A clipped list must show its scroll bar, or hidden rows look like they are not part of the choice.
                     ScrollArea::vertical()
                         .id_salt(("editor_launch_external_addons", pending.repo_idx))
                         .max_height(220.0)
                         .auto_shrink([false, false])
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                         .show(ui, |ui| {
-                            for addon in &pending.external_addons {
-                                ui.label(addon);
+                            for addon in &mut pending.external_addons {
+                                let label = if addon.path.is_empty() {
+                                    addon.name.clone()
+                                } else {
+                                    format!("{} ({})", addon.name, addon.path)
+                                };
+                                let checkbox =
+                                    Self::ui_state_checkbox(ui, &mut addon.keep, label);
+                                if checkbox.hovered() {
+                                    ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
+                                }
+                                selection_changed |= checkbox.changed();
                             }
                         });
                 }
@@ -1309,7 +1325,13 @@ impl Foxy {
 
                 ui.add_space(12.0);
                 ui.horizontal_wrapped(|ui| {
-                    let launch_with_btn = ui.button(self.t("Launch with addons"));
+                    let launch_with_label =
+                        if pending.external_addons.iter().all(|addon| addon.keep) {
+                            self.t("Launch with addons")
+                        } else {
+                            self.t("Launch with selected addons")
+                        };
+                    let launch_with_btn = ui.button(launch_with_label);
                     if launch_with_btn.hovered() {
                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                     }
@@ -1343,21 +1365,41 @@ impl Foxy {
 
         if launch_with_addons {
             self.pending_mission_editor_launch_warning = None;
-            self.launch_editor_with_mission(
-                ctx,
-                &pending.effective_repository,
-                &pending.mission,
-                &pending.repo_name,
+            let left_out = pending
+                .external_addons
+                .iter()
+                .filter(|addon| !addon.keep)
+                .count();
+            info!(
+                "Editor launch choice for repository {}: with addons, left_out={} of listed={}",
+                pending.repo_name,
+                left_out,
+                pending.external_addons.len()
             );
+            let effective =
+                editor_launch_repository(&pending.effective_repository, &pending.external_addons);
+            self.launch_editor_with_mission(ctx, &effective, &pending.mission, &pending.repo_name);
             return;
         }
 
         if launch_without_external_addons {
             self.pending_mission_editor_launch_warning = None;
+            info!(
+                "Editor launch choice for repository {}: without additional/external addons, listed={}",
+                pending.repo_name,
+                pending.external_addons.len()
+            );
             let mut effective = pending.effective_repository.clone();
             effective.include_steam_addons = false;
             effective.external_addons.clear();
             self.launch_editor_with_mission(ctx, &effective, &pending.mission, &pending.repo_name);
+            return;
+        }
+
+        if selection_changed
+            && let Some(state) = self.pending_mission_editor_launch_warning.as_mut()
+        {
+            state.external_addons = pending.external_addons;
         }
     }
 

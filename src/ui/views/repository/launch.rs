@@ -1,6 +1,7 @@
 use super::LaunchDispatchResult;
 use super::launch_policy::{
-    join_preflight_fact_keys, merge_join_preflight_choices, paths_overlap, repository_launch_paths,
+    editor_launch_external_addons, join_preflight_fact_keys, merge_join_preflight_choices,
+    paths_overlap, repository_launch_paths,
 };
 use crate::core::addon_metadata::load_addon_display_name_snapshot;
 use crate::core::arma3_missions::EditorMission;
@@ -253,28 +254,6 @@ impl Foxy {
         } else {
             self.present_launch_preflight(ctx, &pending.repository, &pending.repo_name);
         }
-    }
-
-    fn enabled_external_addons_for_editor_warning(repo: &Repository) -> Vec<String> {
-        let mut addons: Vec<String> = repo
-            .external_addons
-            .iter()
-            .filter(|(_, enabled, _)| *enabled)
-            .map(|(addon, _, path)| {
-                let addon = addon.trim();
-                let path = path.trim();
-                if path.is_empty() {
-                    addon.to_string()
-                } else {
-                    format!("{addon} ({path})")
-                }
-            })
-            .filter(|label| !label.is_empty())
-            .collect();
-
-        addons.sort();
-        addons.dedup();
-        addons
     }
 
     pub(crate) fn handle_post_launch_window_behavior(
@@ -1263,7 +1242,7 @@ impl Foxy {
     ) {
         // The general external-addons warning is opt-in per repo/global setting.
         let external_addons = if self.repo_warn_editor_external_addons(effective) {
-            Self::enabled_external_addons_for_editor_warning(effective)
+            editor_launch_external_addons(effective)
         } else {
             Vec::new()
         };

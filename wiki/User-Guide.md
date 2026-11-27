@@ -675,7 +675,7 @@ For Arma 3, editor missions are shown inside the repository view, close to the a
 - Open, duplicate, or delete detected singleplayer and multiplayer mission folders, or launch Eden Editor for them. Mission subfolders are scanned recursively.
 - Use the terrain filter next to **Show folders** to narrow the list to one map.
 - Use the mission context menu to remove addon dependencies from `mission.sqm`.
-- If additional or external addons are enabled, Foxy warns before launching Eden Editor, because saving can write those dependencies into `mission.sqm`. You can launch with addons, launch without additional/external addons, or cancel.
+- If additional or external addons are enabled, Foxy warns before launching Eden Editor, because saving can write those dependencies into `mission.sqm`. The warning lists every enabled additional/external addon with a tick; untick the ones to leave out and choose **Launch with selected addons**, launch without any additional/external addons, or cancel. These choices apply to that editor launch only and do not change repository settings.
 
 Game space settings can hide the Editor Missions list, and Repository Settings can override that per repository.
 

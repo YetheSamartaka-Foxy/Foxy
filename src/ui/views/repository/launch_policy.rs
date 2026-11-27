@@ -1,3 +1,4 @@
+use crate::ui::app::EditorLaunchExternalAddon;
 use crate::ui::types::Repository;
 use std::path::Path;
 
@@ -195,13 +196,113 @@ pub(super) fn repository_launch_paths(
     paths
 }
 
+pub(super) fn editor_launch_external_addons(
+    repository: &Repository,
+) -> Vec<EditorLaunchExternalAddon> {
+    let mut addons: Vec<EditorLaunchExternalAddon> = repository
+        .external_addons
+        .iter()
+        .filter(|(_, enabled, _)| *enabled)
+        .map(|(name, _, path)| EditorLaunchExternalAddon {
+            name: name.trim().to_string(),
+            path: path.trim().to_string(),
+            keep: true,
+        })
+        .filter(|addon| !addon.name.is_empty() || !addon.path.is_empty())
+        .collect();
+    addons.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    addons.dedup_by(|left, right| left.name == right.name && left.path == right.path);
+    addons
+}
+
+/// Disables only the external addons the user unticked; every other addon keeps its configured state.
+pub(super) fn editor_launch_repository(
+    repository: &Repository,
+    external_addons: &[EditorLaunchExternalAddon],
+) -> Repository {
+    let mut launch = repository.clone();
+    for (name, enabled, path) in &mut launch.external_addons {
+        if *enabled
+            && external_addons
+                .iter()
+                .any(|addon| !addon.keep && addon.name == name.trim() && addon.path == path.trim())
+        {
+            *enabled = false;
+        }
+    }
+    launch
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{join_preflight_fact_keys, merge_join_preflight_choices, paths_overlap};
+    use super::{
+        editor_launch_external_addons, editor_launch_repository, join_preflight_fact_keys,
+        merge_join_preflight_choices, paths_overlap,
+    };
     use crate::ui::app::{
         JoinPreflightKnownRemoteAddon, JoinPreflightMatchConfidence, PendingJoinPreflightState,
     };
     use crate::ui::types::{Repository, RepositoryServer};
+
+    fn editor_repository() -> Repository {
+        let mut repository = Repository {
+            path: "R:/Mods".to_string(),
+            ..Repository::default()
+        };
+        repository.addons = vec![("@mod_01".to_string(), true)];
+        repository.optional_addons = vec![("@mod_02".to_string(), true)];
+        repository.external_addons = vec![
+            ("@mod_10".to_string(), true, "R:/Mods/@mod_10".to_string()),
+            ("@mod_11".to_string(), true, "R:/Mods/@mod_11".to_string()),
+            ("@mod_20".to_string(), true, "R:/Other/@mod_20".to_string()),
+            ("@mod_21".to_string(), true, "R:/Other/@mod_21".to_string()),
+            ("@mod_30".to_string(), false, "R:/Other/@mod_30".to_string()),
+        ];
+        repository
+    }
+
+    #[test]
+    fn editor_launch_lists_every_enabled_external_addon_ticked() {
+        let listed = editor_launch_external_addons(&editor_repository());
+        let names: Vec<&str> = listed.iter().map(|addon| addon.name.as_str()).collect();
+        assert_eq!(names, ["@mod_10", "@mod_11", "@mod_20", "@mod_21"]);
+        assert!(listed.iter().all(|addon| addon.keep));
+    }
+
+    #[test]
+    fn editor_launch_leaves_out_only_unticked_external_addons() {
+        let repository = editor_repository();
+        let mut listed = editor_launch_external_addons(&repository);
+        for addon in &mut listed {
+            addon.keep = !addon.path.starts_with("R:/Mods/");
+        }
+
+        let launch = editor_launch_repository(&repository, &listed);
+
+        let enabled: Vec<&str> = launch
+            .external_addons
+            .iter()
+            .filter(|(_, enabled, _)| *enabled)
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        assert_eq!(enabled, ["@mod_20", "@mod_21"]);
+        assert_eq!(launch.external_addons.len(), 5);
+        assert_eq!(launch.addons, repository.addons);
+        assert_eq!(launch.optional_addons, repository.optional_addons);
+    }
+
+    #[test]
+    fn editor_launch_with_all_ticked_keeps_the_configured_repository() {
+        let repository = editor_repository();
+        let listed = editor_launch_external_addons(&repository);
+        let launch = editor_launch_repository(&repository, &listed);
+        assert_eq!(launch.external_addons, repository.external_addons);
+    }
 
     #[test]
     fn launch_conflict_paths_include_ancestors_but_not_sibling_folders() {
