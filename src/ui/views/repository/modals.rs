@@ -413,7 +413,7 @@ impl Foxy {
                                     let before = remote.selected;
                                     let checkbox =
                                         Self::ui_state_checkbox(ui, &mut remote.selected, "")
-                                            .accessible_name(remote.reported_name.as_str());
+                                            .accessible_name(remote.addon_name.as_str());
                                     if checkbox.hovered() {
                                         ui.ctx().output_mut(Foxy::set_pointing_cursor_output);
                                     }
@@ -427,7 +427,13 @@ impl Foxy {
                                             remote.selected
                                         );
                                     }
-                                    ui.label(RichText::new(&remote.reported_name).strong());
+                                    ui.label(RichText::new(&remote.addon_name).strong());
+                                    if remote.reported_name != remote.addon_name {
+                                        ui.label(self.t_fmt(
+                                            "Server name: {name}",
+                                            &[("name", remote.reported_name.clone())],
+                                        ));
+                                    }
                                     ui.label(self.t_fmt(
                                         "Source repository: {name}",
                                         &[("name", remote.repository_name.clone())],

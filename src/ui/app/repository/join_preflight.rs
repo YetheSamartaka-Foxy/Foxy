@@ -14,10 +14,41 @@ use crate::ui::types::{
 };
 use log::info;
 
+struct RequirementKeySet<'a> {
+    requirement: &'a ServerAddonRequirement,
+    primary: Vec<String>,
+    acronym: Vec<String>,
+    suffix_stripped: Vec<String>,
+}
+
+impl<'a> RequirementKeySet<'a> {
+    fn satisfaction_keys_before_suffix(&self) -> impl Iterator<Item = &str> {
+        self.primary
+            .iter()
+            .chain(self.acronym.iter())
+            .map(String::as_str)
+    }
+
+    fn all_keys(&self) -> Vec<String> {
+        self.primary
+            .iter()
+            .chain(self.suffix_stripped.iter())
+            .chain(self.acronym.iter())
+            .cloned()
+            .collect()
+    }
+}
+
+struct DisabledLocalAddon {
+    addon_name: String,
+    origin: JoinPreflightAddonOrigin,
+    keys: Vec<String>,
+}
+
 struct KnownRemoteSearchContext<'a> {
     repo_name: &'a str,
     server: &'a RepositoryServer,
-    requirement_by_name: &'a HashMap<String, &'a ServerAddonRequirement>,
+    unhandled_requirements: &'a [&'a RequirementKeySet<'a>],
     satisfied_or_actionable: &'a HashSet<String>,
     display_names: &'a AddonDisplayNameSnapshot,
 }
@@ -43,14 +74,20 @@ impl Foxy {
         requirements: &[ServerAddonRequirement],
         display_names: &AddonDisplayNameSnapshot,
     ) -> Option<PendingJoinPreflightState> {
-        let requirement_by_name = requirements
-            .iter()
-            .flat_map(|requirement| {
-                requirement_match_keys_for_requirement(requirement)
-                    .into_iter()
-                    .map(move |normalized| (normalized, requirement))
-            })
-            .collect::<HashMap<_, _>>();
+        let key_sets = build_requirement_key_sets(requirements);
+        let mut requirement_by_name = HashMap::new();
+        for key_set in &key_sets {
+            for key in key_set.suffix_stripped.iter().chain(key_set.acronym.iter()) {
+                requirement_by_name
+                    .entry(key.clone())
+                    .or_insert(key_set.requirement);
+            }
+        }
+        for key_set in &key_sets {
+            for key in &key_set.primary {
+                requirement_by_name.insert(key.clone(), key_set.requirement);
+            }
+        }
 
         if requirement_by_name.is_empty() {
             let unavailable_enabled =
@@ -66,20 +103,63 @@ impl Foxy {
             });
         }
 
-        let mut candidates_by_requirement = collect_disabled_local_candidates(
-            effective,
-            configured_repositories,
-            requirements,
-            display_names,
-        );
+        let disabled_local =
+            collect_disabled_local_addons(effective, configured_repositories, display_names);
+        let mut claimed_local = HashSet::new();
         let mut suggestions = Vec::new();
         let mut ambiguous = Vec::new();
         let mut satisfied_or_actionable = HashSet::new();
+        let mut unhandled_requirements = Vec::new();
 
-        for requirement in requirements {
-            let match_keys = requirement_match_keys_for_requirement(requirement);
-            if match_keys.is_empty()
-                || match_keys.iter().any(|key| {
+        for key_set in &key_sets {
+            let all_keys = key_set.all_keys();
+            if all_keys.is_empty() {
+                continue;
+            }
+            if key_set.satisfaction_keys_before_suffix().any(|key| {
+                enabled_requirement_satisfied(
+                    effective,
+                    configured_repositories,
+                    key,
+                    display_names,
+                )
+            }) {
+                mark_requirement_keys_handled(&mut satisfied_or_actionable, &all_keys);
+                continue;
+            }
+
+            let primary_candidates = find_disabled_local_candidates(
+                &disabled_local,
+                &claimed_local,
+                &key_set.primary,
+                key_set.requirement,
+            );
+            if !primary_candidates.is_empty() {
+                record_local_candidates(
+                    effective,
+                    repo_name,
+                    server,
+                    key_set.requirement,
+                    &all_keys,
+                    primary_candidates,
+                    display_names,
+                    &mut claimed_local,
+                    &mut suggestions,
+                    &mut ambiguous,
+                );
+                mark_requirement_keys_handled(&mut satisfied_or_actionable, &all_keys);
+                continue;
+            }
+
+            let allow_suffix_fallback = !key_set.suffix_stripped.is_empty()
+                && !other_repo_matches_any_key(
+                    effective,
+                    configured_repositories,
+                    &key_set.primary,
+                    display_names,
+                );
+            if allow_suffix_fallback
+                && key_set.suffix_stripped.iter().any(|key| {
                     enabled_requirement_satisfied(
                         effective,
                         configured_repositories,
@@ -88,43 +168,40 @@ impl Foxy {
                     )
                 })
             {
-                mark_requirement_keys_handled(&mut satisfied_or_actionable, &match_keys);
+                mark_requirement_keys_handled(&mut satisfied_or_actionable, &all_keys);
                 continue;
             }
 
-            let candidate_entry = match_keys.iter().find_map(|key| {
-                candidates_by_requirement
-                    .remove(key)
-                    .map(|candidates| (key, candidates))
-            });
-            let Some((_normalized_key, candidates)) = candidate_entry else {
-                continue;
-            };
-
-            match candidates.as_slice() {
-                [] => {}
-                [candidate] => {
-                    suggestions.push(candidate.clone());
-                    mark_requirement_keys_handled(&mut satisfied_or_actionable, &match_keys);
-                }
-                _ => {
-                    log_ambiguous_join_preflight_match(
-                        effective,
-                        repo_name,
-                        server,
-                        requirement,
-                        &match_keys,
-                        &candidates,
-                        display_names,
-                    );
-                    ambiguous.push(JoinPreflightAmbiguousAddon {
-                        reported_name: requirement.display_name.clone(),
-                        candidates,
-                        selected_candidate: None,
-                    });
-                    mark_requirement_keys_handled(&mut satisfied_or_actionable, &match_keys);
-                }
+            let mut fallback_keys = Vec::new();
+            if allow_suffix_fallback {
+                fallback_keys.extend(key_set.suffix_stripped.iter().cloned());
             }
+            fallback_keys.extend(key_set.acronym.iter().cloned());
+
+            let fallback_candidates = find_disabled_local_candidates(
+                &disabled_local,
+                &claimed_local,
+                &fallback_keys,
+                key_set.requirement,
+            );
+            if !fallback_candidates.is_empty() {
+                record_local_candidates(
+                    effective,
+                    repo_name,
+                    server,
+                    key_set.requirement,
+                    &all_keys,
+                    fallback_candidates,
+                    display_names,
+                    &mut claimed_local,
+                    &mut suggestions,
+                    &mut ambiguous,
+                );
+                mark_requirement_keys_handled(&mut satisfied_or_actionable, &all_keys);
+                continue;
+            }
+
+            unhandled_requirements.push(key_set);
         }
 
         let known_remote = Self::collect_known_remote_addons(
@@ -133,7 +210,7 @@ impl Foxy {
             KnownRemoteSearchContext {
                 repo_name,
                 server,
-                requirement_by_name: &requirement_by_name,
+                unhandled_requirements: &unhandled_requirements,
                 satisfied_or_actionable: &satisfied_or_actionable,
                 display_names,
             },
@@ -585,47 +662,67 @@ impl Foxy {
         context: KnownRemoteSearchContext<'_>,
     ) -> Vec<JoinPreflightKnownRemoteAddon> {
         let current_repo_key = addon_display_name_key(&effective.address, &effective.path);
-        let mut rows = Vec::new();
-        let mut seen = HashSet::new();
+        let mut rows: Vec<JoinPreflightKnownRemoteAddon> = Vec::new();
+        let mut row_index_by_target: HashMap<(String, String), usize> = HashMap::new();
         let KnownRemoteSearchContext {
             repo_name,
             server,
-            requirement_by_name,
+            unhandled_requirements,
             satisfied_or_actionable,
             display_names,
         } = context;
 
-        for (repo_idx, repo) in configured_repositories.iter().enumerate() {
-            if repo.address.trim().is_empty()
-                || repo.path.trim().is_empty()
-                || addon_display_name_key(&repo.address, &repo.path) == current_repo_key
-            {
-                continue;
+        let other_repo_addons = configured_repositories
+            .iter()
+            .filter(|repo| {
+                !repo.address.trim().is_empty()
+                    && !repo.path.trim().is_empty()
+                    && addon_display_name_key(&repo.address, &repo.path) != current_repo_key
+            })
+            .flat_map(|repo| {
+                repo.addons
+                    .iter()
+                    .chain(repo.optional_addons.iter())
+                    .map(move |(addon_name, _)| {
+                        let display_name = addon_display_name(display_names, repo, addon_name);
+                        let keys = addon_match_keys(addon_name, display_name);
+                        (repo, addon_name, display_name, keys)
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        for key_set in unhandled_requirements {
+            let mut matched = find_known_remote_matches(&other_repo_addons, &key_set.primary);
+            if matched.is_empty() {
+                let fallback_keys = key_set
+                    .suffix_stripped
+                    .iter()
+                    .chain(key_set.acronym.iter())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                matched = find_known_remote_matches(&other_repo_addons, &fallback_keys);
             }
 
-            for addon_name in repo
-                .addons
-                .iter()
-                .chain(repo.optional_addons.iter())
-                .map(|(name, _)| name)
-            {
+            for (repo, addon_name, display_name, matched_key) in matched {
                 let repo_url = Self::normalize_repo_url(&repo.address);
-                let display_name = addon_display_name(display_names, repo, addon_name);
-                let Some((normalized, requirement)) = addon_match_keys(addon_name, display_name)
-                    .into_iter()
-                    .find_map(|key| {
-                        if key.is_empty() || satisfied_or_actionable.contains(&key) {
-                            None
-                        } else {
-                            requirement_by_name
-                                .get(&key)
-                                .map(|requirement| (key, *requirement))
-                        }
-                    })
-                else {
-                    continue;
-                };
-                if !seen.insert((normalized.clone(), repo_idx)) {
+                let available = source_repository_addon_path_available(repo, addon_name);
+                let target_key = (
+                    addon_name.to_ascii_lowercase(),
+                    normalize_client_side_path_key(&repo.path),
+                );
+                if let Some(&existing_idx) = row_index_by_target.get(&target_key) {
+                    if !rows[existing_idx].available && available {
+                        rows[existing_idx] = JoinPreflightKnownRemoteAddon {
+                            reported_name: key_set.requirement.display_name.clone(),
+                            addon_name: addon_name.clone(),
+                            repository_name: repo.name.clone(),
+                            repository_url: repo_url,
+                            repository_path: repo.path.clone(),
+                            available,
+                            confidence: JoinPreflightMatchConfidence::ExactNormalizedName,
+                            selected: true,
+                        };
+                    }
                     continue;
                 }
                 log_known_remote_join_preflight_match(
@@ -633,8 +730,8 @@ impl Foxy {
                     KnownRemoteLogEntry {
                         repo_name,
                         server,
-                        requirement,
-                        matched_key: &normalized,
+                        requirement: key_set.requirement,
+                        matched_key: &matched_key,
                         source_repo: repo,
                         source_addon_name: addon_name,
                         source_display_name: display_name,
@@ -642,13 +739,14 @@ impl Foxy {
                         satisfied_or_actionable,
                     },
                 );
+                row_index_by_target.insert(target_key, rows.len());
                 rows.push(JoinPreflightKnownRemoteAddon {
-                    reported_name: requirement.display_name.clone(),
+                    reported_name: key_set.requirement.display_name.clone(),
                     addon_name: addon_name.clone(),
                     repository_name: repo.name.clone(),
                     repository_url: repo_url,
                     repository_path: repo.path.clone(),
-                    available: source_repository_addon_path_available(repo, addon_name),
+                    available,
                     confidence: JoinPreflightMatchConfidence::ExactNormalizedName,
                     selected: true,
                 });
@@ -659,9 +757,58 @@ impl Foxy {
             left.reported_name
                 .cmp(&right.reported_name)
                 .then_with(|| left.repository_name.cmp(&right.repository_name))
+                .then_with(|| left.addon_name.cmp(&right.addon_name))
         });
         rows
     }
+}
+
+fn find_known_remote_matches<'a>(
+    other_repo_addons: &[(&'a Repository, &'a String, Option<&'a String>, Vec<String>)],
+    requirement_keys: &[String],
+) -> Vec<(&'a Repository, &'a String, Option<&'a String>, String)> {
+    if requirement_keys.is_empty() {
+        return Vec::new();
+    }
+    let key_lookup: HashSet<&str> = requirement_keys.iter().map(String::as_str).collect();
+    other_repo_addons
+        .iter()
+        .filter_map(|(repo, addon_name, display_name, keys)| {
+            keys.iter()
+                .find(|key| key_lookup.contains(key.as_str()))
+                .map(|matched_key| (*repo, *addon_name, *display_name, matched_key.clone()))
+        })
+        .collect()
+}
+
+fn other_repo_matches_any_key(
+    effective: &Repository,
+    configured_repositories: &[Repository],
+    keys: &[String],
+    display_names: &AddonDisplayNameSnapshot,
+) -> bool {
+    if keys.is_empty() {
+        return false;
+    }
+    let current_repo_key = addon_display_name_key(&effective.address, &effective.path);
+    let key_lookup: HashSet<&str> = keys.iter().map(String::as_str).collect();
+    configured_repositories.iter().any(|repo| {
+        if repo.address.trim().is_empty()
+            || repo.path.trim().is_empty()
+            || addon_display_name_key(&repo.address, &repo.path) == current_repo_key
+        {
+            return false;
+        }
+        repo.addons
+            .iter()
+            .chain(repo.optional_addons.iter())
+            .any(|(addon_name, _)| {
+                let display_name = addon_display_name(display_names, repo, addon_name);
+                addon_match_keys(addon_name, display_name)
+                    .iter()
+                    .any(|key| key_lookup.contains(key.as_str()))
+            })
+    })
 }
 
 fn mark_requirement_keys_handled(handled: &mut HashSet<String>, match_keys: &[String]) {
@@ -873,62 +1020,127 @@ fn origin_log_label(origin: &JoinPreflightAddonOrigin) -> &'static str {
     }
 }
 
-fn collect_disabled_local_candidates(
+fn collect_disabled_local_addons(
     effective: &Repository,
     configured_repositories: &[Repository],
-    requirements: &[ServerAddonRequirement],
     display_names: &AddonDisplayNameSnapshot,
-) -> HashMap<String, Vec<JoinPreflightAddonSuggestion>> {
-    let requirement_by_name = requirements
-        .iter()
-        .flat_map(|requirement| {
-            requirement_match_keys_for_requirement(requirement)
-                .into_iter()
-                .map(move |key| (key, requirement))
-        })
-        .collect::<HashMap<_, _>>();
-    let mut candidates = HashMap::<String, Vec<JoinPreflightAddonSuggestion>>::new();
+) -> Vec<DisabledLocalAddon> {
+    let repo_display_names = addon_display_names_for_repo(display_names, effective);
+    let mut disabled = Vec::new();
 
-    collect_disabled_addon_candidates(
-        &effective.addons,
-        addon_display_names_for_repo(display_names, effective),
-        &requirement_by_name,
-        JoinPreflightAddonOrigin::Required,
-        &mut candidates,
-    );
-    collect_disabled_addon_candidates(
-        &effective.optional_addons,
-        addon_display_names_for_repo(display_names, effective),
-        &requirement_by_name,
-        JoinPreflightAddonOrigin::Optional,
-        &mut candidates,
-    );
+    for (addon_name, enabled) in &effective.addons {
+        if !*enabled && repository_addon_path_available(effective, addon_name) {
+            let display_name = repo_display_names.and_then(|names| names.get(addon_name));
+            disabled.push(DisabledLocalAddon {
+                addon_name: addon_name.clone(),
+                origin: JoinPreflightAddonOrigin::Required,
+                keys: addon_match_keys(addon_name, display_name),
+            });
+        }
+    }
+    for (addon_name, enabled) in &effective.optional_addons {
+        if !*enabled && repository_addon_path_available(effective, addon_name) {
+            let display_name = repo_display_names.and_then(|names| names.get(addon_name));
+            disabled.push(DisabledLocalAddon {
+                addon_name: addon_name.clone(),
+                origin: JoinPreflightAddonOrigin::Optional,
+                keys: addon_match_keys(addon_name, display_name),
+            });
+        }
+    }
     for (addon_name, enabled, path) in &effective.external_addons {
         if !*enabled && external_addon_path_available(addon_name, path) {
-            for normalized in external_addon_match_keys(
-                addon_name,
-                Some(path),
-                configured_repositories,
-                display_names,
-            ) {
-                if let Some(requirement) = requirement_by_name.get(&normalized) {
-                    candidates
-                        .entry(normalized)
-                        .or_default()
-                        .push(JoinPreflightAddonSuggestion {
-                            addon_name: addon_name.clone(),
-                            origin: JoinPreflightAddonOrigin::External,
-                            reported_name: requirement.display_name.clone(),
-                            confidence: JoinPreflightMatchConfidence::ExactNormalizedName,
-                            selected: true,
-                        });
-                    break;
-                }
-            }
+            disabled.push(DisabledLocalAddon {
+                addon_name: addon_name.clone(),
+                origin: JoinPreflightAddonOrigin::External,
+                keys: external_addon_match_keys(
+                    addon_name,
+                    Some(path),
+                    configured_repositories,
+                    display_names,
+                ),
+            });
         }
     }
 
+    disabled
+}
+
+fn find_disabled_local_candidates(
+    disabled_local: &[DisabledLocalAddon],
+    claimed_local: &HashSet<(u8, String)>,
+    requirement_keys: &[String],
+    requirement: &ServerAddonRequirement,
+) -> Vec<JoinPreflightAddonSuggestion> {
+    if requirement_keys.is_empty() {
+        return Vec::new();
+    }
+    let key_lookup: HashSet<&str> = requirement_keys.iter().map(String::as_str).collect();
+    let mut candidates = Vec::new();
+    for addon in disabled_local {
+        let claim_key = (
+            origin_sort_key(&addon.origin),
+            addon.addon_name.to_ascii_lowercase(),
+        );
+        if claimed_local.contains(&claim_key) {
+            continue;
+        }
+        if addon
+            .keys
+            .iter()
+            .any(|key| key_lookup.contains(key.as_str()))
+        {
+            candidates.push(JoinPreflightAddonSuggestion {
+                addon_name: addon.addon_name.clone(),
+                origin: addon.origin.clone(),
+                reported_name: requirement.display_name.clone(),
+                confidence: JoinPreflightMatchConfidence::ExactNormalizedName,
+                selected: true,
+            });
+        }
+    }
     candidates
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_local_candidates(
+    effective: &Repository,
+    repo_name: &str,
+    server: &RepositoryServer,
+    requirement: &ServerAddonRequirement,
+    match_keys: &[String],
+    candidates: Vec<JoinPreflightAddonSuggestion>,
+    display_names: &AddonDisplayNameSnapshot,
+    claimed_local: &mut HashSet<(u8, String)>,
+    suggestions: &mut Vec<JoinPreflightAddonSuggestion>,
+    ambiguous: &mut Vec<JoinPreflightAmbiguousAddon>,
+) {
+    for candidate in &candidates {
+        claimed_local.insert((
+            origin_sort_key(&candidate.origin),
+            candidate.addon_name.to_ascii_lowercase(),
+        ));
+    }
+    match candidates.as_slice() {
+        [] => {}
+        [candidate] => suggestions.push(candidate.clone()),
+        _ => {
+            log_ambiguous_join_preflight_match(
+                effective,
+                repo_name,
+                server,
+                requirement,
+                match_keys,
+                &candidates,
+                display_names,
+            );
+            ambiguous.push(JoinPreflightAmbiguousAddon {
+                reported_name: requirement.display_name.clone(),
+                candidates,
+                selected_candidate: None,
+            });
+        }
+    }
 }
 
 /// Games that activate only the server's set cannot treat unreported client addons as allowed extras.
@@ -1107,35 +1319,6 @@ fn addon_matches_any_requirement(
     addon_match_keys(addon_name, display_name)
         .iter()
         .any(|key| requirements.contains_key(key))
-}
-
-fn collect_disabled_addon_candidates(
-    addon_states: &[(String, bool)],
-    display_names: Option<&HashMap<String, String>>,
-    requirements: &HashMap<String, &ServerAddonRequirement>,
-    origin: JoinPreflightAddonOrigin,
-    candidates: &mut HashMap<String, Vec<JoinPreflightAddonSuggestion>>,
-) {
-    for (addon_name, enabled) in addon_states {
-        if !*enabled {
-            let display_name = display_names.and_then(|names| names.get(addon_name));
-            for normalized in addon_match_keys(addon_name, display_name) {
-                if let Some(requirement) = requirements.get(&normalized) {
-                    candidates
-                        .entry(normalized)
-                        .or_default()
-                        .push(JoinPreflightAddonSuggestion {
-                            addon_name: addon_name.clone(),
-                            origin: origin.clone(),
-                            reported_name: requirement.display_name.clone(),
-                            confidence: JoinPreflightMatchConfidence::ExactNormalizedName,
-                            selected: true,
-                        });
-                    break;
-                }
-            }
-        }
-    }
 }
 
 fn enabled_requirement_satisfied(
@@ -1359,6 +1542,46 @@ fn addon_display_name<'a>(
     addon_display_names_for_repo(display_names, repository).and_then(|names| names.get(addon_name))
 }
 
+fn build_requirement_key_sets<'a>(
+    requirements: &'a [ServerAddonRequirement],
+) -> Vec<RequirementKeySet<'a>> {
+    let primaries: Vec<Vec<String>> = requirements.iter().map(requirement_primary_keys).collect();
+    let all_primary: HashSet<String> = primaries.iter().flatten().cloned().collect();
+
+    requirements
+        .iter()
+        .zip(primaries)
+        .map(|(requirement, primary)| {
+            let mut suffix_stripped = Vec::new();
+            push_requirement_suffix_stripped_keys(&mut suffix_stripped, &requirement.display_name);
+            suffix_stripped.retain(|key| !all_primary.contains(key));
+
+            let mut acronym = Vec::new();
+            for key in addon_acronym_keys(&requirement.display_name) {
+                if !all_primary.contains(&key) && !suffix_stripped.contains(&key) {
+                    push_unique_key(&mut acronym, key);
+                }
+            }
+
+            RequirementKeySet {
+                requirement,
+                primary,
+                acronym,
+                suffix_stripped,
+            }
+        })
+        .collect()
+}
+
+fn requirement_primary_keys(requirement: &ServerAddonRequirement) -> Vec<String> {
+    let mut keys = Vec::new();
+    push_normalized_addon_keys(&mut keys, &requirement.display_name);
+    for workshop_id in &requirement.workshop_ids {
+        push_unique_key(&mut keys, workshop_match_key(workshop_id));
+    }
+    keys
+}
+
 fn requirement_match_keys(name: &str) -> Vec<String> {
     let mut keys = Vec::new();
     push_normalized_addon_keys(&mut keys, name);
@@ -1369,6 +1592,7 @@ fn requirement_match_keys(name: &str) -> Vec<String> {
     keys
 }
 
+#[cfg(test)]
 fn requirement_match_keys_for_requirement(requirement: &ServerAddonRequirement) -> Vec<String> {
     let mut keys = requirement_match_keys(&requirement.display_name);
     for workshop_id in &requirement.workshop_ids {
@@ -1589,10 +1813,16 @@ fn disable_suggestion(repository: &mut Repository, suggestion: &JoinPreflightAdd
 }
 
 fn enable_known_remote_addon(repository: &mut Repository, remote: &JoinPreflightKnownRemoteAddon) {
+    let repo_path_key = normalize_client_side_path_key(&remote.repository_path);
+    let direct_addon_path_key = normalize_client_side_path_key(
+        &Path::new(&remote.repository_path)
+            .join(&remote.addon_name)
+            .to_string_lossy(),
+    );
     for (name, enabled, path) in &mut repository.external_addons {
+        let existing_path_key = normalize_client_side_path_key(path);
         if name.eq_ignore_ascii_case(&remote.addon_name)
-            && normalize_client_side_path_key(path)
-                == normalize_client_side_path_key(&remote.repository_path)
+            && (existing_path_key == repo_path_key || existing_path_key == direct_addon_path_key)
         {
             *enabled = true;
             return;
@@ -3518,5 +3748,188 @@ mod tests {
         ));
         assert!(stored_repo.profiles[0].addons[0].1);
         assert!(Foxy::resolve_selected_mod_states(&stored_repo, None)[0].1);
+    }
+
+    #[test]
+    fn preflight_does_not_suppress_compat_requirement_when_base_addon_is_enabled() {
+        let mods_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(mods_dir.path().join("@mod_01")).expect("base dir");
+        std::fs::create_dir(mods_dir.path().join("@mod_01_compat")).expect("compat dir");
+        let mods_path = mods_dir.path().to_string_lossy().to_string();
+
+        let main_repo = Repository {
+            name: "MainRepo".to_string(),
+            address: "https://repo.example.invalid:8080/main/".to_string(),
+            path: mods_path.clone(),
+            addons: vec![("@mod_01".to_string(), true)],
+            ..Repository::default()
+        };
+        let test_repo = Repository {
+            name: "RepoAlpha".to_string(),
+            address: "https://repo.example.invalid:8080/alpha/".to_string(),
+            path: mods_path,
+            addons: vec![("@mod_01_compat".to_string(), true)],
+            ..Repository::default()
+        };
+        let display_names = HashMap::from([
+            (
+                addon_display_name_key(&main_repo.address, &main_repo.path),
+                HashMap::from([("@mod_01".to_string(), "Mod Alpha".to_string())]),
+            ),
+            (
+                addon_display_name_key(&test_repo.address, &test_repo.path),
+                HashMap::from([("@mod_01_compat".to_string(), "Mod Alpha Compat".to_string())]),
+            ),
+        ]);
+
+        // Both base and compat reported by the server.
+        let state = Foxy::build_join_preflight_state(
+            &main_repo,
+            &[main_repo.clone(), test_repo.clone()],
+            &RepositoryServer::default(),
+            "MainRepo",
+            &[requirement("Mod Alpha"), requirement("Mod Alpha Compat")],
+            &display_names,
+        )
+        .expect("compat requirement must not be suppressed by enabled base addon");
+
+        assert_eq!(state.known_remote.len(), 1);
+        assert_eq!(state.known_remote[0].addon_name, "@mod_01_compat");
+        assert!(state.known_remote[0].available);
+
+        // Even when only the compat requirement is present, the exact compat addon wins over suffix stripping.
+        let single_state = Foxy::build_join_preflight_state(
+            &main_repo,
+            &[main_repo.clone(), test_repo],
+            &RepositoryServer::default(),
+            "MainRepo",
+            &[requirement("Mod Alpha Compat")],
+            &display_names,
+        )
+        .expect("compat requirement with an available primary match must not be suppressed");
+
+        assert_eq!(single_state.known_remote.len(), 1);
+        assert_eq!(single_state.known_remote[0].addon_name, "@mod_01_compat");
+    }
+
+    #[test]
+    fn preflight_known_remote_prefers_primary_match_over_acronym_and_deduplicates_shared_folder() {
+        let mods_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(mods_dir.path().join("@mod_01")).expect("mod dir");
+        std::fs::create_dir(mods_dir.path().join("@bd")).expect("acronym collision dir");
+        let mods_path = mods_dir.path().to_string_lossy().to_string();
+
+        let main_repo = Repository {
+            name: "MainRepo".to_string(),
+            address: "https://repo.example.invalid:8080/main/".to_string(),
+            path: mods_path.clone(),
+            ..Repository::default()
+        };
+        let repo_alpha = Repository {
+            name: "RepoAlpha".to_string(),
+            address: "https://repo.example.invalid:8080/alpha/".to_string(),
+            path: mods_path.clone(),
+            addons: vec![("@mod_01".to_string(), true)],
+            ..Repository::default()
+        };
+        let repo_beta = Repository {
+            name: "RepoBeta".to_string(),
+            address: "https://repo.example.invalid:8080/beta/".to_string(),
+            path: mods_path.clone(),
+            addons: vec![("@mod_01".to_string(), true)],
+            ..Repository::default()
+        };
+        let repo_gamma = Repository {
+            name: "RepoGamma".to_string(),
+            address: "https://repo.example.invalid:8080/gamma/".to_string(),
+            path: mods_path,
+            addons: vec![("@bd".to_string(), true)],
+            ..Repository::default()
+        };
+        let display_names = HashMap::from([
+            (
+                addon_display_name_key(&repo_alpha.address, &repo_alpha.path),
+                HashMap::from([("@mod_01".to_string(), "Bravo Delta".to_string())]),
+            ),
+            (
+                addon_display_name_key(&repo_beta.address, &repo_beta.path),
+                HashMap::from([("@mod_01".to_string(), "Bravo Delta".to_string())]),
+            ),
+        ]);
+
+        let state = Foxy::build_join_preflight_state(
+            &main_repo,
+            &[main_repo.clone(), repo_alpha, repo_beta, repo_gamma],
+            &RepositoryServer::default(),
+            "MainRepo",
+            &[requirement("Bravo Delta")],
+            &display_names,
+        )
+        .expect("known remote match should be returned");
+
+        assert_eq!(state.known_remote.len(), 1);
+        assert_eq!(state.known_remote[0].addon_name, "@mod_01");
+    }
+
+    #[test]
+    fn preflight_skips_missing_disabled_local_addon_and_offers_available_remote_copy() {
+        let local_dir = tempfile::tempdir().expect("local dir");
+        let remote_dir = create_temp_addon_dir("@mod_01");
+        let main_repo = Repository {
+            name: "MainRepo".to_string(),
+            address: "https://repo.example.invalid:8080/main/".to_string(),
+            path: local_dir.path().to_string_lossy().to_string(),
+            optional_addons: vec![("@mod_01".to_string(), false)],
+            ..Repository::default()
+        };
+        let remote_repo = Repository {
+            name: "RepoAlpha".to_string(),
+            address: "https://repo.example.invalid:8080/alpha/".to_string(),
+            path: remote_dir.path().to_string_lossy().to_string(),
+            addons: vec![("@mod_01".to_string(), true)],
+            ..Repository::default()
+        };
+
+        let state = Foxy::build_join_preflight_state(
+            &main_repo,
+            &[main_repo.clone(), remote_repo],
+            &RepositoryServer::default(),
+            "MainRepo",
+            &[requirement("@mod_01")],
+            &AddonDisplayNameSnapshot::new(),
+        )
+        .expect("missing disabled local addon should fall back to available remote copy");
+
+        assert!(state.suggestions.is_empty());
+        assert_eq!(state.known_remote.len(), 1);
+        assert_eq!(state.known_remote[0].addon_name, "@mod_01");
+        assert!(state.known_remote[0].available);
+    }
+
+    #[test]
+    fn enable_known_remote_reuses_disabled_direct_path_external_entry() {
+        let dir = create_temp_addon_dir("@mod_01");
+        let direct_path = dir.path().join("@mod_01").to_string_lossy().to_string();
+        let mut repo = Repository {
+            external_addons: vec![("@mod_01".to_string(), false, direct_path.clone())],
+            ..Repository::default()
+        };
+        let remote = JoinPreflightKnownRemoteAddon {
+            reported_name: "Mod 01".to_string(),
+            addon_name: "@mod_01".to_string(),
+            repository_name: "RepoAlpha".to_string(),
+            repository_url: "https://repo.example.invalid:8080/alpha/".to_string(),
+            repository_path: dir.path().to_string_lossy().to_string(),
+            available: true,
+            confidence: JoinPreflightMatchConfidence::ExactNormalizedName,
+            selected: true,
+        };
+
+        enable_known_remote_addon(&mut repo, &remote);
+
+        assert_eq!(
+            repo.external_addons,
+            vec![("@mod_01".to_string(), true, direct_path)]
+        );
     }
 }

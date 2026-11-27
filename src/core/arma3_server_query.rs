@@ -514,12 +514,8 @@ const CREATOR_DLC_ID_FLAG: u8 = 0x10;
 /// Decode Arma 3's chunked A2S_RULES layout, including DLC flags, mods, and
 /// signatures. Reject payloads with unconsumed bytes to avoid misreading entries.
 fn parse_arma3_server_browser_payload(data: &[u8]) -> Result<ServerBrowserProtocol3, Error> {
-    let first = parse_arma3_server_browser_payload_layout(data, true);
-    if first.is_ok() || data.get(4) != Some(&0) {
-        return first;
-    }
-    // Some servers omit the second difficulty byte when the first one is zero.
-    parse_arma3_server_browser_payload_layout(data, false)
+    parse_arma3_server_browser_payload_layout(data, true)
+        .or_else(|_| parse_arma3_server_browser_payload_layout(data, false))
 }
 
 fn parse_arma3_server_browser_payload_layout(
@@ -551,10 +547,12 @@ fn parse_arma3_server_browser_payload_layout(
         let _mod_hash = read_u32_le(data, &mut cursor)?;
         let id_meta = read_u8(data, &mut cursor)?;
         if id_meta & CREATOR_DLC_ID_FLAG != 0 {
-            let app_id = match id_meta & 0x0F {
-                3 | 4 => u64::from(read_u32_le(data, &mut cursor)?),
-                8 => read_u64_le(data, &mut cursor)?,
-                other => return Err(invalid_mod_id_length(other)),
+            let id_len = usize::from(id_meta & 0x0F);
+            if id_len == 0 || id_len > 8 {
+                return Err(invalid_mod_id_length(id_meta));
+            }
+            let Some(app_id) = read_le_uint(data, &mut cursor, id_len)? else {
+                return Err(invalid_mod_id_length(id_meta));
             };
             let app_id = u32::try_from(app_id).map_err(|_| {
                 Error::new(
@@ -562,6 +560,10 @@ fn parse_arma3_server_browser_payload_layout(
                     "Server Browser Protocol 3 Creator DLC app ID is out of range",
                 )
             })?;
+            // Every mod entry in SBP3 carries a length-prefixed name after its ID bytes (often empty for Creator DLCs).
+            let name_len = read_u8(data, &mut cursor)?;
+            let _display_name =
+                read_length_prefixed_string(data, &mut cursor, usize::from(name_len))?;
             creator_dlc_app_ids.push(app_id);
             continue;
         }
@@ -579,10 +581,12 @@ fn parse_arma3_server_browser_payload_layout(
         }
     }
 
-    let signatures_count = read_u8(data, &mut cursor)?;
-    for _ in 0..signatures_count {
-        let len = read_u8(data, &mut cursor)?;
-        skip_bytes(data, &mut cursor, usize::from(len))?;
+    if cursor < data.len() {
+        let signatures_count = read_u8(data, &mut cursor)?;
+        for _ in 0..signatures_count {
+            let len = read_u8(data, &mut cursor)?;
+            skip_bytes(data, &mut cursor, usize::from(len))?;
+        }
     }
     if cursor != data.len() {
         return Err(Error::new(
@@ -664,8 +668,18 @@ fn extract_server_browser_protocol3_from_rules(
 fn extract_server_browser_protocol3_from_raw_rules(
     raw_rules: &[(Vec<u8>, Vec<u8>)],
 ) -> Option<ServerBrowserProtocol3> {
-    reassemble_binary_rule_chunks(raw_rules)
-        .and_then(|payload| parse_server_browser_protocol3(&payload).ok())
+    let payload = reassemble_binary_rule_chunks(raw_rules)?;
+    match parse_server_browser_protocol3(&payload) {
+        Ok(parsed) => Some(parsed),
+        Err(err) => {
+            log::warn!(
+                "Failed to decode chunked Arma 3 Server Browser Protocol 3 payload (bytes={}): {}",
+                payload.len(),
+                err
+            );
+            None
+        }
+    }
 }
 
 fn extract_binary_chunk_addon_requirements(
@@ -1295,6 +1309,54 @@ mod tests {
 
         assert_eq!(parsed.creator_dlc_app_ids, Some(Vec::new()));
         assert_eq!(parsed.mods[0].display_name, "abc");
+    }
+
+    #[test]
+    fn parses_arma3_payload_with_named_creator_dlc_and_four_byte_dlc_id() {
+        let mut payload = vec![3, 0, 0, 0, 0x0A, 0x01, 3];
+        // 3-byte Creator DLC app ID (vn = 1_227_700) with a non-empty display name.
+        payload.extend_from_slice(&0x1111_1111u32.to_le_bytes());
+        payload.push(0x13);
+        payload.extend_from_slice(&1_227_700u32.to_le_bytes()[..3]);
+        let vn_name = b"S.O.G. Prairie Fire";
+        payload.push(vn_name.len() as u8);
+        payload.extend_from_slice(vn_name);
+        // 4-byte Creator DLC app ID (ws = 1_681_170) with an empty display name.
+        payload.extend_from_slice(&0x2222_2222u32.to_le_bytes());
+        payload.push(0x14);
+        payload.extend_from_slice(&1_681_170u32.to_le_bytes());
+        payload.push(0);
+        // Regular mod.
+        payload.extend_from_slice(&0x3333_3333u32.to_le_bytes());
+        payload.push(0);
+        payload.push(7);
+        payload.extend_from_slice(b"@mod_01");
+        payload.push(0);
+
+        let parsed = parse_server_browser_protocol3(&payload).expect("payload should parse");
+
+        assert_eq!(parsed.creator_dlc_app_ids, Some(vec![1_227_700, 1_681_170]));
+        assert_eq!(parsed.mods.len(), 1);
+        assert_eq!(parsed.mods[0].display_name, "@mod_01");
+    }
+
+    #[test]
+    fn arma3_payload_accepts_single_nonzero_difficulty_byte_and_omitted_signatures() {
+        let mut payload = vec![3, 0x04, 0, 0, 0x2A, 2];
+        payload.extend_from_slice(&0x1111_1111u32.to_le_bytes());
+        payload.push(0x13);
+        payload.extend_from_slice(&1_227_700u32.to_le_bytes()[..3]);
+        payload.push(0);
+        payload.extend_from_slice(&0x2222_2222u32.to_le_bytes());
+        payload.push(0);
+        payload.push(7);
+        payload.extend_from_slice(b"@mod_01");
+
+        let parsed = parse_server_browser_protocol3(&payload).expect("payload should parse");
+
+        assert_eq!(parsed.creator_dlc_app_ids, Some(vec![1_227_700]));
+        assert_eq!(parsed.mods.len(), 1);
+        assert_eq!(parsed.mods[0].display_name, "@mod_01");
     }
 
     #[test]

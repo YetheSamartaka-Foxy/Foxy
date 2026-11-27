@@ -402,28 +402,38 @@ fn resolve_launch_mods(repo: &Repository, arma3_directory: &str) -> Vec<Resolved
     }
 
     let mut resolved: Vec<ResolvedMod> = Vec::new();
+    let mut seen_keys = std::collections::HashSet::<String>::new();
     let repo_path = repo.path.trim();
 
     for creator_dlc_code in creator_dlc_codes {
-        resolved.push(ResolvedMod {
-            id: creator_dlc_code.to_string(),
-            path: None,
-        });
+        let key = format!("dlc:{}", creator_dlc_code.to_ascii_lowercase());
+        if seen_keys.insert(key) {
+            resolved.push(ResolvedMod {
+                id: creator_dlc_code.to_string(),
+                path: None,
+            });
+        }
     }
 
     for addon in &enabled_addons {
         if let Some(addon_path) = resolve_child_dir_case_insensitive(Path::new(repo_path), addon) {
-            resolved.push(ResolvedMod {
-                id: addon.clone(),
-                path: Some(addon_path.to_string_lossy().to_string()),
-            });
+            let path_str = addon_path.to_string_lossy().to_string();
+            if seen_keys.insert(crate::core::utils::content_hash::normalize_path(&path_str)) {
+                resolved.push(ResolvedMod {
+                    id: addon.clone(),
+                    path: Some(path_str),
+                });
+            }
         } else if let Some(arma3_addon_path) =
             resolve_child_dir_case_insensitive(Path::new(arma3_directory), addon)
         {
-            resolved.push(ResolvedMod {
-                id: addon.clone(),
-                path: Some(arma3_addon_path.to_string_lossy().to_string()),
-            });
+            let path_str = arma3_addon_path.to_string_lossy().to_string();
+            if seen_keys.insert(crate::core::utils::content_hash::normalize_path(&path_str)) {
+                resolved.push(ResolvedMod {
+                    id: addon.clone(),
+                    path: Some(path_str),
+                });
+            }
         } else {
             log::error!(
                 "Addon not found in repository or Arma 3 directory: {}",
@@ -434,10 +444,13 @@ fn resolve_launch_mods(repo: &Repository, arma3_directory: &str) -> Vec<Resolved
 
     for (addon, _, path) in enabled_external_addons {
         if let Some(external_path) = resolve_external_launch_addon_path(addon, path) {
-            resolved.push(ResolvedMod {
-                id: addon.clone(),
-                path: Some(external_path.to_string_lossy().to_string()),
-            });
+            let path_str = external_path.to_string_lossy().to_string();
+            if seen_keys.insert(crate::core::utils::content_hash::normalize_path(&path_str)) {
+                resolved.push(ResolvedMod {
+                    id: addon.clone(),
+                    path: Some(path_str),
+                });
+            }
         } else {
             log::error!(
                 "External addon not found at configured path: addon={} path={}",
@@ -623,6 +636,40 @@ mod tests {
             resolved,
             vec![ResolvedMod {
                 id: "@client_mod".to_string(),
+                path: Some(addon_dir.to_string_lossy().to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn resolve_launch_mods_deduplicates_same_folder_across_repo_and_external_addons() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let addon_dir = dir.path().join("@mod_01");
+        std::fs::create_dir(&addon_dir).expect("addon dir");
+        let repo = Repository {
+            path: dir.path().to_string_lossy().to_string(),
+            addons: vec![("@mod_01".to_string(), true)],
+            external_addons: vec![
+                (
+                    "@mod_01".to_string(),
+                    true,
+                    dir.path().to_string_lossy().to_string(),
+                ),
+                (
+                    "@mod_01".to_string(),
+                    true,
+                    addon_dir.to_string_lossy().to_string(),
+                ),
+            ],
+            ..Repository::default()
+        };
+
+        let resolved = resolve_launch_mods(&repo, "");
+
+        assert_eq!(
+            resolved,
+            vec![ResolvedMod {
+                id: "@mod_01".to_string(),
                 path: Some(addon_dir.to_string_lossy().to_string()),
             }]
         );

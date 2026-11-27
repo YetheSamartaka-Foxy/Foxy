@@ -191,15 +191,30 @@ impl Foxy {
             self.launch_action.receiver = None;
             match outcome {
                 Ok(handoff) => {
-                    if let Some(request) = self.launch_action.request.take() {
+                    let launch_mode = if let Some(request) = self.launch_action.request.take() {
                         self.mark_repository_launched(
                             &request.repository.address,
                             &request.repository.path,
                         );
-                    }
+                        if request.mission_path.is_some() {
+                            "editor"
+                        } else if request.server.is_some() {
+                            "join"
+                        } else {
+                            "launch"
+                        }
+                    } else {
+                        "launch"
+                    };
                     self.launch_action.handoff_generation =
                         self.launch_action.handoff_generation.wrapping_add(1);
-                    log::info!("Launch command handoff accepted (pid={})", handoff.pid);
+                    log::info!(
+                        "Launch command handoff accepted (pid={}, mode={}, mods={}): [{}]",
+                        handoff.pid,
+                        launch_mode,
+                        handoff.mod_ids.len(),
+                        handoff.mod_ids.join("; ")
+                    );
                     self.show_success_toast(self.t("Launch request sent."));
                     self.handle_post_launch_window_behavior(ctx, "launch command handed off");
                 }

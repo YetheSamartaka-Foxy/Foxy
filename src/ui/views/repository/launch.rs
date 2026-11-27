@@ -841,6 +841,22 @@ impl Foxy {
         }
         if keep_suggestions {
             self.persist_saved_join_preflight_selections(&pending);
+            info!(
+                "Applying join preflight selections for repository {} server {}:{}: suggestions={}, ambiguous={}, known_remote={}, extra_disabled={}, dlc_enable={}, dlc_disable={}",
+                pending.repo_name,
+                pending.server.address,
+                pending.server.port,
+                pending.suggestions.iter().filter(|s| s.selected).count(),
+                pending
+                    .ambiguous
+                    .iter()
+                    .filter(|a| a.selected_candidate.is_some())
+                    .count(),
+                pending.known_remote.iter().filter(|r| r.selected).count(),
+                pending.extra_enabled.iter().filter(|e| !e.selected).count(),
+                pending.dlc_enable.iter().filter(|d| d.selected).count(),
+                pending.dlc_disable.iter().filter(|d| d.selected).count()
+            );
         }
         let repository = if keep_suggestions {
             Self::repository_with_join_preflight_selections(&pending)

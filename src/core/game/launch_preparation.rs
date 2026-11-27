@@ -42,6 +42,7 @@ pub(crate) struct LaunchHandoff {
     pub pid: u32,
     pub extra_files: extra_files::ActivationSummary,
     pub command: LaunchCommand,
+    pub mod_ids: Vec<String>,
     pub steam_status: Option<crate::core::steam::SteamEnsureResult>,
 }
 
@@ -549,6 +550,7 @@ fn dispatch_plan_in_space(
                 pid,
                 extra_files: activation,
                 command,
+                mod_ids: plan.mods.iter().map(|entry| entry.id.clone()).collect(),
                 steam_status: None,
             })
         }
